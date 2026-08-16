@@ -1,0 +1,17 @@
+# 打包时忽略的内容（vsce package 使用）
+.vscode/**
+.vscode-test/**
+src/**
+shared/**
+media/**
+scripts/**
+daemon/**
+node_modules/@types/**
+node_modules/esbuild/**
+node_modules/typescript/**
+esbuild.js
+tsconfig.json
+*.map
+.gitignore
+PROTOCOL.md
+README.md

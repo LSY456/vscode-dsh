@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src __CSS_URI__; script-src 'nonce-__NONCE__'; img-src data:;"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="__CSS_URI__" />
+  <title>dsh Agent</title>
+</head>
+<body>
+  <header id="header">
+    <div class="brand">dsh <span class="brand-sub">Agent</span></div>
+    <div id="status" class="status connecting">连接中…</div>
+  </header>
+
+  <main id="main">
+    <div id="empty" class="empty">
+      <div class="empty-title">dsh Agent</div>
+      <div class="empty-hint">
+        基于当前编辑器上下文（活动文件 / 选区 / 诊断 / git 状态）与 dsh Agent Daemon 对话。
+        <br />示例：<em>“请修改 src/foo.ts 中的 TODO”</em>（触发原生 Diff 审查）
+        <br />示例：<em>“危险操作：运行 bash rm -rf”</em>（触发工具审批卡）
+      </div>
+    </div>
+    <div id="messages"></div>
+    <details id="trajectory-box" hidden>
+      <summary>执行迹线（Trajectory）</summary>
+      <div id="trajectory"></div>
+    </details>
+  </main>
+
+  <div id="toolbar">
+    <span id="session-id" class="muted"></span>
+    <span class="spacer"></span>
+    <button id="btn-clear" class="ghost" title="清空当前视图">清空</button>
+  </div>
+
+  <footer id="composer">
+    <textarea id="input" rows="3" placeholder="输入 Prompt：Enter 发送，Shift+Enter 换行"></textarea>
+    <div class="composer-actions">
+      <button id="btn-cancel" class="ghost" hidden>取消</button>
+      <button id="btn-send" class="primary">发送</button>
+    </div>
+  </footer>
+
+  <script nonce="__NONCE__" src="__JS_URI__"></script>
+</body>
+</html>

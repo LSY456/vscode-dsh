@@ -1,0 +1,153 @@
+{
+  "name": "vscode-dsh",
+  "displayName": "dsh · DeepSeek Harness Agent for VSCode",
+  "description": "VSCode 与 dsh Agent Daemon 的联动：上下文捕获、流式推理、工具审批与原生 Diff 审查。",
+  "version": "0.1.0",
+  "publisher": "deepseek-ai",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "activationEvents": [
+    "onCommand:dsh.openPanel",
+    "onCommand:dsh.sendSelection",
+    "onCommand:dsh.daemon.restart",
+    "onCommand:dsh.daemon.status",
+    "onCommand:dsh.debug.captureContext"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dsh.openPanel",
+        "title": "dsh: 打开 Agent 面板"
+      },
+      {
+        "command": "dsh.sendSelection",
+        "title": "dsh: 将选中代码发送给 Agent"
+      },
+      {
+        "command": "dsh.daemon.restart",
+        "title": "dsh: 重启 Daemon"
+      },
+      {
+        "command": "dsh.daemon.status",
+        "title": "dsh: 查看 Daemon 状态"
+      },
+      {
+        "command": "dsh.diff.accept",
+        "title": "dsh: 应用此补丁",
+        "icon": "$(check)"
+      },
+      {
+        "command": "dsh.diff.reject",
+        "title": "dsh: 拒绝此补丁",
+        "icon": "$(x)"
+      },
+      {
+        "command": "dsh.debug.captureContext",
+        "title": "dsh: 调试 - 打印捕获的上下文"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "dsh.sendSelection",
+          "when": "editorHasSelection",
+          "group": "navigation@100"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "dsh Agent",
+      "properties": {
+        "dsh.daemon.mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "external",
+            "none"
+          ],
+          "enumDescriptions": [
+            "自动：探测已有 daemon，否则拉起内置参考 daemon",
+            "外部：连接一个已在运行的手动启动的 daemon（需配置 port/token）",
+            "不启动 daemon，仅 UI（调试用）"
+          ],
+          "default": "auto",
+          "description": "dsh daemon 的运行模式。"
+        },
+        "dsh.daemon.command": {
+          "type": "string",
+          "default": "",
+          "description": "外部 daemon 启动命令模板（auto 模式也优先使用它）。留空则使用插件内置的参考 daemon。"
+        },
+        "dsh.daemon.port": {
+          "type": "number",
+          "default": 0,
+          "description": "external 模式下的 daemon 端口（0 表示从端口文件中读取）。"
+        },
+        "dsh.daemon.token": {
+          "type": "string",
+          "default": "",
+          "description": "external 模式下的握手令牌。留空时使用插件生成的随机令牌（需与 daemon 端一致）。"
+        },
+        "dsh.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "传给 daemon 的模型 API Key（daemon 端可忽略）。"
+        },
+        "dsh.preset": {
+          "type": "string",
+          "default": "default",
+          "description": "daemon 端使用的 Agent 预设名。"
+        },
+        "dsh.context.gitStatus": {
+          "type": "boolean",
+          "default": true,
+          "description": "发送 Prompt 时附带 git status 摘要（需要 git 可用，失败则静默跳过）。"
+        },
+        "dsh.context.maxFileBytes": {
+          "type": "number",
+          "default": 200000,
+          "description": "作为附件发送的文件内容上限（字节），超出部分截断。"
+        },
+        "dsh.diff.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "daemon 发出 file.patch.pending 时自动打开原生 Diff 视图。"
+        },
+        "dsh.log.level": {
+          "type": "string",
+          "enum": [
+            "info",
+            "debug"
+          ],
+          "default": "info",
+          "description": "扩展日志级别。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:check": "npm run typecheck && npm run build",
+    "smoke": "node esbuild.js && node scripts/smoke.js",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "esbuild": "^0.23.1",
+    "typescript": "^5.5.4"
+  }
+}
