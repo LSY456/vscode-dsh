@@ -15,7 +15,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { EVENTS, EventFilePatchPending, EventFilePatchResult, METHODS } from '../shared/protocol';
+import { ERROR_CODES, EVENTS, EventFilePatchPending, EventFilePatchResult, METHODS } from '../shared/protocol';
 import { captureContext } from './contextCapture';
 import { DaemonManager } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
@@ -137,9 +137,18 @@ export class WebviewPanelHost {
             approved: !!msg.approved,
           });
         } catch (err) {
-          void vscode.window.showErrorMessage(
-            `审批回传失败: ${err instanceof Error ? err.message : String(err)}`
-          );
+          const code = (err as { code?: number } | null)?.code;
+          if (code === ERROR_CODES.Expired) {
+            // 审批已过期：通知 Webview 将卡片标记为过期并置灰
+            this.post({ kind: 'event', method: 'approval.expired', params: { approvalId: msg.approvalId } });
+            void vscode.window.showWarningMessage('审批已过期（60s 未响应），按拒绝处理');
+          } else if (code === ERROR_CODES.NotFound) {
+            this.post({ kind: 'event', method: 'approval.expired', params: { approvalId: msg.approvalId } });
+          } else {
+            void vscode.window.showErrorMessage(
+              `审批回传失败: ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
         }
         return;
       }

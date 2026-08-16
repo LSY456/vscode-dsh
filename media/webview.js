@@ -23,6 +23,7 @@
   const toolCards = new Map(); // tool -> card element
   const patchCards = new Map(); // patchId -> card element
   const approvalCards = new Map(); // approvalId -> card element
+  const approvalTimers = new Map(); // approvalId -> interval id
 
   // -------------------------------------------------------------------------
   // DOM 工具
@@ -158,17 +159,57 @@
     card.appendChild(body);
     card.appendChild(el('div', '', p.reason || ''));
 
+    // 过期倒计时（P1.1）：expiresAt 到达后自动置灰
+    let timerInfo = null;
+    if (p.expiresAt) {
+      const countdown = el('div', 'muted', '');
+      card.appendChild(countdown);
+      const tick = () => {
+        const remain = Math.max(0, Math.ceil((p.expiresAt - Date.now()) / 1000));
+        if (remain <= 0) {
+          countdown.textContent = '⏱ 已过期（按拒绝处理）';
+          markExpired();
+          clearInterval(interval);
+          approvalTimers.delete(p.approvalId);
+          return;
+        }
+        countdown.textContent = '⏱ 剩余 ' + remain + 's';
+      };
+      const interval = setInterval(tick, 1000);
+      approvalTimers.set(p.approvalId, interval);
+      tick();
+      timerInfo = { countdown, interval };
+    }
+
     const actions = el('div', 'card-actions');
     const btnReject = el('button', 'danger', '拒绝');
     const btnAccept = el('button', 'ok-btn', '接受');
+    function markExpired() {
+      btnAccept.disabled = btnReject.disabled = true;
+      const badge = card.querySelector('.badge');
+      if (badge) {
+        badge.className = 'badge err';
+        badge.textContent = 'expired';
+      }
+      if (timerInfo) timerInfo.countdown.textContent = '⏱ 已过期（按拒绝处理）';
+    }
     btnReject.addEventListener('click', () => {
       vscode.postMessage({ kind: 'approval.respond', approvalId: p.approvalId, approved: false });
       btnAccept.disabled = btnReject.disabled = true;
+      stopTimer();
     });
     btnAccept.addEventListener('click', () => {
       vscode.postMessage({ kind: 'approval.respond', approvalId: p.approvalId, approved: true });
       btnAccept.disabled = btnReject.disabled = true;
+      stopTimer();
     });
+    function stopTimer() {
+      const t = approvalTimers.get(p.approvalId);
+      if (t) {
+        clearInterval(t);
+        approvalTimers.delete(p.approvalId);
+      }
+    }
     actions.appendChild(btnReject);
     actions.appendChild(btnAccept);
     card.appendChild(actions);
@@ -176,7 +217,31 @@
     approvalCards.set(p.approvalId, card);
   }
 
+  function expireApprovalCard(approvalId) {
+    const card = approvalCards.get(approvalId);
+    const t = approvalTimers.get(approvalId);
+    if (t) {
+      clearInterval(t);
+      approvalTimers.delete(approvalId);
+    }
+    if (card) {
+      const badge = card.querySelector('.badge');
+      if (badge) {
+        badge.className = 'badge err';
+        badge.textContent = '已过期';
+      }
+      const countdown = card.querySelector('.muted');
+      if (countdown) countdown.textContent = '⏱ 已过期（按拒绝处理）';
+      card.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    }
+  }
+
   function removeApprovalCard(approvalId) {
+    const t = approvalTimers.get(approvalId);
+    if (t) {
+      clearInterval(t);
+      approvalTimers.delete(approvalId);
+    }
     const card = approvalCards.get(approvalId);
     if (card) {
       card.querySelectorAll('button').forEach((b) => (b.disabled = true));
@@ -285,6 +350,9 @@
       case 'approval.request':
         addApprovalCard(params);
         break;
+      case 'approval.expired':
+        expireApprovalCard(params.approvalId);
+        break;
       case 'approval.responded':
         removeApprovalCard(params.approvalId);
         break;
@@ -354,6 +422,8 @@
     toolCards.clear();
     patchCards.clear();
     approvalCards.clear();
+    for (const t of approvalTimers.values()) clearInterval(t);
+    approvalTimers.clear();
     reasoningEl = null;
     assistantEl = null;
     sessionEl.textContent = '';

@@ -46,10 +46,29 @@ export const METHODS = {
   SessionCreate: 'session.create',
   SessionSend: 'session.send',
   SessionCancel: 'session.cancel',
+  SessionResume: 'session.resume',
   ApprovalRespond: 'approval.respond',
   FilePatchRespond: 'file.patch.respond',
+  FileRead: 'file.read',
   Ping: 'ping',
   Shutdown: 'shutdown',
+} as const;
+
+// 协议错误码常量
+export const ERROR_CODES = {
+  ParseError: -32700,
+  InvalidRequest: -32600,
+  MethodNotFound: -32601,
+  InvalidParams: -32602,
+  InternalError: -32603,
+  /** 同一会话正在运行中（或并发达到上限） */
+  Busy: -32009,
+  /** 审批/补丁已过期（超过 expiresAt） */
+  Expired: -32010,
+  /** 目标路径不在工作区（或 allowedDirs）内 */
+  PathOutsideWorkspace: -32012,
+  /** 会话 / 审批 / 补丁不存在 */
+  NotFound: -32013,
 } as const;
 
 // 协议事件名常量（服务端 -> 客户端通知）
@@ -79,6 +98,15 @@ export interface InitializeParams {
   apiKey?: string;
   /** Agent 预设名 */
   preset?: string;
+  /** 客户端声明的能力诉求（daemon 端按需收紧） */
+  capabilities?: {
+    /** 允许使用的工具白名单；缺省/空数组 = 全部允许 */
+    allowedTools?: string[];
+    /** 允许访问的目录白名单；缺省 = 仅工作区根 */
+    allowedDirs?: string[];
+    /** 全局并发会话上限；0 = 不限制 */
+    maxConcurrency?: number;
+  };
   client: {
     name: string;
     version: string;
@@ -94,7 +122,11 @@ export interface InitializeResult {
     filePatches: boolean;
     sessions: boolean;
     trajectory: boolean;
+    resume: boolean;
+    fileRead: boolean;
   };
+  /** daemon 为本次连接分配/复用的默认会话 id */
+  sessionId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +156,10 @@ export interface Attachment {
   language?: string;
   /** 显示名称（如文件名） */
   name?: string;
-  /** 文件/选区内容 */
+  /** 文件/选区内容；大文件可省略并以 contentOmitted 标记，daemon 按需 file.read */
   content?: string;
+  /** 内容因过大被省略，daemon 可通过 file.read 按需读取 */
+  contentOmitted?: boolean;
   /** 选区行区间（1-based，含） */
   range?: {
     startLine: number;
@@ -162,6 +196,48 @@ export interface SessionSendResult {
 
 export interface SessionCancelParams {
   sessionId: string;
+}
+
+/** 会话运行状态（断线续跑 / UI 状态同步用） */
+export type SessionState = 'idle' | 'running' | 'pending_approval' | 'pending_patch';
+
+export interface SessionResumeParams {
+  sessionId: string;
+}
+
+export interface SessionResumeResult {
+  sessionId: string;
+  state: SessionState;
+  /** 若处于 pending_approval，携带待审批快照 */
+  pendingApproval?: {
+    approvalId: string;
+    expiresAt: number;
+    tool: string;
+    input: Record<string, unknown>;
+    risk: 'low' | 'medium' | 'high';
+    reason: string;
+  };
+  /** 若处于 pending_patch，携带待审查补丁快照 */
+  pendingPatch?: {
+    patchId: string;
+    expiresAt: number;
+    path: string;
+    oldContent?: string;
+    newContent: string;
+    description?: string;
+  };
+}
+
+export interface FileReadParams {
+  /** 待读取文件的绝对路径（须位于工作区 / allowedDirs 内） */
+  path: string;
+  maxBytes?: number;
+}
+
+export interface FileReadResult {
+  content: string;
+  truncated: boolean;
+  size: number;
 }
 
 // ---------------------------------------------------------------------------

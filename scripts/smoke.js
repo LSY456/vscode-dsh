@@ -1,13 +1,18 @@
 'use strict';
 
 /**
- * 端到端冒烟测试（不依赖 VSCode）：
- *  - 拉起参考 daemon（out/daemon/index.js，随机端口 + token）
- *  - 校验安全握手：无 token / 带浏览器 Origin 均被拒绝
- *  - initialize -> session.create -> session.send
- *  - 补丁流程：file.patch.pending -> 接受 -> file.patch.result -> 磁盘内容已变更
+ * 端到端冒烟测试（不依赖 VSCode）。
+ *
+ * 覆盖（P0/P1）：
+ *  - 安全握手：无 token / 带浏览器 Origin 均被拒绝
+ *  - initialize 返回 sessionId 与能力声明（resume/fileRead）
+ *  - 能力分级：allowedTools 为空时高危工具直接禁用（不发审批）
+ *  - 补丁流程：file.patch.pending -> 接受 -> file.patch.result -> 磁盘已变更
  *  - 审批流程：approval.request -> 批准 -> tool.executed
- *  - 取消流程：slow 输出中 session.cancel -> session.ended(canceled)
+ *  - 多会话并发：同一连接两个会话并行（不再 -32009）
+ *  - 取消流程：slow 中 session.cancel -> session.ended(canceled)
+ *  - 断线续跑：断开后 session.resume 重放事件并返回状态
+ *  - file.read：工作区内可读 / 越界返回 -32012
  *  - ping / shutdown
  *
  * 运行：node scripts/smoke.js（需先 npm run build）
@@ -81,8 +86,13 @@ function makeRpc(ws) {
       const p = pending.get(msg.id);
       if (p) {
         pending.delete(msg.id);
-        if (msg.error) p.reject(new Error(msg.error.message + ' (code ' + msg.error.code + ')'));
-        else p.resolve(msg.result);
+        if (msg.error) {
+          const err = new Error(msg.error.message + ' (code ' + msg.error.code + ')');
+          err.code = msg.error.code;
+          p.reject(err);
+        } else {
+          p.resolve(msg.result);
+        }
       }
     } else {
       events.push(msg);
@@ -107,11 +117,13 @@ function makeRpc(ws) {
     resetEvents() {
       events.length = 0;
     },
-    waitFor(pred, label, timeoutMs) {
+    /** 从指定索引之后等待事件（续跑场景避免匹配重放的历史事件）。 */
+    waitFor(pred, label, timeoutMs, startIndex) {
+      const minIndex = startIndex || 0;
       return new Promise((resolve, reject) => {
-        const found = events.find(pred);
+        const found = events.slice(minIndex).find(pred);
         if (found) return resolve(found);
-        const entry = { pred, resolve };
+        const entry = { pred, resolve, minIndex };
         waiters.push(entry);
         setTimeout(() => {
           const i = waiters.indexOf(entry);
@@ -123,6 +135,16 @@ function makeRpc(ws) {
   };
 }
 
+/** 建立连接 + rpc，并完成 initialize 握手。 */
+async function openSession(port, initializeParams) {
+  const ws = await connect('ws://127.0.0.1:' + port, {
+    headers: { Authorization: 'Bearer ' + TOKEN },
+  });
+  const rpc = makeRpc(ws);
+  const init = await rpc.request('initialize', initializeParams);
+  return { ws, rpc, init };
+}
+
 async function main() {
   if (!fs.existsSync(DAEMON_SCRIPT)) {
     console.error('未找到 ' + DAEMON_SCRIPT + '，请先运行 npm run build');
@@ -132,8 +154,10 @@ async function main() {
   // ---- 0. 准备工作区与样例文件
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-smoke-'));
   const samplePath = path.join(tmpDir, 'sample.txt');
+  const sample2Path = path.join(tmpDir, 'sample2.txt');
   const original = 'line1\nTODO: fix bug\nline3\n';
   fs.writeFileSync(samplePath, original, 'utf8');
+  fs.writeFileSync(sample2Path, original, 'utf8');
   console.log('[smoke] 临时目录:', tmpDir);
 
   // ---- 1. 拉起 daemon
@@ -173,23 +197,43 @@ async function main() {
     '带浏览器 Origin 应被拒绝'
   );
 
-  // ---- 3. 正常连接 + initialize
+  // ---- 3. 能力分级：仅允许 read_file（bash_execute 被禁用）
+  console.log('[smoke] 能力分级…');
+  const connDisabled = await openSession(port, {
+    workspaceRoot: tmpDir,
+    capabilities: { allowedTools: ['read_file'] },
+    client: { name: 'smoke', version: '0.0.0' },
+  });
+  assert(connDisabled.init.sessionId, 'initialize 返回 sessionId');
+  assert(connDisabled.init.capabilities.resume === true, '能力声明包含 resume');
+  assert(connDisabled.init.capabilities.fileRead === true, '能力声明包含 fileRead');
+  connDisabled.rpc.resetEvents();
+  await connDisabled.rpc.request('session.send', {
+    sessionId: connDisabled.init.sessionId,
+    prompt: '危险操作：bash rm -rf（danger）',
+  });
+  const disabledTool = await connDisabled.rpc.waitFor(
+    (m) => m.method === 'tool.executed' && m.params.tool === 'bash_execute',
+    '禁用工具 tool.executed'
+  );
+  assert(disabledTool.params.ok === false, '禁用工具执行失败（ok:false）');
+  assert(
+    !connDisabled.rpc.events.some((m) => m.method === 'approval.request'),
+    '禁用工具不发起审批'
+  );
+  await connDisabled.rpc.waitFor((m) => m.method === 'session.ended', '禁用流程结束');
+  connDisabled.ws.close();
+
+  // ---- 4. 主连接：默认能力
   console.log('[smoke] 握手…');
-  const ws = await connect(url, { headers: { Authorization: 'Bearer ' + TOKEN } });
-  const rpc = makeRpc(ws);
-  const init = await rpc.request('initialize', {
+  const { rpc, ws, init } = await openSession(port, {
     workspaceRoot: tmpDir,
     preset: 'default',
     client: { name: 'smoke', version: '0.0.0' },
   });
-  assert(init && init.protocolVersion === '1.0', 'initialize 返回协议版本 1.0');
-  assert(init && init.capabilities.streaming && init.capabilities.filePatches, '能力声明完整');
+  const sessionId = init.sessionId;
 
-  const created = await rpc.request('session.create', {});
-  assert(created && typeof created.sessionId === 'string' && created.sessionId, 'session.create 返回 sessionId');
-  const sessionId = created.sessionId;
-
-  // ---- 4. 补丁流程
+  // ---- 5. 补丁流程
   console.log('[smoke] 补丁流程…');
   rpc.resetEvents();
   await rpc.request('session.send', {
@@ -222,7 +266,7 @@ async function main() {
   assert(!!trajPatch, '迹线记录包含 patch 步骤');
   await rpc.waitFor((m) => m.method === 'session.ended', '补丁流程结束', 10000);
 
-  // ---- 5. 审批流程
+  // ---- 6. 审批流程
   console.log('[smoke] 审批流程…');
   rpc.resetEvents();
   await rpc.request('session.send', {
@@ -245,26 +289,91 @@ async function main() {
   assert(toolDone.params.ok === true, '批准后工具执行成功');
   await rpc.waitFor((m) => m.method === 'session.ended', '审批流程结束', 10000);
 
-  // ---- 6. 取消流程
-  console.log('[smoke] 取消流程…');
+  // ---- 7. 多会话并发（P1.5）：同一连接两个会话并行
+  console.log('[smoke] 多会话并发…');
   rpc.resetEvents();
-  await rpc.request('session.send', { sessionId, prompt: 'slow 输出测试，请慢慢回复（slow）' });
-  await rpc.waitFor((m) => m.method === 'message.delta', '首条 message.delta');
+  await rpc.request('session.send', { sessionId, prompt: 'slow 输出测试（slow）' });
+  const sessionB = (await rpc.request('session.create', {})).sessionId;
+  assert(sessionB && sessionB !== sessionId, '创建第二个会话');
+  await rpc.request('session.send', {
+    sessionId: sessionB,
+    prompt: '请修改 sample2 中的 TODO（write edit）',
+    attachments: [
+      {
+        kind: 'file',
+        path: sample2Path,
+        name: 'sample2.txt',
+        content: original,
+      },
+    ],
+  });
+  const patchB = await rpc.waitFor(
+    (m) => m.method === 'file.patch.pending' && m.params.path === sample2Path,
+    '会话B补丁'
+  );
+  await rpc.request('file.patch.respond', { sessionId: sessionB, patchId: patchB.params.patchId, accept: true });
+  await rpc.waitFor(
+    (m) => m.method === 'session.ended' && m.params.sessionId === sessionB,
+    '会话B结束'
+  );
+  assert(fs.readFileSync(sample2Path, 'utf8').includes('DONE'), '会话B补丁已落盘');
   await rpc.request('session.cancel', { sessionId });
-  const ended = await rpc.waitFor((m) => m.method === 'session.ended', 'session.ended', 10000);
-  if (ended.params.reason !== 'canceled') {
-    console.error('[smoke] DEBUG session.ended params:', JSON.stringify(ended.params));
-    console.error('[smoke] DEBUG events:', JSON.stringify(rpc.events.map((e) => e.method)));
+  const endedA = await rpc.waitFor(
+    (m) => m.method === 'session.ended' && m.params.sessionId === sessionId,
+    '会话A取消结束'
+  );
+  assert(endedA.params.reason === 'canceled', '并发场景下会话A取消成功');
+
+  // ---- 8. 断线续跑（P1.2）：session.resume 重放事件
+  console.log('[smoke] 断线续跑…');
+  rpc.resetEvents();
+  await rpc.request('session.send', { sessionId, prompt: 'slow 输出测试（slow）' });
+  await rpc.waitFor((m) => m.method === 'message.delta', '首条 message.delta');
+  ws.close(); // 模拟断线（daemon 侧会话继续运行并缓冲事件）
+
+  const conn2 = await openSession(port, {
+    workspaceRoot: tmpDir,
+    client: { name: 'smoke', version: '0.0.0' },
+  });
+  const resumed = await conn2.rpc.request('session.resume', { sessionId });
+  assert(resumed.sessionId === sessionId, 'resume 返回原会话');
+  assert(['running', 'idle'].includes(resumed.state), 'resume 返回有效状态: ' + resumed.state);
+  assert(
+    conn2.rpc.events.some((m) => m.method === 'session.started' && m.params.sessionId === sessionId),
+    'resume 重放包含 session.started'
+  );
+  if (resumed.state === 'running') {
+    // 重放已在 resume 响应前完成；从当前索引之后等待"实时"事件，避免匹配历史 session.ended
+    const base = conn2.rpc.events.length;
+    await conn2.rpc.request('session.cancel', { sessionId });
+    const endedResume = await conn2.rpc.waitFor(
+      (m) => m.method === 'session.ended' && m.params.sessionId === sessionId,
+      '续跑会话取消',
+      10000,
+      base
+    );
+    assert(endedResume.params.reason === 'canceled', '续跑会话可正常取消');
   }
-  assert(ended.params.reason === 'canceled', '取消后 session.ended(reason=canceled)');
 
-  // ---- 7. ping / shutdown
-  const pong = await rpc.request('ping', {});
+  // ---- 9. file.read（P1.6）：工作区内可读 / 越界拒绝
+  console.log('[smoke] file.read…');
+  const readOk = await conn2.rpc.request('file.read', { path: samplePath });
+  assert(readOk.content.includes('line1'), 'file.read 工作区内读取成功');
+  let readRejected = false;
+  try {
+    await conn2.rpc.request('file.read', { path: path.join(tmpDir, '..', 'secret.txt') });
+  } catch (err) {
+    readRejected = err.code === -32012;
+  }
+  assert(readRejected, 'file.read 越界返回 -32012');
+
+  // ---- 10. ping / shutdown
+  const pong = await conn2.rpc.request('ping', {});
   assert(pong && typeof pong.pong === 'number', 'ping/pong 正常');
-  await rpc.request('shutdown', {});
-  ws.close();
+  await conn2.rpc.request('shutdown', {});
+  conn2.ws.close();
 
-  // ---- 8. 清理
+  // ---- 11. 清理
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   } catch {

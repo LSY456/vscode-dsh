@@ -39,20 +39,30 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 
 | method | params | result |
 | --- | --- | --- |
-| `initialize` | `{ workspaceRoot, apiKey?, preset?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities }` |
+| `initialize` | `{ workspaceRoot, apiKey?, preset?, capabilities?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities, sessionId? }` |
 | `session.create` | `{ id?, title? }` | `{ sessionId, title? }` |
 | `session.send` | `{ sessionId?, prompt, attachments? }` | `{ sessionId, accepted }` |
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
+| `session.resume` | `{ sessionId }` | `{ sessionId, state, pendingApproval?, pendingPatch? }` |
 | `approval.respond` | `{ sessionId, approvalId, approved, note? }` | `{ ok }` |
 | `file.patch.respond` | `{ sessionId, patchId, accept }` | `{ ok }` |
+| `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size }` |
 | `ping` | `{}` | `{ pong }` |
 | `shutdown` | `{}` | `{ bye }` |
+
+### `capabilities`（能力分级）
+
+`initialize.capabilities` 由客户端声明、daemon 端收紧执行：
+
+- `allowedTools?: string[]` —— 工具白名单；**缺省或空数组 = 全部允许**，非空 = 仅白名单内可用（越权工具直接以 `tool.executed { ok:false, output:'工具被禁用' }` 结束，不发起审批）。
+- `allowedDirs?: string[]` —— 目录白名单；缺省 = 仅工作区根。所有路径操作（patch / file.read / 附件读取）必须在工作区 ∩ allowedDirs 内，越界返回 `-32012`。
+- `maxConcurrency?: number` —— 全局并发会话上限；0 = 不限制。
 
 ### `attachments`（流程二：主动上下文捕获）
 
 VSCode 侧自动打包的结构化附件，`kind` 取值：
 
-- `file`：活动文件全文（`uri/path/language/name/content`）
+- `file`：活动文件全文（`uri/path/language/name/content`）；**大文件以 `contentOmitted: true` 省略内容**，daemon 按需 `file.read`（不再硬截断）。
 - `selection`：高亮选区（`content/range.startLine/endLine`）
 - `diagnostics`：`vscode.languages.getDiagnostics` 映射（`severity/message/range/source`）
 - `gitStatus`：`git status --short --branch` 输出
@@ -72,18 +82,34 @@ VSCode 侧自动打包的结构化附件，`kind` 取值：
 | `file.patch.result` | 补丁决策结果（accepted/applied/error） |
 | `trajectory.record` | 迹线步骤（step/kind/detail/ts） |
 | `session.ended` | 会话结束（reason: completed/canceled/error） |
-| `error` | 协议/运行错误 |
+| `error` | 协议/运行错误（code 取值见错误码表） |
 
-## 5. 审批与补丁的挂起-恢复状态机
+## 5. 会话状态机、审批/补丁挂起-恢复、续跑与心跳
+
+### 状态机
+
+每个会话独立维护状态：`idle -> running -> (pending_approval | pending_patch) -> running -> idle`
 
 ```
 session.send ──> (流式事件...) ──> approval.request ──挂起──> approval.respond ──> tool.executed ──> session.ended
                                 └─> file.patch.pending ──挂起──> file.patch.respond ──> file.patch.result ─┘
 ```
 
-- 挂起期间 daemon 暂停该会话的 Agent 循环；`approval.respond` / `file.patch.respond` 恢复执行。
-- 60s 无响应按拒绝处理；`session.cancel` 会把挂起的审批/补丁按拒绝解除并结束会话。
-- 同一连接同一时刻只允许一个运行中的会话（并发 `session.send` 返回 `-32009`）。
+- **并发**：状态为 `idle` 才允许 `session.send`（同一会话返回 `-32009 Busy`）；**不同会话可并行**（多会话并发）。
+- **挂起强校验**：`approval.respond` / `file.patch.respond` 校验 id 归属；不存在的 id 返回 `-32013 NotFound`；
+  超过 `expiresAt`（默认 60s）返回 `-32010 Expired`，且到点自动按"拒绝"解析以解除挂起。
+- **取消**：`session.cancel` 置 canceled 标记并将挂起项按拒绝解除，Agent 收尾发出 `session.ended(reason=canceled)`。
+
+### 断线续跑（session.resume）
+
+- daemon 为每个会话维护**事件环形缓冲**（默认 2000 条）：断线期间事件照常入缓冲（不丢失）。
+- 重连后客户端以原 `sessionId` 调用 `session.resume`：daemon **重放缓冲事件**并返回当前
+  `state` 与挂起快照（`pendingApproval` / `pendingPatch`，含 `expiresAt`），UI 据此恢复审批/补丁卡片。
+- daemon 进程重启后会话丢失，`resume` 返回 `-32013 NotFound`，客户端回退 `session.create` 新建会话。
+
+### 心跳
+
+客户端每 15s `ping`，连续 3 次无响应判定链路死亡并强制重连（重连后走 resume 恢复）。
 
 ## 6. 迹线（Trajectory）数据映射
 
@@ -98,8 +124,21 @@ session.send ──> (流式事件...) ──> approval.request ──挂起─�
 VSCode 侧将轨迹渲染为可折叠的"执行迹线"面板，并可据此实现审计、回放与失败定位；
 真实 daemon 的持久化轨迹存储（如 JSONL/DB）与此事件流一一对应，字段可扩展但不得删除现有语义。
 
-## 7. 扩展建议
+## 7. 错误码
+
+| code | 名称 | 含义 |
+| --- | --- | --- |
+| `-32700` | ParseError | JSON 解析失败 |
+| `-32600` | InvalidRequest | 非法的 JSON-RPC 消息 |
+| `-32601` | MethodNotFound | 方法不存在 |
+| `-32602` | InvalidParams | 参数错误 |
+| `-32603` | InternalError | 服务端内部错误 |
+| `-32009` | Busy | 同一会话正在运行中 / 并发达上限 |
+| `-32010` | Expired | 审批或补丁已过期（超过 expiresAt） |
+| `-32012` | PathOutsideWorkspace | 目标路径越界（工作区 / allowedDirs） |
+| `-32013` | NotFound | 会话 / 审批 / 补丁不存在 |
+
+## 8. 扩展建议
 
 - 客户端通知（无 `id` 的请求）为协议预留位，可用于上报编辑器事件（如文件切换）以实现被动上下文注入。
-- 如需多会话并发，可在 `session.send` 增加 `concurrency` 能力位并放宽 `-32009` 限制。
-- 真实 daemon（Cordis 动态插件版）须实现同一方法/事件名与上述挂起-恢复语义。
+- 真实 daemon（Cordis 动态插件版）须实现同一方法/事件名、上述错误码与挂起-恢复、续跑语义。

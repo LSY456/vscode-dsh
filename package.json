@@ -5,6 +5,10 @@
   "version": "0.1.0",
   "publisher": "deepseek-ai",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LSY456/vscode-dsh.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -128,6 +132,20 @@
           ],
           "default": "info",
           "description": "扩展日志级别。"
+        },
+        "dsh.capabilities.allowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "允许 daemon 使用的工具白名单（如 bash_execute）；空数组 = 全部允许。"
+        },
+        "dsh.capabilities.maxConcurrency": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "daemon 全局并发会话上限；0 = 不限制。"
         }
       }
     }
@@ -137,7 +155,11 @@
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:check": "npm run typecheck && npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "smoke": "node esbuild.js && node scripts/smoke.js",
+    "check": "npm run typecheck && npm run build && npm test && npm run smoke",
+    "package": "vsce package --out dist",
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {
@@ -147,7 +169,9 @@
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.10",
+    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.23.1",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^4.1.10"
   }
 }

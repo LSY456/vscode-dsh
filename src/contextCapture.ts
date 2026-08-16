@@ -31,15 +31,26 @@ export async function captureContext(opts?: CaptureOptions): Promise<Attachment[
   if (editor) {
     const doc = editor.document;
     const text = doc.getText();
-    const content = truncate(text, maxFileBytes);
-    attachments.push({
-      kind: 'file',
-      uri: doc.uri.toString(),
-      path: doc.uri.fsPath,
-      language: doc.languageId,
-      name: fileName(doc.uri),
-      content,
-    });
+    if (text.length > maxFileBytes) {
+      // 大文件（P1.6）：省略内容，daemon 可按需 file.read
+      attachments.push({
+        kind: 'file',
+        uri: doc.uri.toString(),
+        path: doc.uri.fsPath,
+        language: doc.languageId,
+        name: fileName(doc.uri),
+        contentOmitted: true,
+      });
+    } else {
+      attachments.push({
+        kind: 'file',
+        uri: doc.uri.toString(),
+        path: doc.uri.fsPath,
+        language: doc.languageId,
+        name: fileName(doc.uri),
+        content: text,
+      });
+    }
 
     const sel = editor.selection;
     if (!sel.isEmpty) {
@@ -170,9 +181,4 @@ function getGitStatus(): Promise<string | null> {
 
 function fileName(uri: vscode.Uri): string {
   return path.basename(uri.fsPath || uri.path) || 'untitled';
-}
-
-function truncate(text: string, maxBytes: number): string {
-  if (text.length <= maxBytes) return text;
-  return text.slice(0, maxBytes) + '\n…[已截断，共 ' + text.length + ' 字符]';
 }

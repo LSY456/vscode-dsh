@@ -14,6 +14,7 @@ import {
   JsonRpcNotification,
   JsonRpcRequest,
   JsonRpcResponse,
+  METHODS,
 } from '../shared/protocol';
 
 export interface DshClientOptions {
@@ -39,6 +40,8 @@ export class DshClient {
   private errorListeners = new Set<Listener<Error>>();
 
   private closedByUs = false;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private heartbeatInFlight = false;
 
   constructor(opts: DshClientOptions) {
     this.url = opts.url;
@@ -149,6 +152,7 @@ export class DshClient {
 
   close(): void {
     this.closedByUs = true;
+    this.stopHeartbeat();
     this.rejectAllPending(new Error('客户端主动关闭'));
     if (this.ws) {
       try {
@@ -157,6 +161,44 @@ export class DshClient {
         /* ignore */
       }
       this.ws = null;
+    }
+  }
+
+  /**
+   * 心跳（P1.2）：周期性 ping，连续失败超过阈值判定链路死亡，
+   * 由调用方决定是否关闭并重连（通过 onDead 回调）。
+   */
+  startHeartbeat(opts: { intervalMs?: number; timeoutMs?: number; maxMisses?: number; onDead: () => void }): void {
+    this.stopHeartbeat();
+    const intervalMs = opts.intervalMs ?? 15_000;
+    const timeoutMs = opts.timeoutMs ?? 3000;
+    const maxMisses = opts.maxMisses ?? 3;
+    let misses = 0;
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.isOpen || this.heartbeatInFlight) return;
+      this.heartbeatInFlight = true;
+      this.request(METHODS.Ping, undefined, timeoutMs)
+        .then(() => {
+          misses = 0;
+        })
+        .catch(() => {
+          misses++;
+          if (misses >= maxMisses) {
+            this.stopHeartbeat();
+            opts.onDead();
+          }
+        })
+        .finally(() => {
+          this.heartbeatInFlight = false;
+        });
+    }, intervalMs);
+    this.heartbeatTimer.unref?.();
+  }
+
+  stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
   }
 
@@ -178,7 +220,9 @@ export class DshClient {
     this.pending.delete(res.id as number);
     clearTimeout(entry.timer);
     if (res.error) {
-      entry.reject(new Error(res.error.message));
+      const err = new Error(res.error.message) as Error & { code?: number };
+      err.code = res.error.code;
+      entry.reject(err);
     } else {
       entry.resolve(res.result);
     }

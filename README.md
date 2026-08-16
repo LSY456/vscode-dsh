@@ -113,8 +113,10 @@ npm run smoke          # 覆盖：安全握手/补丁/审批/取消/ping
 | `dsh.daemon.token` | `""` | `external` 模式握手令牌 |
 | `dsh.apiKey` / `dsh.preset` | `""` / `default` | 握手时传给 daemon |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
-| `dsh.context.maxFileBytes` | `200000` | 附件内容截断阈值 |
+| `dsh.context.maxFileBytes` | `200000` | 附件内联内容阈值；超出改为 `contentOmitted` 按需 `file.read` |
 | `dsh.diff.autoOpen` | `true` | 补丁到达时自动打开 Diff 视图 |
+| `dsh.capabilities.allowedTools` | `[]` | 工具白名单（空 = 全部允许），如 `["bash_execute"]` |
+| `dsh.capabilities.maxConcurrency` | `0` | daemon 全局并发会话上限（0 = 不限） |
 
 ## 目录结构
 
@@ -125,17 +127,22 @@ vscode-dsh/
 ├── shared/protocol.ts      # ★ 协议契约（两端共享，真实 daemon 必须兼容）
 ├── src/
 │   ├── extension.ts        # 入口：命令、状态栏、组装
-│   ├── daemonManager.ts    # 进程生命周期：探测/拉起/连接/重连/回收
-│   ├── wsClient.ts         # JSON-RPC over WS 客户端
-│   ├── contextCapture.ts   # 主动上下文捕获（文件/选区/诊断/git）
+│   ├── daemonManager.ts    # 进程生命周期：探测/拉起/连接/续跑/心跳/回收
+│   ├── wsClient.ts         # JSON-RPC over WS 客户端（心跳、错误码透传）
+│   ├── contextCapture.ts   # 主动上下文捕获（文件/选区/诊断/git，大文件按需读取）
 │   ├── diffProvider.ts     # 虚拟文档 + vscode.diff + 补丁审批
 │   ├── webviewPanel.ts     # Webview 面板宿主与消息桥
+│   ├── logger.ts           # OutputChannel 分级日志
 │   └── daemon/
 │       ├── index.ts        # 参考 daemon CLI 入口
-│       ├── server.ts       # WS/JSON-RPC 服务端（安全握手/会话/挂起恢复）
+│       ├── server.ts       # WS/JSON-RPC 服务端（安全握手/能力分级/resume/file.read）
+│       ├── sessionManager.ts # 会话状态机 + 事件缓冲 + 审批/补丁强校验（纯逻辑，可单测）
+│       ├── paths.ts        # 路径护栏
 │       └── agent.ts        # 模拟 Agent 循环（演示/测试用）
 ├── media/                  # Webview 静态资源（HTML/CSS/JS）
 ├── scripts/smoke.js        # 端到端冒烟测试（无 VSCode 依赖）
+├── *.test.ts               # vitest 单元测试（协议/路径/状态机/Agent）
+├── .github/workflows/ci.yml # CI：typecheck/build/unit/smoke + VSIX 构件
 ├── PROTOCOL.md             # 协议规范
 └── .gitignore              # 忽略 node_modules / 构建产物 / 缓存 / 运行时状态等
 ```
@@ -145,9 +152,24 @@ vscode-dsh/
 - **端口**：daemon 仅监听 `127.0.0.1` 随机端口；端口经 stdout/端口文件上报，不暴露公网。
 - **一次性 Token**：扩展生成 24 字节随机 token，经环境变量传给 daemon 子进程；WS 打开握手必须
   携带 `Authorization: Bearer <token>`；拒绝任何带浏览器 `Origin` 的连接（防跨站 WebSocket 劫持）。
+- **能力分级**：握手时声明 `allowedTools / allowedDirs / maxConcurrency`，越权工具直接禁用
+  （不发审批）、越界路径一律拒绝（`-32012`）。
+- **路径护栏**：patch / `file.read` / 附件读取目标必须位于工作区 ∩ allowedDirs 内，拒绝 `..` 逃逸。
+- **审批/补丁强校验**：id 归属校验（`-32013`）+ 60s 过期（`-32010`，UI 倒计时置灰）。
 - **Webview 隔离**：CSP `default-src 'none'` + nonce 脚本；Webview 无网络权限，仅经扩展中转。
 - **补丁落盘护栏**：Agent 修改文件必须经过 Diff 审查；拒绝即不写盘（参考 daemon 在收到
   `file.patch.respond(accept)` 后才写）。
+
+## 工程质量（P0）
+
+- **单元测试**：`npm test`（vitest，32 用例）覆盖协议守卫、路径护栏、会话状态机（并发/过期/续跑）、
+  Agent 各分支（补丁/审批/禁用/取消/按需读取）。
+- **端到端冒烟**：`npm run smoke`（10 组断言）覆盖安全握手、能力禁用、补丁、审批、多会话并发、
+  断线续跑、`file.read` 越界拒绝。
+- **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 typecheck → build → unit → smoke（win/ubuntu），
+  main 分支额外产出 VSIX 构件。
+- **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
+- **打包**：`npm run package` 产出约 118KB 的 VSIX（`dist/`）。
 
 ## 迹线（Trajectory）数据映射
 
@@ -167,20 +189,28 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
 
 ## 路线图
 
+### 已完成
 - [x] 协议契约 + 参考 daemon（安全握手/流式/审批/补丁/迹线/取消）
 - [x] Extension Host（进程管理/上下文捕获/Diff 提供器/Webview 桥）
 - [x] Webview UI（推理流/打字机/工具卡/审批卡/补丁卡/迹线面板）
-- [x] 端到端冒烟测试
-- [ ] Cordis 动态插件版真实 daemon（模型调用 + 工具沙箱 + 持久化轨迹）
-- [ ] 编辑器事件被动注入（文件切换/保存自动刷新上下文）
-- [ ] 多会话管理、会话历史持久化、VSIX 打包发布
+- [x] **P0 工程质量**：vitest 单元测试（32 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
+      断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
+      多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
+
+### 待办
+- [ ] P2：Webview Markdown 渲染 + 代码高亮、流式渲染批处理、会话历史与多会话管理、信任记忆（免审批白名单）、
+      Diff 编辑后应用、配置面板
+- [ ] P3：Cordis 动态插件版真实 daemon（模型调用 + 工具沙箱 + 持久化轨迹）
+- [ ] P4：VSCode Remote-SSH / WSL / Containers 场景（TLS + 鉴权升级）
 
 ## 已知局限
 
 - 参考 daemon 为模拟实现，不含真实模型调用与工具沙箱（用于演示协议）。
-- 单连接单会话串行；审批/补丁响应缺少 id 归属强校验与过期状态同步。
+- 断线续跑仅限同一 daemon 进程内；daemon 进程重启后会话丢失（`resume` 返回 `NotFound`，客户端新建会话）。
 - 未覆盖 VSCode Remote-SSH / WSL / Containers 场景（"仅 127.0.0.1"模型需升级为 TLS + 鉴权）。
 - 无信任记忆（免审批白名单），高频使用会产生审批疲劳。
+- Webview 为 vanilla JS：无 Markdown/代码高亮渲染、无会话历史持久化。
 
 ---
 

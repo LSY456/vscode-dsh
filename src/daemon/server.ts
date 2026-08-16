@@ -6,11 +6,21 @@
  *  - 打开握手必须携带 `Authorization: Bearer <token>`（verifyClient 校验）
  *  - 拒绝来自浏览器 Origin 的连接（防跨站 WebSocket 劫持 CSWSH）
  *  - token 通过环境变量/启动参数传入，不写盘（可选 --port-file 只写端口）
+ *
+ * P1 加固：
+ *  - 会话状态机 + 事件缓冲（session.resume 断线续跑）
+ *  - 审批/补丁强校验（归属 + expiresAt 过期拒绝）
+ *  - 路径护栏（patch / file.read 目标必须位于工作区 / allowedDirs 内）
+ *  - 能力分级（allowedTools / allowedDirs / maxConcurrency）
+ *  - 多会话并发（同一会话串行，不同会话并行）
  */
+import * as fs from 'fs';
 import * as http from 'http';
+import * as path from 'path';
 import { WebSocket, WebSocketServer, RawData } from 'ws';
 import {
   EVENTS,
+  ERROR_CODES,
   isJsonRpcNotification,
   isJsonRpcRequest,
   JsonRpcNotification,
@@ -19,9 +29,13 @@ import {
   METHODS,
   InitializeParams,
   InitializeResult,
+  EventApprovalRequest,
+  EventFilePatchPending,
   SessionSendParams,
 } from '../../shared/protocol';
-import { AgentContext, runFakeAgent } from './agent';
+import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
+import { isPathInside } from './paths';
+import { Session, SessionManager } from './sessionManager';
 
 export interface DaemonServerOptions {
   token: string;
@@ -38,21 +52,16 @@ export interface DaemonServerHandle {
   close(): Promise<void>;
 }
 
-interface PendingUser {
-  resolve: (approved: boolean) => void;
-}
-
-interface Connection {
-  ws: WebSocket;
-  sessionId: string;
-  running: boolean;
-  canceled: boolean;
-  pendingApproval: Map<string, PendingUser>;
-  pendingPatch: Map<string, PendingUser>;
-  notify(method: string, params: unknown): void;
-}
+const MAX_READ_BYTES = 1024 * 1024; // file.read 单文件上限 1MB
 
 export async function startDaemonServer(opts: DaemonServerOptions): Promise<DaemonServerHandle> {
+  const sessions = new SessionManager(opts.workspaceRoot);
+  let capabilities: Required<AgentCapabilities> & { maxConcurrency: number } = {
+    allowedTools: [],
+    allowedDirs: [],
+    maxConcurrency: 0,
+  };
+
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
     res.end('dsh daemon (reference implementation)\n');
@@ -74,16 +83,19 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     },
   });
 
+  interface Connection {
+    ws: WebSocket;
+    /** 当前默认会话 id（session.send 未指定时使用） */
+    currentSessionId: string;
+    notify(method: string, params: unknown): void;
+  }
+
   const connections = new Set<Connection>();
 
   wss.on('connection', (ws: WebSocket) => {
     const conn: Connection = {
       ws,
-      sessionId: '',
-      running: false,
-      canceled: false,
-      pendingApproval: new Map(),
-      pendingPatch: new Map(),
+      currentSessionId: '',
       notify(method, params) {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }));
@@ -97,7 +109,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
       try {
         msg = JSON.parse(data.toString());
       } catch {
-        sendError(ws, null, -32700, 'Parse error');
+        sendError(ws, null, ERROR_CODES.ParseError, 'Parse error');
         return;
       }
       handleMessage(conn, msg);
@@ -108,6 +120,27 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     });
   });
 
+  /** 把会话的事件投递绑定到当前连接（resume 时覆盖旧连接）。 */
+  function attach(conn: Connection, session: Session): void {
+    session.deliver = (method, params) => conn.notify(method, params);
+    conn.currentSessionId = session.id;
+  }
+
+  /** 校验目标路径位于工作区且（若声明）位于 allowedDirs 内。 */
+  function checkPath(target: string): string | null {
+    const root = opts.workspaceRoot;
+    if (!isPathInside(root, target)) {
+      return `路径越界：${target} 不在工作区 ${root} 内`;
+    }
+    if (capabilities.allowedDirs.length > 0) {
+      const ok = capabilities.allowedDirs.some((d) => isPathInside(d, target));
+      if (!ok) {
+        return `路径越界：${target} 不在 allowedDirs ${capabilities.allowedDirs.join(', ')} 内`;
+      }
+    }
+    return null;
+  }
+
   function handleMessage(conn: Connection, msg: unknown): void {
     if (isJsonRpcRequest(msg)) {
       void handleRequest(conn, msg);
@@ -115,7 +148,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
       handleNotification(conn, msg);
     } else {
       const maybeId = (msg as { id?: number | string } | null)?.id;
-      sendError(conn.ws, maybeId ?? null, -32600, 'Invalid Request');
+      sendError(conn.ws, maybeId ?? null, ERROR_CODES.InvalidRequest, 'Invalid Request');
     }
   }
 
@@ -125,9 +158,17 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
         case METHODS.Initialize: {
           const p = req.params as InitializeParams;
           if (!p || !p.workspaceRoot) {
-            sendError(conn.ws, req.id, -32602, 'initialize 需要 workspaceRoot');
+            sendError(conn.ws, req.id, ERROR_CODES.InvalidParams, 'initialize 需要 workspaceRoot');
             return;
           }
+          // 能力分级：最后一次 initialize 生效（参考实现为实例级）
+          capabilities = {
+            allowedTools: p.capabilities?.allowedTools ?? [],
+            allowedDirs: p.capabilities?.allowedDirs ?? [],
+            maxConcurrency: p.capabilities?.maxConcurrency ?? 0,
+          };
+          const session = sessions.create();
+          attach(conn, session);
           const result: InitializeResult = {
             daemonVersion: '0.1.0-reference',
             protocolVersion: '1.0',
@@ -137,70 +178,156 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               filePatches: true,
               sessions: true,
               trajectory: true,
+              resume: true,
+              fileRead: true,
             },
+            sessionId: session.id,
           };
-          conn.sessionId = `sess_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
           sendResult(conn.ws, req.id, result);
           return;
         }
         case METHODS.SessionCreate: {
-          if (!conn.sessionId) conn.sessionId = `sess_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-          sendResult(conn.ws, req.id, { sessionId: conn.sessionId });
+          const session = sessions.create();
+          attach(conn, session);
+          sendResult(conn.ws, req.id, { sessionId: session.id });
           return;
         }
         case METHODS.SessionSend: {
           const p = req.params as SessionSendParams;
           if (!p || typeof p.prompt !== 'string') {
-            sendError(conn.ws, req.id, -32602, 'session.send 需要 prompt');
+            sendError(conn.ws, req.id, ERROR_CODES.InvalidParams, 'session.send 需要 prompt');
             return;
           }
-          if (conn.running) {
-            sendError(conn.ws, req.id, -32009, 'session 正在运行中，请先取消或等待完成');
+          const session = sessions.get(p.sessionId ?? conn.currentSessionId);
+          if (!session) {
+            sendError(conn.ws, req.id, ERROR_CODES.NotFound, `session 不存在: ${p.sessionId ?? conn.currentSessionId}`);
             return;
           }
-          conn.running = true;
-          conn.canceled = false;
-          sendResult(conn.ws, req.id, { sessionId: conn.sessionId, accepted: true });
+          if (!session.canStart()) {
+            sendError(conn.ws, req.id, ERROR_CODES.Busy, `session ${session.id} 正在运行中，请先取消或等待完成`);
+            return;
+          }
+          if (capabilities.maxConcurrency > 0 && sessions.runningCount() >= capabilities.maxConcurrency) {
+            sendError(
+              conn.ws,
+              req.id,
+              ERROR_CODES.Busy,
+              `并发会话数已达上限 ${capabilities.maxConcurrency}`
+            );
+            return;
+          }
+          session.begin();
+          attach(conn, session);
+          sendResult(conn.ws, req.id, { sessionId: session.id, accepted: true });
+
           const ctx: AgentContext = {
-            sessionId: conn.sessionId,
-            notify: (method, params) => conn.notify(method, params),
-            waitForUser: (kind, id) => waitForUser(conn, kind, id),
-            isCanceled: () => conn.canceled,
+            sessionId: session.id,
+            workspaceRoot: opts.workspaceRoot,
+            capabilities,
+            notify: (method, params) => session.emit(method, params),
+            waitForUser: (kind, snapshot) => {
+              if (kind === 'approval') {
+                return session.registerApproval(snapshot as EventApprovalRequest);
+              }
+              return session.registerPatch(snapshot as EventFilePatchPending);
+            },
+            isCanceled: () => session.isCanceled(),
+            readFile: async (target, maxBytes) => {
+              const err = checkPath(target);
+              if (err) return undefined;
+              try {
+                const content = fs.readFileSync(target, 'utf8');
+                const cap = maxBytes ?? MAX_READ_BYTES;
+                return content.length > cap ? content.slice(0, cap) + '\n…[truncated]' : content;
+              } catch {
+                return undefined;
+              }
+            },
           };
           // 异步执行，不阻塞请求响应
           void runFakeAgent(ctx, p).finally(() => {
-            conn.running = false;
+            session.end();
           });
           return;
         }
         case METHODS.SessionCancel: {
-          conn.canceled = true;
-          // 挂起的审批/补丁按拒绝处理
-          for (const pending of conn.pendingApproval.values()) pending.resolve(false);
-          conn.pendingApproval.clear();
-          for (const pending of conn.pendingPatch.values()) pending.resolve(false);
-          conn.pendingPatch.clear();
-          sendResult(conn.ws, req.id, { canceled: true });
+          const p = req.params as { sessionId?: string } | undefined;
+          const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
+          if (session) {
+            session.cancel();
+          }
+          sendResult(conn.ws, req.id, { canceled: !!session });
+          return;
+        }
+        case METHODS.SessionResume: {
+          const p = req.params as { sessionId: string };
+          const session = sessions.get(p?.sessionId ?? '');
+          if (!session) {
+            sendError(conn.ws, req.id, ERROR_CODES.NotFound, `session 不存在: ${p?.sessionId}`);
+            return;
+          }
+          attach(conn, session);
+          const result = session.resume();
+          sendResult(conn.ws, req.id, result);
           return;
         }
         case METHODS.ApprovalRespond: {
-          const p = req.params as { approvalId: string; approved: boolean };
-          const pending = conn.pendingApproval.get(p?.approvalId ?? '');
-          if (pending) {
-            conn.pendingApproval.delete(p.approvalId);
-            pending.resolve(!!p.approved);
+          const p = req.params as { sessionId?: string; approvalId: string; approved: boolean };
+          const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
+          if (!session) {
+            sendError(conn.ws, req.id, ERROR_CODES.NotFound, 'session 不存在');
+            return;
+          }
+          const r = session.respondApproval(p?.approvalId ?? '', !!p?.approved);
+          if (r === 'not_found') {
+            sendError(conn.ws, req.id, ERROR_CODES.NotFound, `审批不存在或已处理: ${p?.approvalId}`);
+            return;
+          }
+          if (r === 'expired') {
+            sendError(conn.ws, req.id, ERROR_CODES.Expired, `审批已过期: ${p?.approvalId}`);
+            return;
           }
           sendResult(conn.ws, req.id, { ok: true });
           return;
         }
         case METHODS.FilePatchRespond: {
-          const p = req.params as { patchId: string; accept: boolean };
-          const pending = conn.pendingPatch.get(p?.patchId ?? '');
-          if (pending) {
-            conn.pendingPatch.delete(p.patchId);
-            pending.resolve(!!p.accept);
+          const p = req.params as { sessionId?: string; patchId: string; accept: boolean };
+          const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
+          if (!session) {
+            sendError(conn.ws, req.id, ERROR_CODES.NotFound, 'session 不存在');
+            return;
+          }
+          const r = session.respondPatch(p?.patchId ?? '', !!p?.accept);
+          if (r === 'not_found') {
+            sendError(conn.ws, req.id, ERROR_CODES.NotFound, `补丁不存在或已处理: ${p?.patchId}`);
+            return;
+          }
+          if (r === 'expired') {
+            sendError(conn.ws, req.id, ERROR_CODES.Expired, `补丁已过期: ${p?.patchId}`);
+            return;
           }
           sendResult(conn.ws, req.id, { ok: true });
+          return;
+        }
+        case METHODS.FileRead: {
+          const p = req.params as { path: string; maxBytes?: number };
+          const err = checkPath(p?.path ?? '');
+          if (err) {
+            sendError(conn.ws, req.id, ERROR_CODES.PathOutsideWorkspace, err);
+            return;
+          }
+          try {
+            const content = fs.readFileSync(p.path, 'utf8');
+            const cap = p.maxBytes ?? MAX_READ_BYTES;
+            const truncated = content.length > cap;
+            sendResult(conn.ws, req.id, {
+              content: truncated ? content.slice(0, cap) : content,
+              truncated,
+              size: Buffer.byteLength(content, 'utf8'),
+            });
+          } catch (e) {
+            sendError(conn.ws, req.id, ERROR_CODES.InternalError, `读取失败: ${e instanceof Error ? e.message : String(e)}`);
+          }
           return;
         }
         case METHODS.Ping:
@@ -213,30 +340,17 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           }, 50);
           return;
         default:
-          sendError(conn.ws, req.id, -32601, `Method not found: ${req.method}`);
+          sendError(conn.ws, req.id, ERROR_CODES.MethodNotFound, `Method not found: ${req.method}`);
       }
     } catch (err) {
-      sendError(conn.ws, req.id, -32603, err instanceof Error ? err.message : String(err));
+      sendError(conn.ws, req.id, ERROR_CODES.InternalError, err instanceof Error ? err.message : String(err));
     }
   }
 
   function handleNotification(conn: Connection, note: JsonRpcNotification): void {
     // 参考实现暂不需要客户端通知；预留扩展点
+    void conn;
     void note;
-  }
-
-  function waitForUser(conn: Connection, kind: 'approval' | 'patch', id: string): Promise<boolean> {
-    return new Promise<boolean>((resolve) => {
-      const entry: PendingUser = { resolve };
-      if (kind === 'approval') conn.pendingApproval.set(id, entry);
-      else conn.pendingPatch.set(id, entry);
-      // 60s 超时按拒绝处理
-      setTimeout(() => {
-        if (kind === 'approval' ? conn.pendingApproval.delete(id) : conn.pendingPatch.delete(id)) {
-          entry.resolve(false);
-        }
-      }, 60_000);
-    });
   }
 
   function sendResult(ws: WebSocket, id: number | string, result: unknown): void {

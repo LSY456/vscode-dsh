@@ -15,7 +15,8 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { InitializeResult, METHODS } from '../shared/protocol';
+import { ERROR_CODES, InitializeResult, METHODS, SessionResumeResult } from '../shared/protocol';
+import { logger } from './logger';
 import { DshClient } from './wsClient';
 
 export type DaemonStatus = 'stopped' | 'starting' | 'connecting' | 'connected' | 'error' | 'disabled';
@@ -78,6 +79,7 @@ export class DaemonManager {
 
   async start(): Promise<void> {
     const mode = vscode.workspace.getConfiguration('dsh').get<string>('daemon.mode', 'auto');
+    logger.info(`daemon.start: mode=${mode}`);
     if (mode === 'none') {
       this.setStatus('disabled', 'daemon.mode = none（仅 UI 模式）');
       return;
@@ -138,17 +140,56 @@ export class DaemonManager {
         workspaceRoot,
         apiKey: cfg.get<string>('apiKey', ''),
         preset: cfg.get<string>('preset', 'default'),
+        capabilities: {
+          allowedTools: cfg.get<string[]>('capabilities.allowedTools', []),
+          maxConcurrency: cfg.get<number>('capabilities.maxConcurrency', 0),
+        },
         client: {
           name: 'vscode-dsh',
           version: '0.1.0',
         },
       });
-      this.sessionId = '';
+
+      // 会话续跑（P1.2）：同一 daemon 进程内断线重连，恢复会话状态与未消费事件
+      const prevSessionId = this.sessionId;
+      if (prevSessionId) {
+        try {
+          const resumed = await this.client.request<SessionResumeResult>(METHODS.SessionResume, {
+            sessionId: prevSessionId,
+          });
+          this.sessionId = resumed.sessionId;
+          logger.info(`会话续跑成功: ${this.sessionId}（state=${resumed.state}）`);
+        } catch (err) {
+          const code = (err as { code?: number } | null)?.code;
+          if (code === ERROR_CODES.NotFound) {
+            // daemon 进程已重启，旧会话丢失，回退到 initialize 分配的新会话
+            logger.info('旧会话不存在（daemon 已重启），使用新会话');
+            this.sessionId = result.sessionId ?? '';
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        this.sessionId = result.sessionId ?? '';
+      }
+
       this.reconnectAttempt = 0;
       this.setStatus(
         'connected',
-        `已连接 daemon v${result.daemonVersion}（协议 ${result.protocolVersion}，工作区 ${workspaceRoot}）`
+        `已连接 daemon v${result.daemonVersion}（协议 ${result.protocolVersion}，会话 ${this.sessionId || '—'}）`
       );
+      // 心跳（P1.2）：连续 3 次 ping 失败判定链路死亡并重连
+      this.client.startHeartbeat({
+        intervalMs: 15_000,
+        timeoutMs: 3000,
+        maxMisses: 3,
+        onDead: () => {
+          logger.warn('心跳连续失败，判定链路死亡，强制重连');
+          this.setStatus('connecting', '心跳超时，正在重连…');
+          this.client.close();
+          this.scheduleReconnect();
+        },
+      });
     } catch (err) {
       this.setStatus('error', `握手失败: ${err instanceof Error ? err.message : String(err)}`);
       this.scheduleReconnect();
@@ -256,7 +297,10 @@ export class DaemonManager {
       });
       child.stderr?.on('data', (d: Buffer) => {
         const line = d.toString().trim();
-        if (line) this.detail = `daemon stderr: ${line}`;
+        if (line) {
+          logger.debug(`daemon stderr: ${line}`);
+          this.detail = `daemon stderr: ${line}`;
+        }
       });
       child.on('exit', (code) => {
         if (code !== 0 && !stdout.includes('DSH_DAEMON_PORT=')) {
@@ -328,6 +372,7 @@ export class DaemonManager {
     this.client.close();
     if (this.child && !this.child.killed) {
       try {
+        logger.debug('终止 daemon 子进程');
         this.child.kill();
       } catch {
         /* ignore */

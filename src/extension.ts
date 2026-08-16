@@ -11,6 +11,7 @@ import * as vscode from 'vscode';
 import { captureContext } from './contextCapture';
 import { DaemonManager, DaemonStatus } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
+import { logger } from './logger';
 import { WebviewPanelHost } from './webviewPanel';
 
 const STATUS_ICONS: Record<DaemonStatus, string> = {
@@ -25,6 +26,9 @@ const STATUS_ICONS: Record<DaemonStatus, string> = {
 let activeDaemon: DaemonManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  logger.init(context);
+  logger.info('vscode-dsh 激活');
+
   const daemon = new DaemonManager({ extensionPath: context.extensionPath });
   activeDaemon = daemon;
   const diff = new DshDiffManager(() => daemon.client);
