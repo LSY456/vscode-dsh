@@ -4,8 +4,15 @@
 **Agent Daemon 运行时**（基于 Cordis 元框架），VSCode 插件作为**上下文捕获器与用户交互面板**，
 二者通过双向事件流（WebSocket / JSON-RPC）解耦通信。
 
-本仓库是一个**完整可运行**的插件工程：内置一个协议兼容的**参考 daemon**（模拟 Agent 循环），
-无需真实模型即可端到端演示全部流程；真实 daemon（Cordis 动态插件版）只需实现同一协议即可无缝替换。
+本仓库是一个**完整可运行**的插件工程，daemon 内置两种 Agent 实现：
+
+- **mock**：关键字驱动的模拟循环，无需真实模型即可端到端演示全部流程（协议/审批/补丁/续跑）。
+- **real**：配置 `dsh.apiKey` 后自动启用，经 OpenAI 兼容端点（DeepSeek 等）调用真实模型，
+  配合只读/写入/高危命令三类真实工具与轨迹持久化。
+
+真实 daemon（Cordis 动态插件版）只需实现同一协议即可无缝替换。
+
+> 📚 相关文档：[协议规范](PROTOCOL.md) · [变更日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)
 
 ---
 
@@ -17,7 +24,7 @@
 | 📎 **上下文不失真** | 发送 Prompt 时自动打包活动文件全文、高亮选区（带行号）、编译诊断、git status 为结构化附件，不再需要手动复制粘贴、不再丢失编辑现场 |
 | 🛡️ **改动可控** | 高危工具调用必须过**审批卡**（Human-in-the-Loop）；文件修改必须先看**原生 Diff 并排视图**再决定落盘——把"AI 盲改"变成"AI 提议、人拍板" |
 | 🔒 **安全边界干净** | 工具在独立 daemon 进程执行，仅监听 127.0.0.1 随机端口，WS 握手必须带一次性 Bearer token、拒绝带浏览器 Origin 的连接 |
-| 🔌 **协议化可插拔** | 一份明确 JSON-RPC 契约（8 方法 / 13 事件），前端可换（VSCode / JetBrains / CLI），后端可换（参考 daemon / 真实 Cordis daemon），只依赖协议、不依赖实现 |
+| 🔌 **协议化可插拔** | 一份明确 JSON-RPC 契约（方法/事件见 [PROTOCOL.md](PROTOCOL.md)），前端可换（VSCode / JetBrains / CLI），后端可换（参考 daemon / 真实模型 daemon / Cordis 插件），只依赖协议、不依赖实现 |
 | 📜 **全程可追溯** | daemon 内部轨迹以 `trajectory.record` 事件流投影到 UI 的"执行迹线"面板，步骤级审计、回放与失败定位 |
 
 ## 它解决什么痛点
@@ -84,13 +91,16 @@
 # 1. 安装依赖（首次）
 npm install
 
-# 2. 构建（扩展宿主 + 参考 daemon + webview 静态资源）
+# 2. 构建（扩展宿主 + daemon + webview 静态资源）
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm run smoke          # 覆盖：安全握手/补丁/审批/取消/ping
+npm test               # 单元测试（vitest，67 用例）
+npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 
-# 4. 在 VSCode 中按 F5 启动 Extension Development Host
+# 4. 配置真实模型（可选）：settings.json 中设置 dsh.apiKey（可配合 dsh.model.model 选模型）
+
+# 5. 在 VSCode 中按 F5 启动 Extension Development Host
 ```
 
 启动后：
@@ -151,6 +161,9 @@ vscode-dsh/
 ├── *.test.ts               # vitest 单元测试（协议/路径/状态机/Agent/模型/工具/轨迹）
 ├── .github/workflows/ci.yml # CI：typecheck/build/unit/smoke + VSIX 构件
 ├── PROTOCOL.md             # 协议规范
+├── CHANGELOG.md            # 变更日志
+├── CONTRIBUTING.md         # 贡献指南
+├── LICENSE                 # MIT 许可证
 └── .gitignore              # 忽略 node_modules / 构建产物 / 缓存 / 运行时状态等
 ```
 
@@ -231,5 +244,4 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 
 ---
 
-**License**: MIT（见 `package.json`）。提交到 GitHub 私有仓库前，建议在仓库设置中关闭
-"Template repository" 并确认 `LICENSE` 文件按需添加。
+**License**: [MIT](LICENSE) · 详细版本变化见 [CHANGELOG.md](CHANGELOG.md) · 参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)
