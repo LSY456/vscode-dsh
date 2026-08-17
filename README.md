@@ -137,6 +137,7 @@ vscode-dsh/
 ├── package.json            # 扩展清单（命令/配置/激活事件）
 ├── esbuild.js              # 构建：extension + daemon + media
 ├── shared/protocol.ts      # ★ 协议契约（两端共享，真实 daemon 必须兼容）
+├── shared/version.ts       # 单一版本来源（扩展宿主与 daemon 共用）
 ├── src/
 │   ├── extension.ts        # 入口：命令、状态栏、组装
 │   ├── daemonManager.ts    # 进程生命周期：探测/拉起/连接/续跑/心跳/回收
@@ -163,6 +164,7 @@ vscode-dsh/
 ├── PROTOCOL.md             # 协议规范
 ├── CHANGELOG.md            # 变更日志
 ├── CONTRIBUTING.md         # 贡献指南
+├── SECURITY.md             # 安全策略
 ├── LICENSE                 # MIT 许可证
 └── .gitignore              # 忽略 node_modules / 构建产物 / 缓存 / 运行时状态等
 ```
@@ -174,16 +176,21 @@ vscode-dsh/
   携带 `Authorization: Bearer <token>`；拒绝任何带浏览器 `Origin` 的连接（防跨站 WebSocket 劫持）。
 - **能力分级**：握手时声明 `allowedTools / allowedDirs / maxConcurrency`，越权工具直接禁用
   （不发审批）、越界路径一律拒绝（`-32012`）。
-- **路径护栏**：patch / `file.read` / 附件读取目标必须位于工作区 ∩ allowedDirs 内，拒绝 `..` 逃逸。
+- **路径护栏（canonical）**：patch / `file.read` / 附件读取目标以 `fs.realpathSync` 解析后的
+  **规范路径**做包含判断，拒绝 `..` 逃逸、符号链接/目录联结（junction）逃逸、NUL 与 Windows ADS。
 - **审批/补丁强校验**：id 归属校验（`-32013`）+ 60s 过期（`-32010`，UI 倒计时置灰）。
+- **命令默认拒绝**：`bash_execute` 在内置高危拒绝规则（`rm -rf`、fork bomb、格式化、`curl|sh`、
+  shutdown 等）之外，还需人工审批；普通命令亦须审批。
+- **密钥脱敏 + 权限**：轨迹持久化前统一脱敏密钥 / Token / 密码词面；轨迹目录 `0700`、文件 `0600`。
 - **Webview 隔离**：CSP `default-src 'none'` + nonce 脚本；Webview 无网络权限，仅经扩展中转。
 - **补丁落盘护栏**：Agent 修改文件必须经过 Diff 审查；拒绝即不写盘（参考 daemon 在收到
   `file.patch.respond(accept)` 后才写）。
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，67 用例）覆盖协议守卫、路径护栏、会话状态机（并发/过期/续跑）、
-  Agent 全分支、模型适配（SSE 流式解析）、工具沙箱（护栏/策略）、轨迹持久化、真实 Agent 循环。
+- **单元测试**：`npm test`（vitest，77 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+  会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析）、工具沙箱（护栏/策略/默认拒绝）、
+  轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环。
 - **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
   `file.read` 越界拒绝、以及真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘）。
 - **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 typecheck → build → unit → smoke（win/ubuntu），
@@ -244,4 +251,4 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 
 ---
 
-**License**: [MIT](LICENSE) · 详细版本变化见 [CHANGELOG.md](CHANGELOG.md) · 参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)
+**License**: [MIT](LICENSE) · 详细版本变化见 [CHANGELOG.md](CHANGELOG.md) · 安全策略见 [SECURITY.md](SECURITY.md) · 参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)

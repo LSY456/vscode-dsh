@@ -199,7 +199,7 @@ describe('realAgent：高危命令', () => {
   it('bash_execute 拒绝 -> tool.executed ok=false', async () => {
     const ctx = makeCtx();
     const model = scripted([
-      { toolcall: { tool: 'bash_execute', input: { command: 'rm -rf x' } } },
+      { toolcall: { tool: 'bash_execute', input: { command: 'rm -r x' } } },
       { content: 'done' },
     ]);
     const run = runRealAgent(ctx, baseParams, { model });

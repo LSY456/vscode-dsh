@@ -22,7 +22,7 @@ import {
   EventFilePatchPending,
   SessionSendParams,
 } from '../../shared/protocol';
-import { isPathInside } from './paths';
+import { assertPathInside } from './paths';
 
 export interface AgentCapabilities {
   allowedTools?: string[];
@@ -104,22 +104,13 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     trajectory(ctx, 'tool', 'read_file 完成');
   }
 
-  // ---- 3. 文件修改（触发补丁审批，目标路径须在工作区内）
+  // ---- 3. 文件修改（触发补丁审批，目标路径须在工作区内，canonical 校验防符号链接逃逸）
   if (/修改|edit|write|创建|replace/i.test(prompt)) {
-    const target =
+    const rawTarget =
       attachments.find((a) => a.path)?.path ?? extractPath(prompt) ?? path.join(process.cwd(), 'output.txt');
 
-    if (!isPathInside(ctx.workspaceRoot, target)) {
-      ctx.notify(EVENTS.Error, {
-        sessionId: ctx.sessionId,
-        code: ERROR_CODES.PathOutsideWorkspace,
-        message: `路径越界：${target} 不在工作区 ${ctx.workspaceRoot} 内，已拒绝修改`,
-      });
-      ctx.notify(EVENTS.MessageDelta, {
-        sessionId: ctx.sessionId,
-        delta: `\n\n[拒绝] 目标路径 ${target} 超出工作区范围，未执行修改。`,
-      });
-    } else {
+    const target = safeResolve(ctx, rawTarget);
+    if (target) {
       let oldContent: string | undefined;
       try {
         oldContent = fs.readFileSync(target, 'utf8');
@@ -245,6 +236,24 @@ function chunk(text: string, size: number): string[] {
   const out: string[] = [];
   for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
   return out;
+}
+
+/** canonical 解析目标路径；越界时发 Error 事件并返回 null。 */
+function safeResolve(ctx: AgentContext, raw: string): string | null {
+  try {
+    return assertPathInside(ctx.workspaceRoot, raw);
+  } catch (e) {
+    ctx.notify(EVENTS.Error, {
+      sessionId: ctx.sessionId,
+      code: ERROR_CODES.PathOutsideWorkspace,
+      message: e instanceof Error ? e.message : String(e),
+    });
+    ctx.notify(EVENTS.MessageDelta, {
+      sessionId: ctx.sessionId,
+      delta: `\n\n[拒绝] 目标路径 ${raw} 超出工作区范围，未执行修改。`,
+    });
+    return null;
+  }
 }
 
 function extractPath(prompt: string): string | null {

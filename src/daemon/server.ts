@@ -36,10 +36,11 @@ import {
 } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
 import { ChatModel, createKeywordFakeModel, OpenAICompatibleModel } from './model';
-import { isPathInside } from './paths';
+import { assertPathInside } from './paths';
 import { RealAgentConfig, runRealAgent } from './realAgent';
 import { Session, SessionManager } from './sessionManager';
 import { TrajectoryStore } from './trajectoryStore';
+import { VSD_DSH_VERSION } from '../../shared/version';
 
 export interface DaemonServerOptions {
   token: string;
@@ -160,19 +161,27 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     conn.currentSessionId = session.id;
   }
 
-  /** 校验目标路径位于工作区且（若声明）位于 allowedDirs 内。 */
-  function checkPath(target: string): string | null {
-    const root = opts.workspaceRoot;
-    if (!isPathInside(root, target)) {
-      return `路径越界：${target} 不在工作区 ${root} 内`;
-    }
-    if (capabilities.allowedDirs.length > 0) {
-      const ok = capabilities.allowedDirs.some((d) => isPathInside(d, target));
-      if (!ok) {
-        return `路径越界：${target} 不在 allowedDirs ${capabilities.allowedDirs.join(', ')} 内`;
+  /** 校验目标路径位于工作区（canonical：解析符号链接/联结）且位于 allowedDirs 内。 */
+  function resolvePath(target: string): { resolved: string } | { error: string } {
+    try {
+      const resolved = assertPathInside(opts.workspaceRoot, target);
+      if (capabilities.allowedDirs.length > 0) {
+        const ok = capabilities.allowedDirs.some((d) => {
+          try {
+            assertPathInside(d, resolved);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        if (!ok) {
+          return { error: `路径越界：${target} 不在 allowedDirs ${capabilities.allowedDirs.join(', ')} 内` };
+        }
       }
+      return { resolved };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
     }
-    return null;
   }
 
   function handleMessage(conn: Connection, msg: unknown): void {
@@ -211,7 +220,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           const session = sessions.create();
           attach(conn, session);
           const result: InitializeResult = {
-            daemonVersion: '0.2.0',
+            daemonVersion: VSD_DSH_VERSION,
             protocolVersion: '1.0',
             capabilities: {
               streaming: true,
@@ -281,10 +290,10 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             },
             isCanceled: () => session.isCanceled(),
             readFile: async (target, maxBytes) => {
-              const err = checkPath(target);
-              if (err) return undefined;
+              const r = resolvePath(target);
+              if ('error' in r) return undefined;
               try {
-                const content = fs.readFileSync(target, 'utf8');
+                const content = fs.readFileSync(r.resolved, 'utf8');
                 const cap = maxBytes ?? MAX_READ_BYTES;
                 return content.length > cap ? content.slice(0, cap) + '\n…[truncated]' : content;
               } catch {
@@ -299,10 +308,13 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             const agentConfig: RealAgentConfig = { model };
             void runRealAgent(ctx, p, agentConfig).finally(() => {
               session.end();
+              // 会话结束时立即落盘轨迹缓冲（审计完整性，不等定时器）
+              trajectoryStore.flush();
             });
           } else {
             void runFakeAgent(ctx, p).finally(() => {
               session.end();
+              trajectoryStore.flush();
             });
           }
           return;
@@ -368,13 +380,13 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
         }
         case METHODS.FileRead: {
           const p = req.params as { path: string; maxBytes?: number };
-          const err = checkPath(p?.path ?? '');
-          if (err) {
-            sendError(conn.ws, req.id, ERROR_CODES.PathOutsideWorkspace, err);
+          const r = resolvePath(p?.path ?? '');
+          if ('error' in r) {
+            sendError(conn.ws, req.id, ERROR_CODES.PathOutsideWorkspace, r.error);
             return;
           }
           try {
-            const content = fs.readFileSync(p.path, 'utf8');
+            const content = fs.readFileSync(r.resolved, 'utf8');
             const cap = p.maxBytes ?? MAX_READ_BYTES;
             const truncated = content.length > cap;
             sendResult(conn.ws, req.id, {
@@ -441,6 +453,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           server.close(() => resolve());
         });
         setTimeout(resolve, 500);
+      }).finally(() => {
+        // 落盘残留的轨迹缓冲，避免进程退出丢失审计记录
+        trajectoryStore.close();
       }),
   };
 }

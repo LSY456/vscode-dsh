@@ -69,6 +69,9 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 - `allowedDirs?: string[]` —— 目录白名单；缺省 = 仅工作区根。所有路径操作（patch / file.read / 附件读取）必须在工作区 ∩ allowedDirs 内，越界返回 `-32012`。
 - `maxConcurrency?: number` —— 全局并发会话上限；0 = 不限制。
 
+> **路径护栏为 canonical 判定**：daemon 以 `realpath` 解析后的规范路径做包含判断，符号链接 /
+> 目录联结（Windows junction）指向工作区外、`..` 逃逸、NUL 与 Windows 备用数据流（ADS）一律返回 `-32012`。
+
 ### `attachments`（流程二：主动上下文捕获）
 
 VSCode 侧自动打包的结构化附件，`kind` 取值：

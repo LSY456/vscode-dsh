@@ -76,7 +76,7 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
     expect(ctx.waiters).toHaveLength(1);
     expect(ctx.waiters[0].kind).toBe('patch');
     const pending = ctx.events.find((e) => e.method === EVENTS.FilePatchPending)!;
-    expect(pending.params.path).toBe(sampleFile);
+    expect(pending.params.path).toBe(fs.realpathSync(sampleFile));
     expect(pending.params.newContent).toContain('DONE');
 
     ctx.waiters[0].resolve(true);

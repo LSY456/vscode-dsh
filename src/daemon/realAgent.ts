@@ -30,7 +30,7 @@ import {
 
 export interface RealAgentConfig {
   model: ChatModel;
-  /** 高危命令策略（缺省 = 全部允许但需审批） */
+  /** 高危命令策略；无论是否配置，内置高危拒绝规则（DEFAULT_DENY_PATTERNS）都会生效 */
   commandPolicy?: CommandPolicy;
   /** 命令执行器（测试注入；缺省 child_process） */
   commandRunner?: CommandRunner;

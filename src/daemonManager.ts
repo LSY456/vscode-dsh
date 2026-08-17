@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ERROR_CODES, InitializeResult, METHODS, SessionResumeResult } from '../shared/protocol';
+import { VSD_DSH_VERSION } from '../shared/version';
 import { logger } from './logger';
 import { DshClient } from './wsClient';
 
@@ -152,7 +153,7 @@ export class DaemonManager {
         },
         client: {
           name: 'vscode-dsh',
-          version: '0.2.0',
+          version: VSD_DSH_VERSION,
         },
       });
 
