@@ -109,6 +109,16 @@
           "default": "default",
           "description": "daemon 端使用的 Agent 预设名。"
         },
+        "dsh.model.baseURL": {
+          "type": "string",
+          "default": "https://api.deepseek.com/v1",
+          "description": "模型 API 端点 base（OpenAI 兼容协议）。"
+        },
+        "dsh.model.model": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "description": "模型名（如 deepseek-chat / deepseek-reasoner）。"
+        },
         "dsh.context.gitStatus": {
           "type": "boolean",
           "default": true,

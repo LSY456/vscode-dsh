@@ -111,7 +111,9 @@ npm run smoke          # 覆盖：安全握手/补丁/审批/取消/ping
 | `dsh.daemon.command` | `""` | 外部 daemon 启动命令模板（支持 `{portFile} {workspace} {token}` 占位） |
 | `dsh.daemon.port` | `0` | `external` 模式端口 |
 | `dsh.daemon.token` | `""` | `external` 模式握手令牌 |
-| `dsh.apiKey` / `dsh.preset` | `""` / `default` | 握手时传给 daemon |
+| `dsh.apiKey` / `dsh.preset` | `""` / `default` | 握手时传给 daemon（apiKey 非空则自动启用真实模型） |
+| `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
+| `dsh.model.model` | `deepseek-chat` | 模型名（如 `deepseek-chat` / `deepseek-reasoner`） |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
 | `dsh.context.maxFileBytes` | `200000` | 附件内联内容阈值；超出改为 `contentOmitted` 按需 `file.read` |
 | `dsh.diff.autoOpen` | `true` | 补丁到达时自动打开 Diff 视图 |
@@ -134,14 +136,19 @@ vscode-dsh/
 │   ├── webviewPanel.ts     # Webview 面板宿主与消息桥
 │   ├── logger.ts           # OutputChannel 分级日志
 │   └── daemon/
-│       ├── index.ts        # 参考 daemon CLI 入口
-│       ├── server.ts       # WS/JSON-RPC 服务端（安全握手/能力分级/resume/file.read）
+│       ├── index.ts        # daemon CLI 入口（--agent mock|real|auto --fake-model）
+│       ├── server.ts       # WS/JSON-RPC 服务端（安全握手/能力分级/resume/file.read/agent 切换）
 │       ├── sessionManager.ts # 会话状态机 + 事件缓冲 + 审批/补丁强校验（纯逻辑，可单测）
 │       ├── paths.ts        # 路径护栏
-│       └── agent.ts        # 模拟 Agent 循环（演示/测试用）
+│       ├── agent.ts        # 模拟 Agent 循环（mock 实现，演示/测试用）
+│       ├── realAgent.ts    # 真实 Agent 循环（模型 + 工具 + 审批门控）
+│       ├── model.ts        # 模型适配层（OpenAI 兼容流式 + FakeChatModel）
+│       ├── tools.ts        # 真实工具沙箱（list/read/write/bash 策略门控）
+│       ├── toolcall.ts     # 模型工具调用 fenced 块协议
+│       └── trajectoryStore.ts # 轨迹持久化（.dsh/trajectory/*.jsonl）
 ├── media/                  # Webview 静态资源（HTML/CSS/JS）
 ├── scripts/smoke.js        # 端到端冒烟测试（无 VSCode 依赖）
-├── *.test.ts               # vitest 单元测试（协议/路径/状态机/Agent）
+├── *.test.ts               # vitest 单元测试（协议/路径/状态机/Agent/模型/工具/轨迹）
 ├── .github/workflows/ci.yml # CI：typecheck/build/unit/smoke + VSIX 构件
 ├── PROTOCOL.md             # 协议规范
 └── .gitignore              # 忽略 node_modules / 构建产物 / 缓存 / 运行时状态等
@@ -162,10 +169,10 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，32 用例）覆盖协议守卫、路径护栏、会话状态机（并发/过期/续跑）、
-  Agent 各分支（补丁/审批/禁用/取消/按需读取）。
-- **端到端冒烟**：`npm run smoke`（10 组断言）覆盖安全握手、能力禁用、补丁、审批、多会话并发、
-  断线续跑、`file.read` 越界拒绝。
+- **单元测试**：`npm test`（vitest，67 用例）覆盖协议守卫、路径护栏、会话状态机（并发/过期/续跑）、
+  Agent 全分支、模型适配（SSE 流式解析）、工具沙箱（护栏/策略）、轨迹持久化、真实 Agent 循环。
+- **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
+  `file.read` 越界拒绝、以及真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘）。
 - **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 typecheck → build → unit → smoke（win/ubuntu），
   main 分支额外产出 VSIX 构件。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
@@ -179,13 +186,19 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
 
 ## 接入真实 dsh daemon
 
-参考 daemon（`src/daemon/*`）仅用于演示与测试。接入真实实现有两种方式：
+daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
+
+1. **mock**（缺省，无 apiKey）：关键字驱动的模拟循环，用于演示协议与冒烟测试。
+2. **real**（配置 `dsh.apiKey` 后自动启用）：经 `OpenAICompatibleModel`（DeepSeek/OpenAI 兼容）
+   调用真实模型，配合只读（`read_file`/`list_dir`）、写入（`write_file`/`apply_patch`，走 Diff 审查）
+   与高危命令（`bash_execute`，走审批 + 命令策略门控）三类真实工具。
+
+更进一步的接入方式：
 
 1. **外部进程**：启动真实 daemon 并实现 `DSH_DAEMON_PORT=` 输出与同一协议，配置
    `dsh.daemon.command` 或 `dsh.daemon.mode = external` + `port/token`。
-2. **Cordis 动态插件**（推荐方向）：在 dsh 宿主中以 Cordis 插件注册同名方法/事件（模型适配、
-   工具沙箱、轨迹存储），监听随机端口；扩展侧无需任何改动。协议细节以 `shared/protocol.ts`
-   与 `PROTOCOL.md` 为准。
+2. **Cordis 动态插件**：在 dsh 宿主中以 Cordis 插件注册同名方法/事件（模型适配、工具沙箱、
+   轨迹存储），监听随机端口；扩展侧无需改动。协议细节以 `shared/protocol.ts` 与 `PROTOCOL.md` 为准。
 
 ## 路线图
 
@@ -193,20 +206,24 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
 - [x] 协议契约 + 参考 daemon（安全握手/流式/审批/补丁/迹线/取消）
 - [x] Extension Host（进程管理/上下文捕获/Diff 提供器/Webview 桥）
 - [x] Webview UI（推理流/打字机/工具卡/审批卡/补丁卡/迹线面板）
-- [x] **P0 工程质量**：vitest 单元测试（32 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **P0 工程质量**：vitest 单元测试（67 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
 - [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
+- [x] **P3 真实 daemon**：模型适配层（OpenAI 兼容流式 + 思维链分离）、真实 Agent 循环（同一 AgentContext
+      契约）、真实工具沙箱（只读/写入 Diff 审查/高危命令策略+审批）、轨迹持久化（JSONL 轮转）、
+      按 `dsh.apiKey` 自动切换 mock/real
 
 ### 待办
 - [ ] P2：Webview Markdown 渲染 + 代码高亮、流式渲染批处理、会话历史与多会话管理、信任记忆（免审批白名单）、
       Diff 编辑后应用、配置面板
-- [ ] P3：Cordis 动态插件版真实 daemon（模型调用 + 工具沙箱 + 持久化轨迹）
+- [ ] P3.5+：把真实 daemon 打磨为生产可用（命令执行沙箱化 OS 隔离、模型 provider 多点位、审批信任记忆）
 - [ ] P4：VSCode Remote-SSH / WSL / Containers 场景（TLS + 鉴权升级）
 
 ## 已知局限
 
-- 参考 daemon 为模拟实现，不含真实模型调用与工具沙箱（用于演示协议）。
+- 真实模型经 OpenAI 兼容端点调用（DeepSeek/OpenAI）；其他 provider 需扩展 `ChatModel` 适配器。
+- 命令执行是"策略门控 + 人工审批"而非 OS 级沙箱隔离，确需运行时请谨慎配置命令白名单。
 - 断线续跑仅限同一 daemon 进程内；daemon 进程重启后会话丢失（`resume` 返回 `NotFound`，客户端新建会话）。
 - 未覆盖 VSCode Remote-SSH / WSL / Containers 场景（"仅 127.0.0.1"模型需升级为 TLS + 鉴权）。
 - 无信任记忆（免审批白名单），高频使用会产生审批疲劳。

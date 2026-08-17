@@ -31,11 +31,15 @@ import {
   InitializeResult,
   EventApprovalRequest,
   EventFilePatchPending,
+  EventTrajectory,
   SessionSendParams,
 } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
+import { ChatModel, createKeywordFakeModel, OpenAICompatibleModel } from './model';
 import { isPathInside } from './paths';
+import { RealAgentConfig, runRealAgent } from './realAgent';
 import { Session, SessionManager } from './sessionManager';
+import { TrajectoryStore } from './trajectoryStore';
 
 export interface DaemonServerOptions {
   token: string;
@@ -43,6 +47,10 @@ export interface DaemonServerOptions {
   preset?: string;
   apiKey?: string;
   port?: number;
+  /** Agent 实现：mock | real | auto（缺省） */
+  agent?: 'mock' | 'real' | 'auto';
+  /** 集成冒烟：agent=real 时用关键字假模型（不起网络） */
+  fakeModel?: boolean;
   /** 端口就绪后回调（随机端口时用于上报） */
   onPort?: (port: number) => void;
 }
@@ -56,11 +64,37 @@ const MAX_READ_BYTES = 1024 * 1024; // file.read 单文件上限 1MB
 
 export async function startDaemonServer(opts: DaemonServerOptions): Promise<DaemonServerHandle> {
   const sessions = new SessionManager(opts.workspaceRoot);
+  const trajectoryStore = new TrajectoryStore(path.join(opts.workspaceRoot, '.dsh', 'trajectory'));
   let capabilities: Required<AgentCapabilities> & { maxConcurrency: number } = {
     allowedTools: [],
     allowedDirs: [],
     maxConcurrency: 0,
   };
+  // 模型运行时配置（CLI 缺省 + 最后一次 initialize 覆盖）
+  const runtime = {
+    apiKey: opts.apiKey ?? '',
+    preset: opts.preset,
+    baseURL: '',
+    model: '',
+    agent: opts.agent ?? 'auto',
+  };
+
+  /** 解析最终生效的 Agent 实现。 */
+  function resolveAgentMode(): 'mock' | 'real' {
+    if (runtime.agent === 'real') return 'real';
+    if (runtime.agent === 'mock') return 'mock';
+    return runtime.apiKey ? 'real' : 'mock';
+  }
+
+  /** 依据运行时配置创建真实模型（auto 切换 + 集成假模型）。 */
+  function createModel(): ChatModel {
+    if (opts.fakeModel) return createKeywordFakeModel();
+    return new OpenAICompatibleModel({
+      baseURL: runtime.baseURL || undefined,
+      apiKey: runtime.apiKey,
+      model: runtime.model || undefined,
+    });
+  }
 
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
@@ -167,10 +201,17 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             allowedDirs: p.capabilities?.allowedDirs ?? [],
             maxConcurrency: p.capabilities?.maxConcurrency ?? 0,
           };
+          // 模型配置合并（CLI 缺省 < initialize 顶层 apiKey/preset < initialize.model）
+          if (p.apiKey) runtime.apiKey = p.apiKey;
+          if (p.preset) runtime.preset = p.preset;
+          if (p.model?.apiKey) runtime.apiKey = p.model.apiKey;
+          if (p.model?.baseURL) runtime.baseURL = p.model.baseURL;
+          if (p.model?.model) runtime.model = p.model.model;
+          if (p.model?.agent) runtime.agent = p.model.agent;
           const session = sessions.create();
           attach(conn, session);
           const result: InitializeResult = {
-            daemonVersion: '0.1.0-reference',
+            daemonVersion: '0.2.0',
             protocolVersion: '1.0',
             capabilities: {
               streaming: true,
@@ -182,6 +223,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               fileRead: true,
             },
             sessionId: session.id,
+            agent: resolveAgentMode(),
           };
           sendResult(conn.ws, req.id, result);
           return;
@@ -224,7 +266,13 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             sessionId: session.id,
             workspaceRoot: opts.workspaceRoot,
             capabilities,
-            notify: (method, params) => session.emit(method, params),
+            notify: (method, params) => {
+              session.emit(method, params);
+              // 轨迹持久化（P3.4）：仅 trajectory.record 事件落盘
+              if (method === EVENTS.Trajectory) {
+                trajectoryStore.append(session.id, params as EventTrajectory);
+              }
+            },
             waitForUser: (kind, snapshot) => {
               if (kind === 'approval') {
                 return session.registerApproval(snapshot as EventApprovalRequest);
@@ -244,10 +292,19 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               }
             },
           };
-          // 异步执行，不阻塞请求响应
-          void runFakeAgent(ctx, p).finally(() => {
-            session.end();
-          });
+          // P3.6：auto 切换 —— 有 apiKey（或显式 real）走真实模型，否则回退内置模拟
+          const agentMode = resolveAgentMode();
+          if (agentMode === 'real') {
+            const model = createModel();
+            const agentConfig: RealAgentConfig = { model };
+            void runRealAgent(ctx, p, agentConfig).finally(() => {
+              session.end();
+            });
+          } else {
+            void runFakeAgent(ctx, p).finally(() => {
+              session.end();
+            });
+          }
           return;
         }
         case METHODS.SessionCancel: {

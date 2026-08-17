@@ -4,7 +4,8 @@
  * 用法：
  *   node out/daemon/index.js \
  *     [--port <n>] [--port-file <path>] [--workspace <path>] \
- *     [--preset <name>] [--api-key <key>]
+ *     [--preset <name>] [--api-key <key>] \
+ *     [--agent mock|real|auto] [--fake-model]
  *
  * Token 优先取环境变量 DSH_DAEMON_TOKEN，其次 --token 参数。
  * 端口就绪后向 stdout 输出一行 `DSH_DAEMON_PORT=<port>`，便于父进程捕获。
@@ -20,6 +21,8 @@ interface CliArgs {
   preset: string;
   apiKey?: string;
   token: string;
+  agent: 'mock' | 'real' | 'auto';
+  fakeModel: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -28,6 +31,8 @@ function parseArgs(argv: string[]): CliArgs {
     workspace: process.cwd(),
     preset: 'default',
     token: process.env.DSH_DAEMON_TOKEN ?? '',
+    agent: 'auto',
+    fakeModel: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -51,6 +56,12 @@ function parseArgs(argv: string[]): CliArgs {
       case '--token':
         args.token = next();
         break;
+      case '--agent':
+        args.agent = next() as CliArgs['agent'];
+        break;
+      case '--fake-model':
+        args.fakeModel = true;
+        break;
     }
   }
   return args;
@@ -69,6 +80,8 @@ async function main(): Promise<void> {
     workspaceRoot: args.workspace,
     preset: args.preset,
     apiKey: args.apiKey,
+    agent: args.agent,
+    fakeModel: args.fakeModel,
     port: args.port,
     onPort: (port) => {
       console.log(`DSH_DAEMON_PORT=${port}`);

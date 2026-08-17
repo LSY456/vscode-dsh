@@ -39,7 +39,7 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 
 | method | params | result |
 | --- | --- | --- |
-| `initialize` | `{ workspaceRoot, apiKey?, preset?, capabilities?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities, sessionId? }` |
+| `initialize` | `{ workspaceRoot, apiKey?, preset?, model?, capabilities?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities, sessionId?, agent }` |
 | `session.create` | `{ id?, title? }` | `{ sessionId, title? }` |
 | `session.send` | `{ sessionId?, prompt, attachments? }` | `{ sessionId, accepted }` |
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
@@ -49,6 +49,17 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 | `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size }` |
 | `ping` | `{}` | `{ pong }` |
 | `shutdown` | `{}` | `{ bye }` |
+
+### `model`（真实模型接入）
+
+`initialize.model` 声明模型底座，daemon 端据此构建真实 Agent：
+
+- `baseURL?: string` —— OpenAI 兼容端点 base，缺省 `https://api.deepseek.com/v1`
+- `model?: string` —— 模型名，缺省 `deepseek-chat`（DeepSeek Reasoner 会流式返回 `reasoning_content`，投影为 `reasoning.delta`）
+- `apiKey?: string` —— 优先于顶层 `initialize.apiKey`
+- `agent?: 'mock' | 'real' | 'auto'` —— 实现选择；缺省 `auto` = 有 apiKey 则 real，否则 mock
+
+`initialize` 返回的 `agent` 字段标明本次实际生效的实现（`mock` | `real`）；扩展可据此在 UI 提示当前是否为真实模型。
 
 ### `capabilities`（能力分级）
 
@@ -122,7 +133,28 @@ session.send ──> (流式事件...) ──> approval.request ──挂起─�
 - `ts`：epoch 毫秒时间戳
 
 VSCode 侧将轨迹渲染为可折叠的"执行迹线"面板，并可据此实现审计、回放与失败定位；
-真实 daemon 的持久化轨迹存储（如 JSONL/DB）与此事件流一一对应，字段可扩展但不得删除现有语义。
+真实 daemon 的持久化轨迹会追加写 `.dsh/trajectory/<sessionId>.jsonl`（命中大小上限自动归档）。
+
+## 6b. Agent 工具约定（真实 daemon 实现参考）
+
+`session.send` 之后，daemon 内部驱动模型循环，模型通过 **fenced toolcall 块**发起工具调用：
+
+````text
+```toolcall
+{"tool":"read_file","input":{"path":"..."}}
+```
+````
+
+支持的工具与约束（真实 daemon 与参考实现保持一致）：
+
+| tool | input | 行为 |
+| --- | --- | --- |
+| `read_file` / `list_dir` | `{ path }` | 只读，路径护栏内；越界 `tool.executed { ok:false }` |
+| `write_file` | `{ path, content }` | 全量覆盖；先 `file.patch.pending` 走 Diff 审查，接受后写盘 |
+| `apply_patch` | `{ path, search, replace }` | 字符串替换；同样走补丁审查 |
+| `bash_execute` | `{ command }` | 高危：先命令策略门控，再 `approval.request`，批准后执行 |
+
+所有工具受 `capabilities.allowedTools` 约束（禁用即 `tool.executed { ok:false }`，不挂起）。
 
 ## 7. 错误码
 
@@ -141,4 +173,6 @@ VSCode 侧将轨迹渲染为可折叠的"执行迹线"面板，并可据此实�
 ## 8. 扩展建议
 
 - 客户端通知（无 `id` 的请求）为协议预留位，可用于上报编辑器事件（如文件切换）以实现被动上下文注入。
-- 真实 daemon（Cordis 动态插件版）须实现同一方法/事件名、上述错误码与挂起-恢复、续跑语义。
+- 参考 daemon 已内置两种实现：`mock`（关键字驱动，演示/测试）与 `real`（通过 `OpenAICompatibleModel`
+  调用真实模型 + 真实只读/写入/命令工具）。Cordis 动态插件版 daemon 只须复用同一 AgentContext 契约
+  与事件时序即可无缝替换。

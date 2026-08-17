@@ -140,13 +140,19 @@ export class DaemonManager {
         workspaceRoot,
         apiKey: cfg.get<string>('apiKey', ''),
         preset: cfg.get<string>('preset', 'default'),
+        model: {
+          baseURL: cfg.get<string>('model.baseURL', ''),
+          model: cfg.get<string>('model.model', ''),
+          apiKey: cfg.get<string>('apiKey', ''),
+          agent: 'auto',
+        },
         capabilities: {
           allowedTools: cfg.get<string[]>('capabilities.allowedTools', []),
           maxConcurrency: cfg.get<number>('capabilities.maxConcurrency', 0),
         },
         client: {
           name: 'vscode-dsh',
-          version: '0.1.0',
+          version: '0.2.0',
         },
       });
 

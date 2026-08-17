@@ -145,6 +145,34 @@ async function openSession(port, initializeParams) {
   return { ws, rpc, init };
 }
 
+/** 拉起 daemon 进程，返回 { child, port }（port 为 Promise）。 */
+function spawnDaemon(extraArgs) {
+  const child = spawn(process.execPath, [DAEMON_SCRIPT, ...extraArgs], {
+    env: { ...process.env, DSH_DAEMON_TOKEN: TOKEN },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stderr = '';
+  child.stderr.on('data', (d) => (stderr += d.toString()));
+  const port = new Promise((resolve, reject) => {
+    let out = '';
+    const timer = setTimeout(() => reject(new Error('daemon 端口超时: ' + stderr)), 15000);
+    child.stdout.on('data', (d) => {
+      out += d.toString();
+      const m = out.match(/DSH_DAEMON_PORT=(\d+)/);
+      if (m) {
+        clearTimeout(timer);
+        resolve(Number(m[1]));
+      }
+    });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error('daemon 退出 code=' + code + ': ' + stderr));
+    });
+  });
+  return { child, port };
+}
+
 async function main() {
   if (!fs.existsSync(DAEMON_SCRIPT)) {
     console.error('未找到 ' + DAEMON_SCRIPT + '，请先运行 npm run build');
@@ -162,29 +190,7 @@ async function main() {
 
   // ---- 1. 拉起 daemon
   console.log('[smoke] 拉起 daemon…');
-  const child = spawn(process.execPath, [DAEMON_SCRIPT, '--port', '0', '--workspace', tmpDir], {
-    env: { ...process.env, DSH_DAEMON_TOKEN: TOKEN },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-  let stderr = '';
-  child.stderr.on('data', (d) => (stderr += d.toString()));
-  const port = await new Promise((resolve, reject) => {
-    let out = '';
-    const timer = setTimeout(() => reject(new Error('daemon 端口超时: ' + stderr)), 15000);
-    child.stdout.on('data', (d) => {
-      out += d.toString();
-      const m = out.match(/DSH_DAEMON_PORT=(\d+)/);
-      if (m) {
-        clearTimeout(timer);
-        resolve(Number(m[1]));
-      }
-    });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error('daemon 退出 code=' + code + ': ' + stderr));
-    });
-  });
+  const port = await spawnDaemon(['--port', '0', '--workspace', tmpDir]).port;
   console.log('[smoke] daemon 端口:', port);
   const url = 'ws://127.0.0.1:' + port;
 
@@ -367,13 +373,59 @@ async function main() {
   }
   assert(readRejected, 'file.read 越界返回 -32012');
 
-  // ---- 10. ping / shutdown
+  // ---- 10. 真实 Agent 流水线（--agent real --fake-model，不起网络）
+  console.log('[smoke] 真实 Agent（假模型）…');
+  const realPort = await spawnDaemon(['--port', '0', '--workspace', tmpDir, '--agent', 'real', '--fake-model']).port;
+  const rconn = await openSession(realPort, {
+    workspaceRoot: tmpDir,
+    client: { name: 'smoke', version: '0.0.0' },
+  });
+  assert(rconn.init.agent === 'real', 'initialize 返回 agent=real');
+  const rsessionId = rconn.init.sessionId;
+
+  // read_file 工具（假模型按 prompt 关键字派发）
+  fs.writeFileSync(samplePath, original, 'utf8');
+  rconn.rpc.resetEvents();
+  await rconn.rpc.request('session.send', {
+    sessionId: rsessionId,
+    prompt: '请查看 sample.txt（read）',
+    attachments: [{ kind: 'file', path: samplePath, name: 'sample.txt', content: original }],
+  });
+  await rconn.rpc.waitFor((m) => m.method === 'tool.executed' && m.params.tool === 'read_file', '真实 read_file 执行');
+  const rread = rconn.rpc.events.find((m) => m.method === 'tool.executed' && m.params.tool === 'read_file');
+  assert(rread.params.ok === true, '真实 read_file ok');
+  await rconn.rpc.waitFor((m) => m.method === 'session.ended', '真实 read 会话结束');
+
+  // write_file 工具：补丁审查 → 接受 → 落盘
+  rconn.rpc.resetEvents();
+  await rconn.rpc.request('session.send', {
+    sessionId: rsessionId,
+    prompt: '请修改 sample.txt（write edit）',
+    attachments: [{ kind: 'file', path: samplePath, name: 'sample.txt', content: fs.readFileSync(samplePath, 'utf8') }],
+  });
+  const rpatch = await rconn.rpc.waitFor((m) => m.method === 'file.patch.pending', '真实 file.patch.pending');
+  await rconn.rpc.request('file.patch.respond', { sessionId: rsessionId, patchId: rpatch.params.patchId, accept: true });
+  await rconn.rpc.waitFor(
+    (m) => m.method === 'file.patch.result' && m.params.patchId === rpatch.params.patchId,
+    '真实 file.patch.result'
+  );
+  assert(fs.readFileSync(samplePath, 'utf8').includes('REAL-DAEMON-WRITE'), '真实 Agent 补丁已落盘');
+  await rconn.rpc.waitFor((m) => m.method === 'session.ended', '真实写会话结束');
+
+  // 验证轨迹已持久化到 .dsh/trajectory
+  const trajFile = path.join(tmpDir, '.dsh', 'trajectory', rsessionId + '.jsonl');
+  assert(fs.existsSync(trajFile) && fs.statSync(trajFile).size > 0, '轨迹已持久化（.dsh/trajectory/*.jsonl）');
+
+  await rconn.rpc.request('shutdown', {});
+  rconn.ws.close();
+
+  // ---- 11. ping / shutdown（主 daemon）
   const pong = await conn2.rpc.request('ping', {});
   assert(pong && typeof pong.pong === 'number', 'ping/pong 正常');
   await conn2.rpc.request('shutdown', {});
   conn2.ws.close();
 
-  // ---- 11. 清理
+  // ---- 12. 清理
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   } catch {

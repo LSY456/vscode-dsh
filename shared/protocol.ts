@@ -91,6 +91,18 @@ export const EVENTS = {
 // 握手（流程一：进程生命周期与建连握手）
 // ---------------------------------------------------------------------------
 
+/** 模型调用配置（P3：真实 daemon） */
+export interface ModelConfig {
+  /** API 端点 base，如 https://api.deepseek.com/v1 */
+  baseURL?: string;
+  /** 模型名，如 deepseek-chat */
+  model?: string;
+  /** 模型 API Key（优先于 InitializeParams.apiKey） */
+  apiKey?: string;
+  /** 实现选择：real（真实模型）| mock（内置模拟）| auto（缺省，有 key 则 real） */
+  agent?: 'mock' | 'real' | 'auto';
+}
+
 export interface InitializeParams {
   /** VSCode 当前打开的工作区根路径 */
   workspaceRoot: string;
@@ -98,6 +110,8 @@ export interface InitializeParams {
   apiKey?: string;
   /** Agent 预设名 */
   preset?: string;
+  /** 模型调用配置（真实 daemon 用） */
+  model?: ModelConfig;
   /** 客户端声明的能力诉求（daemon 端按需收紧） */
   capabilities?: {
     /** 允许使用的工具白名单；缺省/空数组 = 全部允许 */
@@ -127,6 +141,8 @@ export interface InitializeResult {
   };
   /** daemon 为本次连接分配/复用的默认会话 id */
   sessionId?: string;
+  /** 本次生效的 Agent 实现（real = 真实模型 / mock = 内置模拟） */
+  agent?: 'mock' | 'real';
 }
 
 // ---------------------------------------------------------------------------
