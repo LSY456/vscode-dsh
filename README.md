@@ -188,9 +188,9 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，77 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，94 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析）、工具沙箱（护栏/策略/默认拒绝）、
-  轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环。
+  轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、Webview Markdown 渲染与净化（XSS 安全）。
 - **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
   `file.read` 越界拒绝、以及真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘）。
 - **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 typecheck → build → unit → smoke（win/ubuntu），
@@ -233,9 +233,11 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - [x] **P3 真实 daemon**：模型适配层（OpenAI 兼容流式 + 思维链分离）、真实 Agent 循环（同一 AgentContext
       契约）、真实工具沙箱（只读/写入 Diff 审查/高危命令策略+审批）、轨迹持久化（JSONL 轮转）、
       按 `dsh.apiKey` 自动切换 mock/real
+- [x] **A1 Webview 渲染**：Markdown 渲染（marked + GFM）+ 代码高亮（highlight.js，常用语言）+ DOMPurify
+      统一净化（配合 CSP 双层防御 XSS），流式期间纯文本、结束时一次性安全渲染
 
 ### 待办
-- [ ] P2：Webview Markdown 渲染 + 代码高亮、流式渲染批处理、会话历史与多会话管理、信任记忆（免审批白名单）、
+- [ ] P2：流式渲染批处理、会话历史与多会话管理、信任记忆（免审批白名单）、
       Diff 编辑后应用、配置面板
 - [ ] P3.5+：把真实 daemon 打磨为生产可用（命令执行沙箱化 OS 隔离、模型 provider 多点位、审批信任记忆）
 - [ ] P4：VSCode Remote-SSH / WSL / Containers 场景（TLS + 鉴权升级）
@@ -247,7 +249,7 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - 断线续跑仅限同一 daemon 进程内；daemon 进程重启后会话丢失（`resume` 返回 `NotFound`，客户端新建会话）。
 - 未覆盖 VSCode Remote-SSH / WSL / Containers 场景（"仅 127.0.0.1"模型需升级为 TLS + 鉴权）。
 - 无信任记忆（免审批白名单），高频使用会产生审批疲劳。
-- Webview 为 vanilla JS：无 Markdown/代码高亮渲染、无会话历史持久化。
+- Webview 会话历史未持久化（刷新即丢），多会话管理待实现。
 
 ---
 
