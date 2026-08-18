@@ -1,4 +1,7 @@
-/* dsh Agent Webview UI（vanilla JS，无框架依赖）。 */
+/* dsh Agent Webview UI（vanilla JS，无框架依赖）。
+ * 经 esbuild 打包：本文件为 bundle 入口，import 的 Markdown 渲染模块会内联其中。 */
+import { renderMarkdown } from '../src/webview/render.js';
+
 (function () {
   'use strict';
 
@@ -67,7 +70,11 @@
   // -------------------------------------------------------------------------
 
   function addUser(text) {
-    addMessage(el('div', 'message user', text));
+    const node = el('div', 'message user');
+    // 用户消息同样按 Markdown 渲染，但只允许「已净化」的 HTML 进入 innerHTML
+    node.innerHTML = renderMarkdown(text);
+    addMessage(node);
+    return node;
   }
 
   function addSystem(text) {
@@ -100,6 +107,7 @@
     addMessage(assistantEl);
   }
 
+  // 流式期间累积纯文本（廉价、安全）；仅在此处一次性渲染为已净化的 Markdown
   function appendAssistant(delta) {
     ensureAssistant();
     assistantEl.textContent += delta;
@@ -108,7 +116,8 @@
 
   function finishAssistant() {
     if (assistantEl) {
-      assistantEl.textContent += '\n\n✅';
+      const raw = assistantEl.textContent;
+      assistantEl.innerHTML = renderMarkdown(raw);
     }
     assistantEl = null;
     reasoningEl = null;

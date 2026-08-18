@@ -114,7 +114,6 @@ body {
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--bg-elevated);
-  white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.6;
 }
@@ -350,3 +349,129 @@ button:disabled {
   color: var(--warn);
   min-width: 70px;
 }
+
+/* ---------- Markdown 渲染（A1：hljs 主题 + 排版） ---------- */
+.message.user p,
+.message.assistant p {
+  margin: 0 0 0.6em;
+}
+.message.user p:last-child,
+.message.assistant p:last-child {
+  margin-bottom: 0;
+}
+.message.user h1,
+.message.assistant h1 { font-size: 1.5em; margin: 0.8em 0 0.4em; }
+.message.user h2,
+.message.assistant h2 { font-size: 1.3em; margin: 0.7em 0 0.3em; }
+.message.user h3,
+.message.assistant h3 { font-size: 1.1em; margin: 0.6em 0 0.2em; }
+
+.message.user pre,
+.message.assistant pre {
+  background: #1a1a2e;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.message.user pre code,
+.message.assistant pre code {
+  background: none;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: #e4e4f0;
+}
+
+.message.user code,
+.message.assistant code {
+  background: #1a1a2e;
+  border: 1px solid #3b3b54;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.message.user blockquote,
+.message.assistant blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 0.5em 0;
+  padding: 0.3em 0.8em;
+  color: var(--text-muted);
+  background: #1a1a2e;
+  border-radius: 0 6px 6px 0;
+}
+
+.message.user ul,
+.message.user ol,
+.message.assistant ul,
+.message.assistant ol {
+  margin: 0.3em 0;
+  padding-left: 1.5em;
+}
+
+.message.user table,
+.message.assistant table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 12px;
+}
+.message.user th,
+.message.user td,
+.message.assistant th,
+.message.assistant td {
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  text-align: left;
+}
+.message.user th,
+.message.assistant th {
+  background: #1a1a2e;
+  font-weight: 600;
+}
+
+.message.user a,
+.message.assistant a {
+  color: var(--accent);
+}
+
+.message.user hr,
+.message.assistant hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.8em 0;
+}
+
+/* hljs 主题（暗色，匹配 --bg 色系） */
+.hljs { color: #e4e4f0; }
+.hljs-comment,
+.hljs-quote { color: #6a6a8a; font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-type { color: #c792ea; }
+.hljs-string,
+.hljs-regexp,
+.hljs-addition { color: #c3e88d; }
+.hljs-number,
+.hljs-literal,
+.hljs-boolean { color: #f78c6c; }
+.hljs-title,
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable { color: #82aaff; }
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-symbol,
+.hljs-section { color: #ffcb6b; }
+.hljs-selector-class,
+.hljs-selector-attr,
+.hljs-selector-pseudo { color: #c3e88d; }
+.hljs-deletion,
+.hljs-doctag,
+.hljs-meta { color: #ef6a6a; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: bold; }
