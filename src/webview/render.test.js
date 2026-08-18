@@ -36,13 +36,18 @@ describe('renderMarkdown：基础渲染', () => {
 });
 
 describe('renderMarkdown：代码块高亮与转义', () => {
-  it('fenced 代码块渲染为 <pre><code class="hljs">', () => {
-    const html = renderMarkdown('```js\nconst x = 1;\n```');
-    expect(html).toContain('<pre><code class="hljs language-js">');
-    // hljs 输出含 HTML 标签会打断文本，只验证关键内容词存在
-    expect(html).toContain('const');
-    expect(html).toContain('class="hljs-number"');
-    expect(html).toContain('1');
+  it('fenced 代码块：代码逐字完整呈现、按语言高亮（真实 DOM 验证）', () => {
+    const code = 'const x = 1;  // 尾注释';
+    const html = renderMarkdown('```js\n' + code + '\n```');
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const codeEl = doc.querySelector('pre code');
+    expect(codeEl).not.toBeNull();
+    // 关键：代码内容不丢字、不被短路（真实用户最关心的正确性）
+    expect(codeEl.textContent).toBe(code);
+    // 语言识别正确
+    expect(codeEl.className).toContain('language-js');
+    // 高亮确实生效：const 是 js 关键字，应生成 hljs-keyword token
+    expect(codeEl.querySelector('span[class*="hljs-keyword"]')).not.toBeNull();
   });
 
   it('代码块内的 <script> 必须作为文本转义呈现，绝不产生可执行标签', () => {

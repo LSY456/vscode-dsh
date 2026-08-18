@@ -165,7 +165,7 @@
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:check": "npm run typecheck && npm run build",
-    "test": "vitest run",
+    "test": "vitest run --pool=threads",
     "test:watch": "vitest",
     "smoke": "node esbuild.js && node scripts/smoke.js",
     "check": "npm run typecheck && npm run build && npm test && npm run smoke",

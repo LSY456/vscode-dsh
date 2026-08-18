@@ -15,10 +15,21 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ERROR_CODES, EVENTS, EventFilePatchPending, EventFilePatchResult, METHODS } from '../shared/protocol';
+import {
+  ERROR_CODES,
+  EVENTS,
+  EventFilePatchPending,
+  EventFilePatchResult,
+  EventMessageDelta,
+  EventSessionEnded,
+  EventSessionStarted,
+  METHODS,
+} from '../shared/protocol';
 import { captureContext } from './contextCapture';
+import { ConfigAccessor } from './configAccessor';
 import { DaemonManager } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
+import { SessionHistoryStore, SessionSummary } from './sessionHistory';
 
 interface ToWebview {
   kind: 'status' | 'event' | 'init';
@@ -26,27 +37,45 @@ interface ToWebview {
   detail?: string;
   method?: string;
   params?: unknown;
-  state?: { sessionId: string; connected: boolean };
+  state?: { sessionId: string; connected: boolean; history?: SessionSummary[] };
 }
 
 interface FromWebview {
-  kind: 'ready' | 'send' | 'cancel' | 'approval.respond' | 'patch.accept' | 'patch.reject' | 'patch.openDiff' | 'clear';
+  kind:
+    | 'ready'
+    | 'send'
+    | 'cancel'
+    | 'approval.respond'
+    | 'patch.accept'
+    | 'patch.reject'
+    | 'patch.openDiff'
+    | 'clear'
+    | 'history.open'
+    | 'settings.get'
+    | 'settings.apply'
+    | 'daemon.restart';
   prompt?: string;
   approvalId?: string;
   approved?: boolean;
   patchId?: string;
+  sessionId?: string;
+  /** 设置面板提交项；apiKey 留空表示不修改 */
+  settings?: { apiKey?: string; model?: string; baseURL?: string; preset?: string };
 }
 
 export class WebviewPanelHost {
   private panel: vscode.WebviewPanel | undefined;
   private ready = false;
   private readyWaiters: (() => void)[] = [];
+  private readonly history: SessionHistoryStore;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly daemon: DaemonManager,
-    private readonly diff: DshDiffManager
+    private readonly diff: DshDiffManager,
+    private readonly configAccessor: ConfigAccessor
   ) {
+    this.history = new SessionHistoryStore(context.workspaceState);
     // 订阅 daemon 事件并转发到面板（同时拦截补丁事件交给 Diff 管理器）
     this.daemon.client.onEvent((n) => {
       if (n.method === EVENTS.FilePatchPending) {
@@ -54,12 +83,35 @@ export class WebviewPanelHost {
       } else if (n.method === EVENTS.FilePatchResult) {
         this.diff.handlePatchResult(n.params as EventFilePatchResult);
       }
+      this.recordEvent(n.method, n.params);
       this.post({ kind: 'event', method: n.method, params: n.params });
     });
     // 订阅 daemon 状态变化
     this.daemon.onStatus((info) => {
       this.post({ kind: 'status', status: info.status, detail: info.detail });
     });
+  }
+
+  /** 从 daemon 事件流构建会话历史（会话开始/回答流/结束）。 */
+  private recordEvent(method: string, params: unknown): void {
+    const sid = (params as { sessionId?: string } | null)?.sessionId;
+    if (!sid) return;
+    switch (method) {
+      case EVENTS.SessionStarted:
+        this.history.startSession(sid, (params as EventSessionStarted).title);
+        break;
+      case EVENTS.MessageDelta:
+        this.history.appendAssistantDelta(sid, (params as EventMessageDelta).delta);
+        break;
+      case EVENTS.MessageDone:
+        this.history.finishAssistant(sid);
+        break;
+      case EVENTS.SessionEnded:
+        this.history.endSession(sid);
+        break;
+      default:
+        break;
+    }
   }
 
   createOrShow(): void {
@@ -111,7 +163,11 @@ export class WebviewPanelHost {
         this.readyWaiters = [];
         this.post({
           kind: 'init',
-          state: { sessionId: this.daemon.getSessionId(), connected: this.daemon.client.isOpen },
+          state: {
+            sessionId: this.daemon.getSessionId(),
+            connected: this.daemon.client.isOpen,
+            history: this.history.list(),
+          },
         });
         return;
       case 'send':
@@ -161,6 +217,28 @@ export class WebviewPanelHost {
       case 'patch.openDiff':
         if (msg.patchId) await this.diff.openDiff(msg.patchId);
         return;
+      case 'history.open': {
+        const rec = this.history.get(msg.sessionId ?? '');
+        if (rec) this.post({ kind: 'event', method: 'history.loaded', params: rec });
+        return;
+      }
+      case 'settings.get': {
+        const config = this.configAccessor.getPanelConfig();
+        const hasApiKey = await this.configAccessor.hasApiKey();
+        this.post({ kind: 'event', method: 'settings.loaded', params: { config, hasApiKey } });
+        return;
+      }
+      case 'settings.apply': {
+        const s = msg.settings ?? {};
+        if (s.apiKey !== undefined) await this.configAccessor.setApiKey(s.apiKey);
+        await this.configAccessor.applyPanelConfig(s);
+        this.post({ kind: 'event', method: 'settings.applied', params: { restartNeeded: true } });
+        return;
+      }
+      case 'daemon.restart':
+        await this.daemon.restart();
+        this.post({ kind: 'event', method: 'daemon.restarted', params: {} });
+        return;
       case 'clear':
         // Webview 自行清空 DOM；扩展侧无需处理
         return;
@@ -181,6 +259,7 @@ export class WebviewPanelHost {
       this.post({ kind: 'event', method: 'user.message', params: { text: prompt } });
       const attachments = await captureContext();
       const sessionId = this.daemon.getSessionId();
+      if (sessionId) this.history.appendUser(sessionId, prompt);
       await this.daemon.client.request(METHODS.SessionSend, { sessionId, prompt, attachments });
     } catch (err) {
       void vscode.window.showErrorMessage(

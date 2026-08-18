@@ -95,10 +95,12 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test               # 单元测试（vitest，67 用例）
+npm test               # 单元测试（vitest，119 用例）
 npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 
-# 4. 配置真实模型（可选）：settings.json 中设置 dsh.apiKey（可配合 dsh.model.model 选模型）
+# 4. 配置真实模型（可选）：打开面板 → 设置，填写 API Key（SecretStorage 安全存储）与模型名；
+#    或直接配置 dsh.model.model / dsh.model.baseURL（旧 dsh.apiKey 明文配置会自动回迁到
+#    SecretStorage 并清除，不再落盘 settings.json）
 
 # 5. 在 VSCode 中按 F5 启动 Extension Development Host
 ```
@@ -121,7 +123,8 @@ npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并
 | `dsh.daemon.command` | `""` | 外部 daemon 启动命令模板（支持 `{portFile} {workspace} {token}` 占位） |
 | `dsh.daemon.port` | `0` | `external` 模式端口 |
 | `dsh.daemon.token` | `""` | `external` 模式握手令牌 |
-| `dsh.apiKey` / `dsh.preset` | `""` / `default` | 握手时传给 daemon（apiKey 非空则自动启用真实模型） |
+| `dsh.apiKey`（已弃用） | `""` | 旧版明文 API Key；首次读取自动回迁到 SecretStorage 并清除，推荐改用「面板 → 设置」 |
+| `dsh.preset` | `default` | 握手时传给 daemon 的 Agent 预设 |
 | `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
 | `dsh.model.model` | `deepseek-chat` | 模型名（如 `deepseek-chat` / `deepseek-reasoner`） |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
@@ -235,10 +238,15 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
       按 `dsh.apiKey` 自动切换 mock/real
 - [x] **A1 Webview 渲染**：Markdown 渲染（marked + GFM）+ 代码高亮（highlight.js，常用语言）+ DOMPurify
       统一净化（配合 CSP 双层防御 XSS），流式期间纯文本、结束时一次性安全渲染
+- [x] **A2 流式渲染批处理**：token 级 delta 按帧节流写 DOM（rAF，无 rAF 退避），消息结束前冲刷兜底，
+      长回答不再高频 reflow/抖动
+- [x] **A3 会话历史**：extension 侧 workspaceState 持久化（面板重开不丢 + 按工作区隔离）、
+      历史会话列表与一键回放、异常中断最后一段回答兜底落库
+- [x] **A4 配置面板 + 凭据安全化**：apiKey 迁移 VSCode SecretStorage（旧明文自动回迁并清除）、
+      面板化模型配置（API Key / 模型 / BaseURL / 预设），保存后一键重启 daemon 生效
 
 ### 待办
-- [ ] P2：流式渲染批处理、会话历史与多会话管理、信任记忆（免审批白名单）、
-      Diff 编辑后应用、配置面板
+- [ ] P2：信任记忆（免审批白名单）、Diff 编辑后应用
 - [ ] P3.5+：把真实 daemon 打磨为生产可用（命令执行沙箱化 OS 隔离、模型 provider 多点位、审批信任记忆）
 - [ ] P4：VSCode Remote-SSH / WSL / Containers 场景（TLS + 鉴权升级）
 
@@ -249,7 +257,7 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - 断线续跑仅限同一 daemon 进程内；daemon 进程重启后会话丢失（`resume` 返回 `NotFound`，客户端新建会话）。
 - 未覆盖 VSCode Remote-SSH / WSL / Containers 场景（"仅 127.0.0.1"模型需升级为 TLS + 鉴权）。
 - 无信任记忆（免审批白名单），高频使用会产生审批疲劳。
-- Webview 会话历史未持久化（刷新即丢），多会话管理待实现。
+- 会话历史存于 extension 侧（workspaceState），按工作区隔离，跨工作区/换机不可见。
 
 ---
 

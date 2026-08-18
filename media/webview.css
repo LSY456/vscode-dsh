@@ -475,3 +475,103 @@ button:disabled {
 .hljs-meta { color: #ef6a6a; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: bold; }
+
+/* ---------- 历史会话面板（A3） ---------- */
+#history-panel {
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 14px 10px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+#history-panel[hidden] {
+  display: none;
+}
+.history-head {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px 6px;
+}
+.history-item {
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.history-item:hover {
+  background: var(--bg-card);
+}
+.history-item-title {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.history-item-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.history-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 10px;
+  text-align: center;
+}
+
+/* ---------- 设置面板（A4） ---------- */
+#settings-panel {
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 14px 14px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+#settings-panel[hidden] {
+  display: none;
+}
+.settings-head {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px 8px;
+}
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 10px;
+}
+.settings-field > span {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.settings-field .muted {
+  font-size: 11px;
+}
+.settings-field input {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+.settings-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.settings-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.settings-msg {
+  margin-top: 8px;
+  font-size: 12px;
+  text-align: right;
+  min-height: 1em;
+}
