@@ -8,6 +8,7 @@
  *  - 命令：dsh.openPanel / dsh.sendSelection / dsh.daemon.restart / dsh.daemon.status
  */
 import * as vscode from 'vscode';
+import { ConfigAccessor } from './configAccessor';
 import { captureContext } from './contextCapture';
 import { DaemonManager, DaemonStatus } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
@@ -29,10 +30,26 @@ export function activate(context: vscode.ExtensionContext): void {
   logger.init(context);
   logger.info('vscode-dsh 激活');
 
-  const daemon = new DaemonManager({ extensionPath: context.extensionPath });
+  // apiKey 安全化（A4）：SecretStorage 优先、旧明文自动回迁清除
+  const configAccessor = new ConfigAccessor(
+    {
+      get: (k) => context.secrets.get(k),
+      store: (k, v) => context.secrets.store(k, v),
+      delete: (k) => context.secrets.delete(k),
+    },
+    {
+      get: <T,>(k: string, d: T): T => vscode.workspace.getConfiguration('dsh').get<T>(k, d),
+      update: (k, v) =>
+        Promise.resolve(
+          vscode.workspace.getConfiguration('dsh').update(k, v, vscode.ConfigurationTarget.Global)
+        ),
+    }
+  );
+
+  const daemon = new DaemonManager({ extensionPath: context.extensionPath, configAccessor });
   activeDaemon = daemon;
   const diff = new DshDiffManager(() => daemon.client);
-  const panel = new WebviewPanelHost(context, daemon, diff);
+  const panel = new WebviewPanelHost(context, daemon, diff, configAccessor);
 
   // ---- 状态栏
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

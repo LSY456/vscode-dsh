@@ -17,6 +17,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { ERROR_CODES, InitializeResult, METHODS, SessionResumeResult } from '../shared/protocol';
 import { VSD_DSH_VERSION } from '../shared/version';
+import type { ConfigAccessor } from './configAccessor';
 import { logger } from './logger';
 import { DshClient } from './wsClient';
 
@@ -29,6 +30,8 @@ export interface StatusInfo {
 
 export interface DaemonManagerOptions {
   extensionPath: string;
+  /** 注入后 apiKey 经 SecretStorage 读取（A4 安全化）；缺省回退 settings.json（兼容裸用） */
+  configAccessor?: ConfigAccessor;
 }
 
 const PORT_FILE_REL = path.join('.dsh', 'daemon.json');
@@ -137,14 +140,18 @@ export class DaemonManager {
     try {
       const workspaceRoot = this.getWorkspaceRoot();
       const cfg = vscode.workspace.getConfiguration('dsh');
+      // apiKey 优先经 SecretStorage（A4）；未注入时回退旧明文 settings（向后兼容）
+      const apiKey = this.opts.configAccessor
+        ? await this.opts.configAccessor.getApiKey()
+        : cfg.get<string>('apiKey', '');
       const result = await this.client.request<InitializeResult>(METHODS.Initialize, {
         workspaceRoot,
-        apiKey: cfg.get<string>('apiKey', ''),
+        apiKey,
         preset: cfg.get<string>('preset', 'default'),
         model: {
           baseURL: cfg.get<string>('model.baseURL', ''),
           model: cfg.get<string>('model.model', ''),
-          apiKey: cfg.get<string>('apiKey', ''),
+          apiKey,
           agent: 'auto',
         },
         capabilities: {

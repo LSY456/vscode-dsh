@@ -1,6 +1,7 @@
 /* dsh Agent Webview UI（vanilla JS，无框架依赖）。
  * 经 esbuild 打包：本文件为 bundle 入口，import 的 Markdown 渲染模块会内联其中。 */
 import { renderMarkdown } from '../src/webview/render.js';
+import { createBatcher } from '../src/webview/streamBatcher.js';
 
 (function () {
   'use strict';
@@ -19,10 +20,25 @@ import { renderMarkdown } from '../src/webview/render.js';
   const sessionEl = $('session-id');
   const trajectoryBox = $('trajectory-box');
   const trajectoryEl = $('trajectory');
+  const btnHistory = $('btn-history');
+  const historyPanel = $('history-panel');
+  const historyList = $('history-list');
+  const btnSettings = $('btn-settings');
+  const settingsPanel = $('settings-panel');
+  const settingsForm = $('settings-form');
+  const inpApiKey = $('inp-apikey');
+  const inpModel = $('inp-model');
+  const inpBaseURL = $('inp-baseurl');
+  const inpPreset = $('inp-preset');
+  const btnSettingsRestart = $('btn-settings-restart');
+  const btnSettingsClose = $('btn-settings-close');
+  const settingsMsg = $('settings-msg');
 
   let running = false;
   let reasoningEl = null;
   let assistantEl = null;
+  let reasoningBatcher = null;
+  let assistantBatcher = null;
   const toolCards = new Map(); // tool -> card element
   const patchCards = new Map(); // patchId -> card element
   const approvalCards = new Map(); // approvalId -> card element
@@ -93,34 +109,124 @@ import { renderMarkdown } from '../src/webview/render.js';
     reasoningEl = el('pre', '', '');
     details.appendChild(reasoningEl);
     addMessage(details);
+    // 每个元素一个新的 batch 器，flush 回调写到当前 reasoning 元素
+    reasoningBatcher = createBatcher((text) => {
+      reasoningEl.textContent += text;
+      scrollBottom();
+    });
   }
 
+  // 流式 delta 先入 batch 器，按帧节流写 DOM（见 src/webview/streamBatcher）
   function appendReasoning(delta) {
     ensureReasoning();
-    reasoningEl.textContent += delta;
-    scrollBottom();
+    reasoningBatcher.append(delta);
   }
 
   function ensureAssistant() {
     if (assistantEl) return;
     assistantEl = el('div', 'message assistant');
     addMessage(assistantEl);
+    assistantBatcher = createBatcher((text) => {
+      assistantEl.textContent += text;
+      scrollBottom();
+    });
   }
 
   // 流式期间累积纯文本（廉价、安全）；仅在此处一次性渲染为已净化的 Markdown
   function appendAssistant(delta) {
     ensureAssistant();
-    assistantEl.textContent += delta;
-    scrollBottom();
+    assistantBatcher.append(delta);
   }
 
   function finishAssistant() {
+    // 先冲刷剩余缓冲，避免最后一段 token 丢失，再做一次性 Markdown 渲染
+    if (assistantBatcher) assistantBatcher.flush();
     if (assistantEl) {
       const raw = assistantEl.textContent;
       assistantEl.innerHTML = renderMarkdown(raw);
     }
+    if (reasoningBatcher) reasoningBatcher.flush();
     assistantEl = null;
+    assistantBatcher = null;
     reasoningEl = null;
+    reasoningBatcher = null;
+  }
+
+  // 清空当前时机（清空视图与历史回放共用）
+  function clearMessages() {
+    messagesEl.innerHTML = '';
+    emptyEl.style.display = '';
+    trajectoryEl.innerHTML = '';
+    trajectoryBox.hidden = true;
+    toolCards.clear();
+    patchCards.clear();
+    approvalCards.clear();
+    for (const t of approvalTimers.values()) clearInterval(t);
+    approvalTimers.clear();
+    if (reasoningBatcher) { reasoningBatcher.reset(); reasoningBatcher = null; }
+    if (assistantBatcher) { assistantBatcher.reset(); assistantBatcher = null; }
+    reasoningEl = null;
+    assistantEl = null;
+    sessionEl.textContent = '';
+    setRunning(false);
+  }
+
+  // 历史会话列表（A3）
+  function renderHistory(list) {
+    historyList.innerHTML = '';
+    if (!Array.isArray(list) || list.length === 0) {
+      historyList.appendChild(el('div', 'history-empty', '暂无历史会话'));
+      return;
+    }
+    for (const s of list) {
+      const item = el('div', 'history-item');
+      item.appendChild(el('div', 'history-item-title', s.title || '(空会话)'));
+      const meta = new Date(s.createdAt).toLocaleString() + ' · ' + s.messageCount + ' 条消息';
+      item.appendChild(el('div', 'history-item-meta', meta));
+      item.addEventListener('click', () => {
+        vscode.postMessage({ kind: 'history.open', sessionId: s.sessionId });
+      });
+      historyList.appendChild(item);
+    }
+  }
+
+  // 回放历史会话：清空视图后按 role 渲染完整消息（统一走 renderMarkdown 净化）
+  function renderHistoryMessages(rec) {
+    clearMessages();
+    if (!rec || !Array.isArray(rec.messages)) return;
+    for (const m of rec.messages) {
+      if (m.role === 'user') {
+        const node = el('div', 'message user');
+        node.innerHTML = renderMarkdown(m.text);
+        addMessage(node);
+      } else if (m.role === 'assistant') {
+        const node = el('div', 'message assistant');
+        node.innerHTML = renderMarkdown(m.text);
+        addMessage(node);
+      } else {
+        addSystem(m.text);
+      }
+    }
+    sessionEl.textContent = 'history: ' + (rec.title || rec.sessionId);
+    scrollBottom();
+  }
+
+  // 设置面板（A4）：打开时向扩展请求当前配置
+  function openSettings() {
+    historyPanel.hidden = true;
+    settingsPanel.hidden = false;
+    settingsMsg.textContent = '';
+    btnSettingsRestart.hidden = true;
+    btnSettingsRestart.disabled = false;
+    vscode.postMessage({ kind: 'settings.get' });
+  }
+
+  function fillSettings(params) {
+    const cfg = (params && params.config) || {};
+    inpApiKey.placeholder = params && params.hasApiKey ? '已设置（留空不修改）' : '未设置';
+    inpModel.value = cfg.model || '';
+    inpBaseURL.value = cfg.baseURL || '';
+    inpPreset.value = cfg.preset || '';
   }
 
   // -------------------------------------------------------------------------
@@ -379,6 +485,21 @@ import { renderMarkdown } from '../src/webview/render.js';
         finishAssistant();
         addSystem('会话结束（' + (params.reason || 'completed') + '）');
         break;
+      case 'history.loaded':
+        renderHistoryMessages(params);
+        break;
+      case 'settings.loaded':
+        fillSettings(params);
+        break;
+      case 'settings.applied':
+        settingsMsg.textContent = '已保存，重启 daemon 后生效。';
+        btnSettingsRestart.hidden = false;
+        inpApiKey.value = '';
+        break;
+      case 'daemon.restarted':
+        btnSettingsRestart.disabled = false;
+        settingsMsg.textContent = 'daemon 已重启。';
+        break;
       case 'error':
         setRunning(false);
         addError(params.message);
@@ -397,6 +518,7 @@ import { renderMarkdown } from '../src/webview/render.js';
       case 'init':
         sessionEl.textContent = msg.state && msg.state.sessionId ? 'session: ' + msg.state.sessionId : '';
         if (msg.state && msg.state.connected) setStatus('connected', '');
+        renderHistory(msg.state && msg.state.history);
         break;
       case 'event':
         handleEvent(msg.method, msg.params);
@@ -423,20 +545,40 @@ import { renderMarkdown } from '../src/webview/render.js';
   btnCancel.addEventListener('click', () => {
     vscode.postMessage({ kind: 'cancel' });
   });
-  btnClear.addEventListener('click', () => {
-    messagesEl.innerHTML = '';
-    emptyEl.style.display = '';
-    trajectoryEl.innerHTML = '';
-    trajectoryBox.hidden = true;
-    toolCards.clear();
-    patchCards.clear();
-    approvalCards.clear();
-    for (const t of approvalTimers.values()) clearInterval(t);
-    approvalTimers.clear();
-    reasoningEl = null;
-    assistantEl = null;
-    sessionEl.textContent = '';
-    setRunning(false);
+  btnClear.addEventListener('click', clearMessages);
+  btnHistory.addEventListener('click', () => {
+    settingsPanel.hidden = true;
+    historyPanel.hidden = !historyPanel.hidden;
+  });
+  btnSettings.addEventListener('click', () => {
+    if (settingsPanel.hidden) openSettings();
+    else settingsPanel.hidden = true;
+  });
+  btnSettingsClose.addEventListener('click', () => {
+    settingsPanel.hidden = true;
+  });
+  btnSettingsRestart.addEventListener('click', () => {
+    btnSettingsRestart.disabled = true;
+    settingsMsg.textContent = '正在重启 daemon…';
+    vscode.postMessage({ kind: 'daemon.restart' });
+  });
+  settingsForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const apiKey = inpApiKey.value.trim();
+    const model = inpModel.value.trim();
+    const baseURL = inpBaseURL.value.trim();
+    const preset = inpPreset.value.trim();
+    // apiKey 留空表示不修改（不上报空串，避免误删已存凭据）
+    vscode.postMessage({
+      kind: 'settings.apply',
+      settings: {
+        ...(apiKey ? { apiKey } : {}),
+        model,
+        baseURL,
+        preset,
+      },
+    });
+    settingsMsg.textContent = '保存中…';
   });
 
   inputEl.addEventListener('keydown', (e) => {
