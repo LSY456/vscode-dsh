@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentContext, runFakeAgent } from './agent';
+import { isPathInside } from './paths';
 import { sleep } from './test-utils';
 
 let tmpDir: string;
@@ -101,6 +102,59 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
     expect(err).toBeTruthy();
     expect(err.params.code).toBe(ERROR_CODES.PathOutsideWorkspace);
     expect(ctx.events.some((e) => e.method === EVENTS.FilePatchPending)).toBe(false);
+  });
+
+  it('真实用户场景：只给文件名（请修改 test.txt）-> 解析到工作区内新建', async () => {
+    const ctx = makeCtx();
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改 test.txt，把 TODO 替换为 DONE',
+    });
+    const pending = await waitEvent(ctx, EVENTS.FilePatchPending);
+    expect(ctx.waiters[0].kind).toBe('patch');
+    // 真实语义断言：目标必须是工作区内的 test.txt（不依赖 canonical 大小写形态）
+    expect(isPathInside(tmpDir, pending.params.path)).toBe(true);
+    expect(path.basename(pending.params.path)).toBe('test.txt');
+    expect(pending.params.oldContent).toBeUndefined(); // 文件不存在 => 新建分支
+
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    const created = path.join(tmpDir, 'test.txt');
+    expect(fs.existsSync(created)).toBe(true);
+    expect(fs.readFileSync(created, 'utf8')).toContain('edited by dsh mock agent');
+  });
+
+  it('相对路径含目录（components/App.tsx）-> 解析到工作区内', async () => {
+    const ctx = makeCtx();
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改 components/App.tsx，把 TODO 替换为 DONE',
+    });
+    const pending = await waitEvent(ctx, EVENTS.FilePatchPending);
+    expect(isPathInside(tmpDir, pending.params.path)).toBe(true);
+    expect(path.basename(pending.params.path)).toBe('App.tsx');
+    expect(path.dirname(pending.params.path).split(path.sep).pop()).toBe('components');
+
+    ctx.waiters[0].resolve(false); // 拒绝即可，不写盘
+    await run;
+    expect(fs.existsSync(path.join(tmpDir, 'components', 'App.tsx'))).toBe(false);
+  });
+
+  it('无路径可解析时兜底到工作区内 output.txt（而不是进程启动目录）', async () => {
+    const ctx = makeCtx();
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改文件内容，把 TODO 替换为 DONE',
+    });
+    const pending = await waitEvent(ctx, EVENTS.FilePatchPending);
+    expect(isPathInside(tmpDir, pending.params.path)).toBe(true);
+    expect(path.basename(pending.params.path)).toBe('output.txt');
+    // 显式断言指向工作区根（修复前指向 daemon 进程启动目录）
+    expect(path.dirname(pending.params.path)).not.toContain('Microsoft VS Code');
+
+    ctx.waiters[0].resolve(false);
+    await run;
   });
 });
 

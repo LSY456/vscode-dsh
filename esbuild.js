@@ -9,6 +9,7 @@
  * 用法：node esbuild.js [--watch]
  */
 const esbuild = require('esbuild');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -35,6 +36,16 @@ async function copyMedia() {
 }
 
 async function main() {
+  // 构建指纹：每次构建生成随机 buildId 落盘 out/buildId.json。
+  // daemon 握手时上报，扩展比对发现不一致即复用到了旧构建 daemon，自动回收重启。
+  const buildId = crypto.randomBytes(8).toString('hex');
+  fs.mkdirSync(path.join(__dirname, 'out'), { recursive: true });
+  fs.writeFileSync(
+    path.join(__dirname, 'out', 'buildId.json'),
+    JSON.stringify({ id: buildId, ts: Date.now() }, null, 2)
+  );
+  console.log(`[esbuild] buildId=${buildId}`);
+
   // 扩展宿主 / daemon（node 平台）
   const nodeCtx = await esbuild.context({
     ...common,

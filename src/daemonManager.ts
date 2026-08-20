@@ -15,6 +15,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { isStaleDaemon, readBuildId } from '../shared/buildId';
 import { ERROR_CODES, InitializeResult, METHODS, SessionResumeResult } from '../shared/protocol';
 import { VSD_DSH_VERSION } from '../shared/version';
 import type { ConfigAccessor } from './configAccessor';
@@ -188,6 +189,20 @@ export class DaemonManager {
       }
 
       this.reconnectAttempt = 0;
+
+      // 陈旧 daemon 防护：升级装新版扩展后，工作区里可能还有旧构建的 daemon 进程存活，
+      // auto 探测会直接复用（真实事故：修复后的逻辑因复用旧进程而不生效）。
+      // 构建指纹（buildId）每次构建变化，比对不一致 => 回收旧进程并重新拉起。
+      if (isStaleDaemon(readBuildId(), result.buildId)) {
+        logger.warn(
+          `复用 daemon 构建过旧（报告 ${result.buildId}，期望 ${readBuildId()}），回收并重启`
+        );
+        this.setStatus('starting', '回收陈旧 daemon，正在重启…');
+        await this.recycleStaleDaemon();
+        await this.start();
+        return;
+      }
+
       this.setStatus(
         'connected',
         `已连接 daemon v${result.daemonVersion}（协议 ${result.protocolVersion}，会话 ${this.sessionId || '—'}）`
@@ -394,6 +409,39 @@ export class DaemonManager {
       this.child = null;
     }
     this.setStatus('stopped', '已停止');
+  }
+
+  /**
+   * 回收陈旧 daemon（升级后工作区里残留的旧构建进程）：
+   * 断开连接 -> 读端口文件拿 pid 强杀 -> 删除端口文件，为重新 start 清场。
+   */
+  private async recycleStaleDaemon(): Promise<void> {
+    const portFile = path.join(this.getWorkspaceRoot(), PORT_FILE_REL);
+    let pid: number | undefined;
+    try {
+      const info = JSON.parse(fs.readFileSync(portFile, 'utf8')) as { pid?: unknown };
+      if (typeof info.pid === 'number') pid = info.pid;
+    } catch {
+      /* 端口文件缺失/损坏：无需回收 */
+    }
+
+    this.client.close(); // status 已是 starting，onClose 不会触发重连
+
+    if (pid) {
+      try {
+        // Windows 下 process.kill 直接终止进程（无优雅信号）
+        process.kill(pid);
+        logger.info(`已结束陈旧 daemon 进程 pid=${pid}`);
+      } catch (e) {
+        logger.warn(`结束陈旧 daemon 失败（可能已退出）: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    try {
+      fs.unlinkSync(portFile);
+      logger.info(`已移除端口文件 ${portFile}`);
+    } catch {
+      /* 无文件 */
+    }
   }
 
   private getWorkspaceRoot(): string {

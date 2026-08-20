@@ -41,6 +41,7 @@ import { RealAgentConfig, runRealAgent } from './realAgent';
 import { Session, SessionManager } from './sessionManager';
 import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';
+import { readBuildId } from '../../shared/buildId';
 
 export interface DaemonServerOptions {
   token: string;
@@ -221,6 +222,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           attach(conn, session);
           const result: InitializeResult = {
             daemonVersion: VSD_DSH_VERSION,
+            buildId: readBuildId(),
             protocolVersion: '1.0',
             capabilities: {
               streaming: true,

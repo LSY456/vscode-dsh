@@ -129,6 +129,8 @@ export interface InitializeParams {
 
 export interface InitializeResult {
   daemonVersion: string;
+  /** 每次构建生成的随机指纹（陈旧 daemon 识别用，可选向后兼容） */
+  buildId?: string;
   protocolVersion: '1.0';
   capabilities: {
     streaming: boolean;

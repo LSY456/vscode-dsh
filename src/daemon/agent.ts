@@ -107,7 +107,11 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
   // ---- 3. 文件修改（触发补丁审批，目标路径须在工作区内，canonical 校验防符号链接逃逸）
   if (/修改|edit|write|创建|replace/i.test(prompt)) {
     const rawTarget =
-      attachments.find((a) => a.path)?.path ?? extractPath(prompt) ?? path.join(process.cwd(), 'output.txt');
+      attachments.find((a) => a.path)?.path ??
+      resolvePromptPath(ctx, prompt) ??
+      // 兜底：解析不出路径时落到工作区内（勿用 process.cwd()——那是 daemon 进程的
+      // 启动目录，VSCode 拉起时指向安装目录，会误产出越界路径）
+      path.join(ctx.workspaceRoot, 'output.txt');
 
     const target = safeResolve(ctx, rawTarget);
     if (target) {
@@ -256,9 +260,31 @@ function safeResolve(ctx: AgentContext, raw: string): string | null {
   }
 }
 
+/**
+ * 从 prompt 解析目标路径：绝对路径原样返回；相对路径/文件名解析到工作区内。
+ * 返回 null 表示 prompt 中没有可识别的路径（交由兜底）。
+ */
+function resolvePromptPath(ctx: AgentContext, prompt: string): string | null {
+  const extracted = extractPath(prompt);
+  if (!extracted) return null;
+  return path.isAbsolute(extracted) ? extracted : path.join(ctx.workspaceRoot, extracted);
+}
+
+/**
+ * 提取 prompt 中的路径：
+ *  - 优先绝对路径（Windows 盘符 C:\ 或 C:/、Unix 根路径 /...）。约束：路径前的
+ *    分隔符不能是单词字符/点/斜杠——否则 "components/App.tsx" 中间的 "/" 会被误判
+ *    为 Unix 根路径、"./conf/x.yaml" 会被误判为绝对路径；
+ *  - 否则匹配相对路径或文件名（可带 ./ ../ 前缀与多层目录），如 test.txt、
+ *    components/App.tsx。注意匹配必须带扩展名，避免把中文句子里普通英文词当路径。
+ * 注意：相对正则无捕获组，取完整匹配用 rel[0]（曾误用 rel[1] 恒为 undefined，
+ * 导致真实用户场景「请修改 test.txt」永远解析失败回退到 output.txt）。
+ */
 function extractPath(prompt: string): string | null {
-  const m = prompt.match(/([A-Za-z]:\\[^\s"']+|\/[^\s"']+)/);
-  return m ? m[1] : null;
+  const m = prompt.match(/(^|[^.\w])([A-Za-z]:[\\/][^\s"']+|\/[^\s"']+)/);
+  if (m) return m[2];
+  const rel = prompt.match(/(?:\.{0,2}[\\/])?[\w.-]+(?:[\\/][\w.-]+)*\.\w{1,8}\b/);
+  return rel ? rel[0] : null;
 }
 
 function buildNewContent(oldContent: string): string {
