@@ -33,6 +33,8 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   const btnSettingsRestart = $('btn-settings-restart');
   const btnSettingsClose = $('btn-settings-close');
   const settingsMsg = $('settings-msg');
+  const trustListEl = $('trust-list');
+  const btnTrustClear = $('btn-trust-clear');
 
   let running = false;
   let reasoningEl = null;
@@ -219,6 +221,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     btnSettingsRestart.hidden = true;
     btnSettingsRestart.disabled = false;
     vscode.postMessage({ kind: 'settings.get' });
+    vscode.postMessage({ kind: 'trust.list' }); // B1：同步加载信任规则
   }
 
   function fillSettings(params) {
@@ -228,6 +231,30 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     inpBaseURL.value = cfg.baseURL || '';
     inpPreset.value = cfg.preset || '';
   }
+
+  // ---- B1 信任记忆：设置面板中的免审批白名单管理
+  function renderTrust(rules) {
+    trustListEl.textContent = '';
+    if (!rules || rules.length === 0) {
+      trustListEl.appendChild(el('div', 'muted trust-empty', '暂无信任命令——审批卡点「接受并记住」来添加'));
+      return;
+    }
+    for (const r of rules) {
+      const row = el('div', 'trust-row');
+      const kind = el('span', 'badge' + (r.kind === 'exact' ? ' warn' : ''), r.kind === 'exact' ? '精确' : '前缀');
+      const pat = el('code', 'trust-pattern', r.pattern);
+      const time = el('span', 'muted trust-time', new Date(r.createdAt).toLocaleString());
+      row.appendChild(kind);
+      row.appendChild(pat);
+      row.appendChild(time);
+      trustListEl.appendChild(row);
+    }
+  }
+
+  btnTrustClear.addEventListener('click', () => {
+    vscode.postMessage({ kind: 'trust.clear' });
+    renderTrust([]); // 乐观清空；扩展回传 trust.loaded 再同步
+  });
 
   // -------------------------------------------------------------------------
   // 工具卡
@@ -299,8 +326,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     const actions = el('div', 'card-actions');
     const btnReject = el('button', 'danger', '拒绝');
     const btnAccept = el('button', 'ok-btn', '接受');
+    // B1 信任记忆：批准并记住 -> 同规则命令后续免审批（高危命令由 daemon 自动降级为精确匹配）
+    const btnTrust = el('button', 'ok-btn trust-btn', '接受并记住');
     function markExpired() {
-      btnAccept.disabled = btnReject.disabled = true;
+      btnAccept.disabled = btnTrust.disabled = btnReject.disabled = true;
       const badge = card.querySelector('.badge');
       if (badge) {
         badge.className = 'badge err';
@@ -310,12 +339,17 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     }
     btnReject.addEventListener('click', () => {
       vscode.postMessage({ kind: 'approval.respond', approvalId: p.approvalId, approved: false });
-      btnAccept.disabled = btnReject.disabled = true;
+      btnAccept.disabled = btnTrust.disabled = btnReject.disabled = true;
       stopTimer();
     });
     btnAccept.addEventListener('click', () => {
       vscode.postMessage({ kind: 'approval.respond', approvalId: p.approvalId, approved: true });
-      btnAccept.disabled = btnReject.disabled = true;
+      btnAccept.disabled = btnTrust.disabled = btnReject.disabled = true;
+      stopTimer();
+    });
+    btnTrust.addEventListener('click', () => {
+      vscode.postMessage({ kind: 'approval.respond', approvalId: p.approvalId, approved: true, trust: true });
+      btnAccept.disabled = btnTrust.disabled = btnReject.disabled = true;
       stopTimer();
     });
     function stopTimer() {
@@ -327,6 +361,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     }
     actions.appendChild(btnReject);
     actions.appendChild(btnAccept);
+    actions.appendChild(btnTrust);
     card.appendChild(actions);
     addMessage(card);
     approvalCards.set(p.approvalId, card);
@@ -495,6 +530,9 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
         settingsMsg.textContent = '已保存，重启 daemon 后生效。';
         btnSettingsRestart.hidden = false;
         inpApiKey.value = '';
+        break;
+      case 'trust.loaded':
+        renderTrust(params && params.rules);
         break;
       case 'daemon.restarted':
         btnSettingsRestart.disabled = false;

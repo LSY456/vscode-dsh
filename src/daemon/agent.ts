@@ -40,6 +40,8 @@ export interface AgentContext {
     snapshot: EventApprovalRequest | EventFilePatchPending
   ): Promise<boolean>;
   isCanceled(): boolean;
+  /** B1 信任记忆：命令是否命中免审批白名单（server 注入；测试缺省走审批） */
+  isTrusted?(command: string): boolean;
   /** 按需读取文件（须在工作区内），失败返回 undefined */
   readFile(target: string, maxBytes?: number): Promise<string | undefined>;
 }
@@ -182,6 +184,17 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
         durationMs: 0,
       });
       trajectory(ctx, 'tool', 'bash_execute 被禁用');
+    } else if (ctx.isTrusted?.('rm -rf build/ && npm run build')) {
+      // B1 信任记忆：白名单命中 -> 免审批直接执行（不发起 approval.request）
+      ctx.notify(EVENTS.ToolExecuted, {
+        sessionId: ctx.sessionId,
+        tool: 'bash_execute',
+        ok: true,
+        output: 'mock: 已执行（信任命令，跳过审批）',
+        durationMs: 0,
+        trusted: true,
+      });
+      trajectory(ctx, 'tool', 'bash_execute 命中信任规则，免审批');
     } else {
       const approvalId = `approval_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
       const approvalParams: EventApprovalRequest = {

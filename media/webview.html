@@ -49,6 +49,18 @@
       </div>
       <div id="settings-msg" class="settings-msg muted"></div>
     </form>
+
+    <div class="trust-section">
+      <div class="settings-head">信任的命令 <em class="muted">（免审批白名单）</em></div>
+      <p class="muted trust-hint">
+        审批卡点「接受并记住」后，同规则命令不再弹审批直接放行。规则脱敏存于工作区
+        <code>.dsh/trust.json</code>（权限 0600，可手动审阅删除）。
+      </p>
+      <div id="trust-list" class="trust-list"></div>
+      <div class="trust-actions">
+        <button type="button" id="btn-trust-clear" class="ghost danger">清空全部信任</button>
+      </div>
+    </div>
   </nav>
 
   <main id="main">

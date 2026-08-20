@@ -195,6 +195,32 @@ describe('Agent：高危工具审批与能力禁用', () => {
     expect(tool.params.ok).toBe(false); // 拒绝而非禁用
     expect(tool.params.output).toContain('拒绝');
   });
+
+  it('B1 信任记忆：命中白名单的 bash 免审批直接执行（不发起 approval.request）', async () => {
+    const ctx = makeCtx({ isTrusted: (cmd) => cmd === 'rm -rf build/ && npm run build' });
+    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: 'bash 执行构建（bash）' });
+    await run;
+    // 核心断言：免审批（零 approval.request、零挂起），且 tool.executed 标记 trusted
+    expect(ctx.events.some((e) => e.method === EVENTS.ApprovalRequest)).toBe(false);
+    expect(ctx.waiters).toHaveLength(0);
+    const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'bash_execute')!;
+    expect(tool.params.ok).toBe(true);
+    expect(tool.params.trusted).toBe(true);
+  });
+
+  it('B1 安全分层：allowedTools 禁用优先于信任放行（不因记住命令而绕过门禁）', async () => {
+    const ctx = makeCtx({
+      isTrusted: () => true, // 即便命中信任，仍须尊重工具白名单
+      capabilities: { allowedTools: ['read_file'] },
+    });
+    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
+    await run;
+    expect(ctx.events.some((e) => e.method === EVENTS.ApprovalRequest)).toBe(false);
+    const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'bash_execute')!;
+    expect(tool.params.ok).toBe(false);
+    expect(tool.params.output).toContain('禁用');
+    expect(tool.params.trusted).toBeUndefined();
+  });
 });
 
 describe('Agent：取消与按需读取', () => {

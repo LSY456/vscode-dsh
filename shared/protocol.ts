@@ -50,6 +50,8 @@ export const METHODS = {
   ApprovalRespond: 'approval.respond',
   FilePatchRespond: 'file.patch.respond',
   FileRead: 'file.read',
+  TrustList: 'trust.list',
+  TrustClear: 'trust.clear',
   Ping: 'ping',
   Shutdown: 'shutdown',
 } as const;
@@ -267,6 +269,25 @@ export interface ApprovalRespondParams {
   approvalId: string;
   approved: boolean;
   note?: string;
+  /** B1 信任记忆：true 且 approved 时，daemon 把该命令纳入免审批白名单 */
+  trust?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 信任记忆（B1：免审批白名单）
+// ---------------------------------------------------------------------------
+
+export type TrustRuleKind = 'exact' | 'prefix';
+
+export interface TrustRuleData {
+  id: string;
+  kind: TrustRuleKind;
+  pattern: string;
+  createdAt: number;
+}
+
+export interface TrustListResult {
+  rules: TrustRuleData[];
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +336,8 @@ export interface EventToolExecuted {
   ok: boolean;
   output?: string;
   durationMs?: number;
+  /** B1 信任记忆：true 表示命中免审批白名单放行 */
+  trusted?: boolean;
 }
 
 export interface EventApprovalRequest {

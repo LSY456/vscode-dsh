@@ -42,6 +42,7 @@ import { Session, SessionManager } from './sessionManager';
 import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';
 import { readBuildId } from '../../shared/buildId';
+import { TrustStore } from './trust';
 
 export interface DaemonServerOptions {
   token: string;
@@ -67,6 +68,8 @@ const MAX_READ_BYTES = 1024 * 1024; // file.read 单文件上限 1MB
 export async function startDaemonServer(opts: DaemonServerOptions): Promise<DaemonServerHandle> {
   const sessions = new SessionManager(opts.workspaceRoot);
   const trajectoryStore = new TrajectoryStore(path.join(opts.workspaceRoot, '.dsh', 'trajectory'));
+  // B1 信任记忆：免审批白名单，持久化于 <workspace>/.dsh/trust.json（0600，用户可审阅/删除）
+  const trustStore = new TrustStore({ file: path.join(opts.workspaceRoot, '.dsh', 'trust.json') });
   let capabilities: Required<AgentCapabilities> & { maxConcurrency: number } = {
     allowedTools: [],
     allowedDirs: [],
@@ -291,6 +294,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               return session.registerPatch(snapshot as EventFilePatchPending);
             },
             isCanceled: () => session.isCanceled(),
+            isTrusted: (command) => trustStore.matches(command),
             readFile: async (target, maxBytes) => {
               const r = resolvePath(target);
               if ('error' in r) return undefined;
@@ -343,11 +347,25 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           return;
         }
         case METHODS.ApprovalRespond: {
-          const p = req.params as { sessionId?: string; approvalId: string; approved: boolean };
+          const p = req.params as {
+            sessionId?: string;
+            approvalId: string;
+            approved: boolean;
+            trust?: boolean;
+          };
           const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
           if (!session) {
             sendError(conn.ws, req.id, ERROR_CODES.NotFound, 'session 不存在');
             return;
+          }
+          // B1 信任记忆：批准并记住 -> 先把命令纳入白名单，再完成审批
+          if (p?.trust && p?.approved) {
+            const input = session.getPendingApprovalInput();
+            const command = String(input?.command ?? input?.cmd ?? '').trim();
+            if (command) {
+              trustStore.add(command);
+              console.log(`[trust] 审批通过并记住了命令规则：${command}`);
+            }
           }
           const r = session.respondApproval(p?.approvalId ?? '', !!p?.approved);
           if (r === 'not_found') {
@@ -358,6 +376,16 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             sendError(conn.ws, req.id, ERROR_CODES.Expired, `审批已过期: ${p?.approvalId}`);
             return;
           }
+          sendResult(conn.ws, req.id, { ok: true });
+          return;
+        }
+        case METHODS.TrustList: {
+          sendResult(conn.ws, req.id, { rules: trustStore.list() });
+          return;
+        }
+        case METHODS.TrustClear: {
+          trustStore.clear();
+          console.log('[trust] 信任规则已全部清空');
           sendResult(conn.ws, req.id, { ok: true });
           return;
         }
