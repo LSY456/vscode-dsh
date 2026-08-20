@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentContext, runFakeAgent } from './agent';
+import { isPathInside } from './paths';
 import { sleep } from './test-utils';
 
 let tmpDir: string;
@@ -102,6 +103,59 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
     expect(err.params.code).toBe(ERROR_CODES.PathOutsideWorkspace);
     expect(ctx.events.some((e) => e.method === EVENTS.FilePatchPending)).toBe(false);
   });
+
+  it('真实用户场景：只给文件名（请修改 test.txt）-> 解析到工作区内新建', async () => {
+    const ctx = makeCtx();
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改 test.txt，把 TODO 替换为 DONE',
+    });
+    const pending = await waitEvent(ctx, EVENTS.FilePatchPending);
+    expect(ctx.waiters[0].kind).toBe('patch');
+    // 真实语义断言：目标必须是工作区内的 test.txt（不依赖 canonical 大小写形态）
+    expect(isPathInside(tmpDir, pending.params.path)).toBe(true);
+    expect(path.basename(pending.params.path)).toBe('test.txt');
+    expect(pending.params.oldContent).toBeUndefined(); // 文件不存在 => 新建分支
+
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    const created = path.join(tmpDir, 'test.txt');
+    expect(fs.existsSync(created)).toBe(true);
+    expect(fs.readFileSync(created, 'utf8')).toContain('edited by dsh mock agent');
+  });
+
+  it('相对路径含目录（components/App.tsx）-> 解析到工作区内', async () => {
+    const ctx = makeCtx();
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改 components/App.tsx，把 TODO 替换为 DONE',
+    });
+    const pending = await waitEvent(ctx, EVENTS.FilePatchPending);
+    expect(isPathInside(tmpDir, pending.params.path)).toBe(true);
+    expect(path.basename(pending.params.path)).toBe('App.tsx');
+    expect(path.dirname(pending.params.path).split(path.sep).pop()).toBe('components');
+
+    ctx.waiters[0].resolve(false); // 拒绝即可，不写盘
+    await run;
+    expect(fs.existsSync(path.join(tmpDir, 'components', 'App.tsx'))).toBe(false);
+  });
+
+  it('无路径可解析时兜底到工作区内 output.txt（而不是进程启动目录）', async () => {
+    const ctx = makeCtx();
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改文件内容，把 TODO 替换为 DONE',
+    });
+    const pending = await waitEvent(ctx, EVENTS.FilePatchPending);
+    expect(isPathInside(tmpDir, pending.params.path)).toBe(true);
+    expect(path.basename(pending.params.path)).toBe('output.txt');
+    // 显式断言指向工作区根（修复前指向 daemon 进程启动目录）
+    expect(path.dirname(pending.params.path)).not.toContain('Microsoft VS Code');
+
+    ctx.waiters[0].resolve(false);
+    await run;
+  });
 });
 
 describe('Agent：高危工具审批与能力禁用', () => {
@@ -140,6 +194,32 @@ describe('Agent：高危工具审批与能力禁用', () => {
     const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'bash_execute')!;
     expect(tool.params.ok).toBe(false); // 拒绝而非禁用
     expect(tool.params.output).toContain('拒绝');
+  });
+
+  it('B1 信任记忆：命中白名单的 bash 免审批直接执行（不发起 approval.request）', async () => {
+    const ctx = makeCtx({ isTrusted: (cmd) => cmd === 'rm -rf build/ && npm run build' });
+    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: 'bash 执行构建（bash）' });
+    await run;
+    // 核心断言：免审批（零 approval.request、零挂起），且 tool.executed 标记 trusted
+    expect(ctx.events.some((e) => e.method === EVENTS.ApprovalRequest)).toBe(false);
+    expect(ctx.waiters).toHaveLength(0);
+    const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'bash_execute')!;
+    expect(tool.params.ok).toBe(true);
+    expect(tool.params.trusted).toBe(true);
+  });
+
+  it('B1 安全分层：allowedTools 禁用优先于信任放行（不因记住命令而绕过门禁）', async () => {
+    const ctx = makeCtx({
+      isTrusted: () => true, // 即便命中信任，仍须尊重工具白名单
+      capabilities: { allowedTools: ['read_file'] },
+    });
+    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
+    await run;
+    expect(ctx.events.some((e) => e.method === EVENTS.ApprovalRequest)).toBe(false);
+    const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'bash_execute')!;
+    expect(tool.params.ok).toBe(false);
+    expect(tool.params.output).toContain('禁用');
+    expect(tool.params.trusted).toBeUndefined();
   });
 });
 

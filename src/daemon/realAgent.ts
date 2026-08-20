@@ -279,6 +279,20 @@ async function dispatchTool(
       reason: `高危命令需要人工审批：${command.slice(0, 200)}`,
       expiresAt: Date.now() + 60_000,
     };
+    // B1 信任记忆：命中白名单 -> 免审批直接执行（不发起 approval.request）
+    if (ctx.isTrusted?.(command)) {
+      const run = await executeCommand(command, ctx.workspaceRoot, { timeoutMs: 30_000, runner: config.commandRunner });
+      ctx.notify(EVENTS.ToolExecuted, {
+        sessionId,
+        tool: 'bash_execute',
+        ok: run.ok,
+        output: run.output,
+        durationMs: run.durationMs,
+        trusted: true,
+      });
+      trajectory('tool', `bash_execute 命中信任规则，免审批（${run.ok ? 'ok' : '失败'}）`);
+      return run.output;
+    }
     ctx.notify(EVENTS.ApprovalRequest, approvalParams);
     trajectory('approval', 'approval.request bash_execute');
 

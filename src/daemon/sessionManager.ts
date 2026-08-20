@@ -181,6 +181,11 @@ export class Session {
     return r;
   }
 
+  /** 当前挂起审批的输入参数（B1 信任记忆用：approval.respond 带 trust 时取命令入白名单）。 */
+  getPendingApprovalInput(): Record<string, unknown> | null {
+    return this.approvalSnapshot ? { ...this.approvalSnapshot.input } : null;
+  }
+
   respondPatch(patchId: string, accept: boolean): 'ok' | 'expired' | 'not_found' {
     const r = this.respondPending('patch', patchId, accept);
     if (r === 'ok') {

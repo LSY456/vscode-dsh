@@ -53,10 +53,14 @@ interface FromWebview {
     | 'history.open'
     | 'settings.get'
     | 'settings.apply'
-    | 'daemon.restart';
+    | 'daemon.restart'
+    | 'trust.list'
+    | 'trust.clear';
   prompt?: string;
   approvalId?: string;
   approved?: boolean;
+  /** B1 信任记忆：审批通过并记住（免审批白名单） */
+  trust?: boolean;
   patchId?: string;
   sessionId?: string;
   /** 设置面板提交项；apiKey 留空表示不修改 */
@@ -191,6 +195,7 @@ export class WebviewPanelHost {
             sessionId: this.daemon.getSessionId(),
             approvalId: msg.approvalId,
             approved: !!msg.approved,
+            trust: msg.trust,
           });
         } catch (err) {
           const code = (err as { code?: number } | null)?.code;
@@ -239,6 +244,23 @@ export class WebviewPanelHost {
         await this.daemon.restart();
         this.post({ kind: 'event', method: 'daemon.restarted', params: {} });
         return;
+      case 'trust.list': {
+        try {
+          const result = (await this.daemon.client.request(METHODS.TrustList, {})) as {
+            rules: unknown[];
+          };
+          this.post({ kind: 'event', method: 'trust.loaded', params: { rules: result?.rules ?? [] } });
+        } catch (err) {
+          this.post({ kind: 'event', method: 'trust.loaded', params: { rules: [], error: String(err) } });
+        }
+        return;
+      }
+      case 'trust.clear': {
+        await this.daemon.client.request(METHODS.TrustClear, {});
+        this.post({ kind: 'event', method: 'trust.loaded', params: { rules: [] } });
+        void vscode.window.showInformationMessage('已清空全部信任命令');
+        return;
+      }
       case 'clear':
         // Webview 自行清空 DOM；扩展侧无需处理
         return;

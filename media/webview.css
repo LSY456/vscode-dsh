@@ -575,3 +575,71 @@ button:disabled {
   text-align: right;
   min-height: 1em;
 }
+
+/* ---------- B1 信任记忆（免审批白名单） ---------- */
+.trust-section {
+  border-top: 1px solid var(--border);
+  margin-top: 14px;
+  padding: 12px 8px 8px;
+}
+.trust-hint {
+  font-size: 11px;
+  line-height: 1.6;
+  margin: 0 0 10px;
+}
+.trust-hint code {
+  font-family: var(--mono, monospace);
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+.trust-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.trust-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.badge.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.trust-pattern {
+  flex: 1;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trust-time {
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.trust-empty {
+  font-size: 12px;
+  padding: 8px;
+}
+.trust-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+button.danger.ghost {
+  color: var(--err);
+  border-color: var(--err);
+}
+button.trust-btn {
+  border-color: var(--ok);
+  color: var(--ok);
+}
