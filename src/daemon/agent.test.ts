@@ -156,6 +156,28 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
     ctx.waiters[0].resolve(false);
     await run;
   });
+
+  it('P2 编辑后应用：accept 时优先写用户编辑后内容（而非 agent 原始提议）', async () => {
+    // 独立文件，避免污染共享 sampleFile（后续「按需读取」用例依赖其原始 line1 内容）
+    const ownFile = path.join(tmpDir, 'edited-apply.txt');
+    fs.writeFileSync(ownFile, 'TODO: original\n', 'utf8');
+    const edited = '用户编辑后的最终内容（部分采纳）\n';
+    const ctx = makeCtx({ getPatchContent: () => edited });
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改文件内容，把 TODO 替换为 DONE（write edit）',
+      attachments: [{ kind: 'file', path: ownFile, name: 'edited-apply.txt', content: fs.readFileSync(ownFile, 'utf8') }],
+    });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    // 真实场景：落盘的应是用户编辑后的内容，而非 mock 默认 newContent（含签名 banner）
+    const written = fs.readFileSync(ownFile, 'utf8');
+    expect(written).toBe(edited);
+    expect(written).not.toContain('edited by dsh mock agent');
+  });
 });
 
 describe('Agent：高危工具审批与能力禁用', () => {

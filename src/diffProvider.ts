@@ -34,8 +34,8 @@ export class DshDiffManager implements vscode.TextDocumentContentProvider {
   }
 
   register(context: vscode.ExtensionContext): void {
-    context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(SCHEME, this));
     context.subscriptions.push(
+      vscode.workspace.registerTextDocumentContentProvider(SCHEME, this),
       vscode.commands.registerCommand('dsh.diff.open', (patchId?: string) => {
         if (patchId) void this.openDiff(patchId);
       }),
@@ -44,6 +44,10 @@ export class DshDiffManager implements vscode.TextDocumentContentProvider {
       }),
       vscode.commands.registerCommand('dsh.diff.reject', (patchId?: string) => {
         if (patchId) void this.respond(patchId, false);
+      }),
+      // P2 编辑后应用：读取用户在 diff 左侧编辑后的内容，作为最终内容回传写盘
+      vscode.commands.registerCommand('dsh.diff.applyEdited', (patchId?: string) => {
+        if (patchId) void this.applyEdited(patchId);
       })
     );
   }
@@ -111,7 +115,7 @@ export class DshDiffManager implements vscode.TextDocumentContentProvider {
     }
   }
 
-  async respond(patchId: string, accept: boolean): Promise<void> {
+  async respond(patchId: string, accept: boolean, content?: string): Promise<void> {
     const record = this.findRecord(patchId);
     if (!record) {
       void vscode.window.showWarningMessage(`补丁不存在或已处理：${patchId}`);
@@ -127,11 +131,24 @@ export class DshDiffManager implements vscode.TextDocumentContentProvider {
         sessionId: record.sessionId,
         patchId,
         accept,
+        content,
       });
-      void vscode.window.setStatusBarMessage(`dsh: 已${accept ? '接受' : '拒绝'}补丁 ${path.basename(record.filePath)}`, 4000);
+      void vscode.window.setStatusBarMessage(`dsh: 已${accept ? '应用' : '拒绝'}补丁 ${path.basename(record.filePath)}`, 4000);
     } catch (err) {
       void vscode.window.showErrorMessage(`回传补丁决策失败: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /** P2 编辑后应用：读取 diff 左侧（新内容）当前编辑后的文本，作为最终内容应用。 */
+  async applyEdited(patchId: string): Promise<void> {
+    const newUri = this.makeUri(patchId, 'new');
+    const editor = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === newUri.toString());
+    if (!editor) {
+      void vscode.window.showWarningMessage('未找到补丁的编辑视图，请先打开 Diff');
+      return;
+    }
+    const content = editor.document.getText();
+    await this.respond(patchId, true, content);
   }
 
   private findRecord(patchId: string): PatchRecord | undefined {

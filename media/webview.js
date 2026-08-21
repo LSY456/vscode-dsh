@@ -415,20 +415,36 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     const btnDiff = el('button', 'ghost', '打开 Diff');
     const btnReject = el('button', 'danger', '拒绝');
     const btnAccept = el('button', 'ok-btn', '应用');
+    // P2 编辑后应用：第一次点击打开 Diff（可编辑）并切换文案，第二次点击回传编辑后内容
+    const btnApplyEdited = el('button', 'ok-btn trust-btn', '编辑并应用');
+    const disableAll = () => {
+      btnAccept.disabled = btnReject.disabled = btnDiff.disabled = btnApplyEdited.disabled = true;
+    };
     btnDiff.addEventListener('click', () => {
       vscode.postMessage({ kind: 'patch.openDiff', patchId: p.patchId });
     });
     btnReject.addEventListener('click', () => {
       vscode.postMessage({ kind: 'patch.reject', patchId: p.patchId });
-      btnAccept.disabled = btnReject.disabled = btnDiff.disabled = true;
+      disableAll();
     });
     btnAccept.addEventListener('click', () => {
       vscode.postMessage({ kind: 'patch.accept', patchId: p.patchId });
-      btnAccept.disabled = btnReject.disabled = btnDiff.disabled = true;
+      disableAll();
+    });
+    btnApplyEdited.addEventListener('click', () => {
+      if (btnApplyEdited.dataset.editing !== '1') {
+        btnApplyEdited.dataset.editing = '1';
+        btnApplyEdited.textContent = '确认应用编辑';
+        vscode.postMessage({ kind: 'patch.openDiff', patchId: p.patchId });
+      } else {
+        vscode.postMessage({ kind: 'patch.applyEdited', patchId: p.patchId });
+        disableAll();
+      }
     });
     actions.appendChild(btnDiff);
     actions.appendChild(btnReject);
     actions.appendChild(btnAccept);
+    actions.appendChild(btnApplyEdited);
     card.appendChild(actions);
     addMessage(card);
     patchCards.set(p.patchId, card);

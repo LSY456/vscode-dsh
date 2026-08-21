@@ -59,6 +59,8 @@ export class Session {
   private pendingPatch = new Map<string, PendingItem>();
   private approvalSnapshot: ApprovalSnapshot | null = null;
   private patchSnapshot: PatchSnapshot | null = null;
+  /** P2 编辑后应用：patchId -> 用户编辑后的完整内容（accept 时带回，写盘覆盖 newContent） */
+  private patchContent = new Map<string, string>();
 
   /** 事件投递钩子：由 server 绑定到当前连接的 ws；断线时不投递但缓冲仍记录 */
   deliver: (method: string, params: unknown) => void = () => {};
@@ -137,6 +139,7 @@ export class Session {
     this.state = 'idle';
     this.approvalSnapshot = null;
     this.patchSnapshot = null;
+    this.patchContent.clear();
     this.rejectAllPending();
   }
 
@@ -186,13 +189,24 @@ export class Session {
     return this.approvalSnapshot ? { ...this.approvalSnapshot.input } : null;
   }
 
-  respondPatch(patchId: string, accept: boolean): 'ok' | 'expired' | 'not_found' {
+  respondPatch(patchId: string, accept: boolean, content?: string): 'ok' | 'expired' | 'not_found' {
     const r = this.respondPending('patch', patchId, accept);
     if (r === 'ok') {
+      // P2 编辑后应用：accept 时暂存用户编辑后内容，供 agent 写盘读取
+      if (accept && typeof content === 'string') {
+        this.patchContent.set(patchId, content);
+      } else {
+        this.patchContent.delete(patchId);
+      }
       this.patchSnapshot = null;
       this.state = 'running';
     }
     return r;
+  }
+
+  /** P2 编辑后应用：agent 写盘前读取用户编辑后的内容（无则返回 undefined，用原始 newContent）。 */
+  getPatchContent(patchId: string): string | undefined {
+    return this.patchContent.get(patchId);
   }
 
   // ------------------------------------------------------------------ 内部
