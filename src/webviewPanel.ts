@@ -49,6 +49,7 @@ interface FromWebview {
     | 'patch.accept'
     | 'patch.reject'
     | 'patch.openDiff'
+    | 'patch.applyEdited'
     | 'clear'
     | 'history.open'
     | 'settings.get'
@@ -221,6 +222,9 @@ export class WebviewPanelHost {
         return;
       case 'patch.openDiff':
         if (msg.patchId) await this.diff.openDiff(msg.patchId);
+        return;
+      case 'patch.applyEdited':
+        if (msg.patchId) await this.diff.applyEdited(msg.patchId);
         return;
       case 'history.open': {
         const rec = this.history.get(msg.sessionId ?? '');

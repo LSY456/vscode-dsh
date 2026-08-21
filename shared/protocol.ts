@@ -298,6 +298,8 @@ export interface FilePatchRespondParams {
   sessionId: string;
   patchId: string;
   accept: boolean;
+  /** P2 编辑后应用：accept 时携带用户编辑后的完整内容（缺省则用 agent 原始 newContent） */
+  content?: string;
 }
 
 // ---------------------------------------------------------------------------

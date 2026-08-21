@@ -295,6 +295,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             },
             isCanceled: () => session.isCanceled(),
             isTrusted: (command) => trustStore.matches(command),
+            getPatchContent: (patchId) => session.getPatchContent(patchId),
             readFile: async (target, maxBytes) => {
               const r = resolvePath(target);
               if ('error' in r) return undefined;
@@ -390,13 +391,13 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           return;
         }
         case METHODS.FilePatchRespond: {
-          const p = req.params as { sessionId?: string; patchId: string; accept: boolean };
+          const p = req.params as { sessionId?: string; patchId: string; accept: boolean; content?: string };
           const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
           if (!session) {
             sendError(conn.ws, req.id, ERROR_CODES.NotFound, 'session 不存在');
             return;
           }
-          const r = session.respondPatch(p?.patchId ?? '', !!p?.accept);
+          const r = session.respondPatch(p?.patchId ?? '', !!p?.accept, p?.content);
           if (r === 'not_found') {
             sendError(conn.ws, req.id, ERROR_CODES.NotFound, `补丁不存在或已处理: ${p?.patchId}`);
             return;

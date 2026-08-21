@@ -99,6 +99,28 @@ describe('审批强校验（P1.1）', () => {
     expect(await p2).toBe(false);
     expect(s.respondPatch('pt3', true)).toBe('not_found');
   });
+
+  it('P2 编辑后应用：accept 带 content 覆盖写盘内容，缺省/拒绝则不覆盖', () => {
+    const s = new Session('s1', '/ws');
+    s.registerPatch(makePatchParams('pt1'));
+    // 响应前无覆盖内容
+    expect(s.getPatchContent('pt1')).toBeUndefined();
+
+    s.respondPatch('pt1', true, '用户编辑后的全文');
+    expect(s.getPatchContent('pt1')).toBe('用户编辑后的全文');
+
+    // 无 content 的 accept 不产生覆盖（agent 回退原始 newContent）
+    s.end();
+    s.registerPatch(makePatchParams('pt2'));
+    s.respondPatch('pt2', true);
+    expect(s.getPatchContent('pt2')).toBeUndefined();
+
+    // 拒绝不覆盖
+    s.end();
+    s.registerPatch(makePatchParams('pt3'));
+    s.respondPatch('pt3', false, '拒绝时忽略的内容');
+    expect(s.getPatchContent('pt3')).toBeUndefined();
+  });
 });
 
 describe('事件缓冲与续跑（P1.2）', () => {

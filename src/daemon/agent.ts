@@ -42,6 +42,8 @@ export interface AgentContext {
   isCanceled(): boolean;
   /** B1 信任记忆：命令是否命中免审批白名单（server 注入；测试缺省走审批） */
   isTrusted?(command: string): boolean;
+  /** P2 编辑后应用：读用户编辑后的补丁内容（无则 undefined，用原始 newContent） */
+  getPatchContent?(patchId: string): string | undefined;
   /** 按需读取文件（须在工作区内），失败返回 undefined */
   readFile(target: string, maxBytes?: number): Promise<string | undefined>;
 }
@@ -150,8 +152,10 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
       let error: string | undefined;
       if (accepted) {
         try {
+          // P2 编辑后应用：优先写用户编辑后的内容，否则写 agent 原始 newContent
+          const finalContent = ctx.getPatchContent?.(patchId) ?? newContent;
           fs.mkdirSync(path.dirname(target), { recursive: true });
-          fs.writeFileSync(target, newContent, 'utf8');
+          fs.writeFileSync(target, finalContent, 'utf8');
           applied = true;
         } catch (e) {
           error = e instanceof Error ? e.message : String(e);

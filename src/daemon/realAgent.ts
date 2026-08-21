@@ -230,7 +230,9 @@ async function dispatchTool(
       let error: string | undefined;
       if (accepted) {
         try {
-          writeTextFile(ctx.workspaceRoot, allowedDirs, resolved, newContent);
+          // P2 编辑后应用：优先写用户编辑后的内容，否则写 agent 计算出的 newContent
+          const finalContent = ctx.getPatchContent?.(patchId) ?? newContent;
+          writeTextFile(ctx.workspaceRoot, allowedDirs, resolved, finalContent);
           applied = true;
         } catch (e) {
           error = e instanceof Error ? e.message : String(e);

@@ -244,9 +244,11 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
       历史会话列表与一键回放、异常中断最后一段回答兜底落库
 - [x] **A4 配置面板 + 凭据安全化**：apiKey 迁移 VSCode SecretStorage（旧明文自动回迁并清除）、
       面板化模型配置（API Key / 模型 / BaseURL / 预设），保存后一键重启 daemon 生效
+- [x] **P2 信任记忆 + 补丁编辑**：免审批白名单（审批卡「接受并记住」脱敏生成规则、高危程序仅精确匹配、
+      工具白名单优先于信任放行、规则落 `.dsh/trust.json` 可审阅清空）、Diff 编辑后应用（补丁左侧自由
+      编辑后采纳，`file.patch.respond` 携带编辑后内容写盘）
 
 ### 待办
-- [ ] P2：信任记忆（免审批白名单）、Diff 编辑后应用
 - [ ] P3.5+：把真实 daemon 打磨为生产可用（命令执行沙箱化 OS 隔离、模型 provider 多点位、审批信任记忆）
 - [ ] P4：VSCode Remote-SSH / WSL / Containers 场景（TLS + 鉴权升级）
 
