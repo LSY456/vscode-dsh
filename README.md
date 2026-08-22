@@ -247,6 +247,9 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - [x] **P2 信任记忆 + 补丁编辑**：免审批白名单（审批卡「接受并记住」脱敏生成规则、高危程序仅精确匹配、
       工具白名单优先于信任放行、规则落 `.dsh/trust.json` 可审阅清空）、Diff 编辑后应用（补丁左侧自由
       编辑后采纳，`file.patch.respond` 携带编辑后内容写盘）
+- [x] **C 系列工程化**：CI 安全扫描（`npm audit --omit=dev` 生产依赖高危阻断 + OSV-Scanner 全量扫描）、
+      daemon 日志落盘（tee stdout/stderr 到 `.dsh/logs/daemon.log`，带轮转与 0600 权限）、
+      `trajectory.list` 协议化（以协议回放脱敏轨迹，替代直接读 JSONL 文件）
 
 ### 待办
 - [ ] P3.5+：把真实 daemon 打磨为生产可用（命令执行沙箱化 OS 隔离、模型 provider 多点位、审批信任记忆）

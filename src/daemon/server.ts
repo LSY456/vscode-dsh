@@ -390,6 +390,13 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           sendResult(conn.ws, req.id, { ok: true });
           return;
         }
+        case METHODS.TrajectoryList: {
+          // C3：以协议回放持久化轨迹（脱敏、已落盘），替代直接读 .dsh/trajectory/*.jsonl
+          const p = req.params as { sessionId?: string };
+          const records = p?.sessionId ? trajectoryStore.read(p.sessionId) : [];
+          sendResult(conn.ws, req.id, { records });
+          return;
+        }
         case METHODS.FilePatchRespond: {
           const p = req.params as { sessionId?: string; patchId: string; accept: boolean; content?: string };
           const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
