@@ -416,6 +416,24 @@ async function main() {
   const trajFile = path.join(tmpDir, '.dsh', 'trajectory', rsessionId + '.jsonl');
   assert(fs.existsSync(trajFile) && fs.statSync(trajFile).size > 0, '轨迹已持久化（.dsh/trajectory/*.jsonl）');
 
+  // C3：trajectory.list 协议回放（替代直接读 JSONL 文件）
+  const trajList = await rconn.rpc.request('trajectory.list', { sessionId: rsessionId });
+  assert(
+    Array.isArray(trajList.records) && trajList.records.length > 0,
+    'trajectory.list 返回语义化轨迹'
+  );
+  assert(
+    trajList.records.some((r) => r.kind === 'tool'),
+    'trajectory.list 含 tool 步骤（脱敏轨迹）'
+  );
+
+  // C2：daemon 日志落盘（tee stdout/stderr 到 .dsh/logs/daemon.log）
+  const daemonLog = path.join(tmpDir, '.dsh', 'logs', 'daemon.log');
+  assert(
+    fs.existsSync(daemonLog) && fs.readFileSync(daemonLog, 'utf8').includes('DSH_DAEMON_PORT='),
+    'daemon 日志已落盘（.dsh/logs/daemon.log）'
+  );
+
   await rconn.rpc.request('shutdown', {});
   rconn.ws.close();
 

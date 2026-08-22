@@ -13,6 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { startDaemonServer } from './server';
+import { attachStreamLog } from './logFile';
 
 interface CliArgs {
   port: number;
@@ -23,6 +24,8 @@ interface CliArgs {
   token: string;
   agent: 'mock' | 'real' | 'auto';
   fakeModel: boolean;
+  /** C2：日志落盘路径（缺省 <workspace>/.dsh/logs/daemon.log） */
+  logFile: string;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -33,6 +36,7 @@ function parseArgs(argv: string[]): CliArgs {
     token: process.env.DSH_DAEMON_TOKEN ?? '',
     agent: 'auto',
     fakeModel: false,
+    logFile: '',
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -62,6 +66,9 @@ function parseArgs(argv: string[]): CliArgs {
       case '--fake-model':
         args.fakeModel = true;
         break;
+      case '--log-file':
+        args.logFile = next();
+        break;
     }
   }
   return args;
@@ -70,8 +77,14 @@ function parseArgs(argv: string[]): CliArgs {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
+  // C2 日志落盘：tee stdout/stderr 到日志文件（缺省 <workspace>/.dsh/logs/daemon.log），
+  // 覆盖 daemon 全生命周期输出（启动、握手、异常、信任规则等），进程退出后仍可排查。
+  const logFile = args.logFile || path.join(args.workspace, '.dsh', 'logs', 'daemon.log');
+  const restoreLog = attachStreamLog(logFile);
+
   if (!args.token) {
     console.error('[dsh-daemon] 缺少 token：请通过环境变量 DSH_DAEMON_TOKEN 或 --token 提供。');
+    restoreLog();
     process.exit(1);
   }
 
@@ -103,6 +116,7 @@ async function main(): Promise<void> {
       }
     }
     await handle.close();
+    restoreLog();
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));

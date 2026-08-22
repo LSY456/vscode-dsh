@@ -52,6 +52,7 @@ export const METHODS = {
   FileRead: 'file.read',
   TrustList: 'trust.list',
   TrustClear: 'trust.clear',
+  TrajectoryList: 'trajectory.list',
   Ping: 'ping',
   Shutdown: 'shutdown',
 } as const;
@@ -383,6 +384,18 @@ export interface EventTrajectory {
   kind: 'reasoning' | 'message' | 'tool' | 'patch' | 'approval' | 'system';
   detail: string;
   ts: number;
+}
+
+// ---------------------------------------------------------------------------
+// 轨迹查询（C3：trajectory.list —— 以协议方法回放持久化轨迹，替代直接读 JSONL 文件）
+// ---------------------------------------------------------------------------
+
+export interface TrajectoryListParams {
+  sessionId: string;
+}
+
+export interface TrajectoryListResult {
+  records: EventTrajectory[];
 }
 
 export interface EventSessionEnded {
