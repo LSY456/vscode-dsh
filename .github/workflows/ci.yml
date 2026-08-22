@@ -23,13 +23,8 @@ jobs:
       - name: npm audit（生产依赖，高危阻断）
         run: npm audit --omit=dev --audit-level=high
 
-      # 全量漏洞扫描（真实执行、结果可见于 PR Annotation）。
-      # 生产依赖的硬门禁由上方 `npm audit --omit=dev --audit-level=high` 承担；
-      # 此处不阻断的理由：dev-only 工具链漏洞（如 esbuild 0.23 的 dev-server GHSA）
-      # 既不随扩展分发、也不进入运行时，仅影响本仓库本地构建。TODO：升级 esbuild 至 0.25+ 后移除 continue-on-error。
       - name: OSV-Scanner 漏洞扫描
         uses: google/osv-scanner-action@v1
-        continue-on-error: true
 
   test:
     name: typecheck / build / unit / smoke
