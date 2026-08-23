@@ -95,7 +95,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test               # 单元测试（vitest，119 用例）
+npm test               # 单元测试（vitest，153 用例）
 npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 
 # 4. 配置真实模型（可选）：打开面板 → 设置，填写 API Key（SecretStorage 安全存储）与模型名；
@@ -191,7 +191,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，94 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，153 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析）、工具沙箱（护栏/策略/默认拒绝）、
   轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、Webview Markdown 渲染与净化（XSS 安全）。
 - **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
@@ -199,7 +199,7 @@ vscode-dsh/
 - **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 typecheck → build → unit → smoke（win/ubuntu），
   main 分支额外产出 VSIX 构件。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
-- **打包**：`npm run package` 产出约 118KB 的 VSIX（`dist/`）。
+- **打包**：`npm run package` 产出约 389KB 的 VSIX（`dist/`，35 文件）。
 
 ## 迹线（Trajectory）数据映射
 
@@ -261,7 +261,6 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - 命令执行是"策略门控 + 人工审批"而非 OS 级沙箱隔离，确需运行时请谨慎配置命令白名单。
 - 断线续跑仅限同一 daemon 进程内；daemon 进程重启后会话丢失（`resume` 返回 `NotFound`，客户端新建会话）。
 - 未覆盖 VSCode Remote-SSH / WSL / Containers 场景（"仅 127.0.0.1"模型需升级为 TLS + 鉴权）。
-- 无信任记忆（免审批白名单），高频使用会产生审批疲劳。
 - 会话历史存于 extension 侧（workspaceState），按工作区隔离，跨工作区/换机不可见。
 
 ---
