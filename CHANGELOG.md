@@ -3,6 +3,15 @@
 本项目版本变化遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- 集成测试：`@vscode/test-electron` 启动真实 VSCode Extension Host，自动化 T1-T5
+  （激活连接 / 补丁流程 / 审批流程 / 路径护栏 / 编辑后应用），`npm run test:integration` 运行。
+- CI 新增 `integration` job（ubuntu headless，`xvfb-run`），覆盖扩展宿主层 ↔ daemon 完整闭环。
+- 扩展 `activate()` 暴露测试钩子（`DshApi`：daemon / diff），运行时不改变产品行为。
+
 ## [0.3.0] - 2026-08-23
 
 ### 新增

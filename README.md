@@ -196,7 +196,10 @@ vscode-dsh/
   轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、Webview Markdown 渲染与净化（XSS 安全）。
 - **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
   `file.read` 越界拒绝、以及真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘）。
-- **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 typecheck → build → unit → smoke（win/ubuntu），
+- **集成测试**：`npm run test:integration` 用 `@vscode/test-electron` 启动真实 VSCode Extension Host，
+  覆盖扩展宿主层 ↔ daemon 的完整闭环（T1 激活连接 / T2 补丁 / T3 审批 / T4 路径护栏 / T5 编辑后应用）。
+- **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 security（npm audit + osv-scanner）、
+  typecheck → build → unit → smoke（win/ubuntu）、integration（vscode extension host，ubuntu）；
   main 分支额外产出 VSIX 构件。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
 - **打包**：`npm run package` 产出约 389KB 的 VSIX（`dist/`，35 文件）。
