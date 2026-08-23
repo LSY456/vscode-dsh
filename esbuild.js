@@ -56,6 +56,30 @@ async function main() {
     outdir: 'out',
   });
 
+  // 集成测试（@vscode/test-electron）：独立编译到 out/test/integration/*.js，
+  // 由 Extension Development Host 加载；mocha 运行时 require（external），vscode/ws 亦然。
+  const testDir = path.join(__dirname, 'src', 'test', 'integration');
+  const testEntries = {};
+  if (fs.existsSync(testDir)) {
+    for (const f of fs.readdirSync(testDir)) {
+      if (f.endsWith('.ts')) {
+        testEntries[`test/integration/${f.replace(/\.ts$/, '')}`] = path.join(testDir, f);
+      }
+    }
+  }
+  const testCtx = await esbuild.context({
+    bundle: true,
+    sourcemap: true,
+    platform: 'node',
+    target: 'node18',
+    format: 'cjs',
+    external: ['vscode', 'ws', 'mocha'],
+    logLevel: 'info',
+    legalComments: 'none',
+    entryPoints: testEntries,
+    outdir: 'out',
+  });
+
   // Webview（browser 平台：marked + highlight.js + dompurify 全部内联，外链为零，符合 CSP）
   const webCtx = await esbuild.context({
     bundle: true,
@@ -71,14 +95,16 @@ async function main() {
 
   if (watch) {
     await nodeCtx.watch();
+    await testCtx.watch();
     await webCtx.watch();
     await copyMedia();
     console.log('[esbuild] watching...');
     // watch 模式下保持进程存活
     setInterval(() => {}, 1 << 30);
   } else {
-    await Promise.all([nodeCtx.rebuild(), webCtx.rebuild()]);
+    await Promise.all([nodeCtx.rebuild(), testCtx.rebuild(), webCtx.rebuild()]);
     await nodeCtx.dispose();
+    await testCtx.dispose();
     await webCtx.dispose();
     await copyMedia();
   }

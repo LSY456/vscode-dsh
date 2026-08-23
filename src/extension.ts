@@ -26,7 +26,13 @@ const STATUS_ICONS: Record<DaemonStatus, string> = {
 
 let activeDaemon: DaemonManager | undefined;
 
-export function activate(context: vscode.ExtensionContext): void {
+/** 集成测试钩子：@vscode/test-electron 经 getExtension().exports 获取，运行时不改变产品行为。 */
+export interface DshApi {
+  daemon: DaemonManager;
+  diff: DshDiffManager;
+}
+
+export function activate(context: vscode.ExtensionContext): DshApi {
   logger.init(context);
   logger.info('vscode-dsh 激活');
 
@@ -117,6 +123,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ---- 启动 daemon（探测 / 拉起 / 连接）
   void daemon.start();
+
+  // 集成测试钩子：暴露运行时实例（经 vscode.extensions.getExtension(...).exports 读取）
+  return { daemon, diff };
 }
 
 export function deactivate(): void {

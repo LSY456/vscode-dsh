@@ -168,6 +168,7 @@
     "test": "vitest run --pool=threads",
     "test:watch": "vitest",
     "smoke": "node esbuild.js && node scripts/smoke.js",
+    "test:integration": "node scripts/runIntegrationTests.js",
     "check": "npm run typecheck && npm run build && npm test && npm run smoke",
     "package": "vsce package --out dist",
     "vscode:prepublish": "npm run build"
@@ -176,15 +177,19 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.19.43",
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.5.10",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.9.2",
     "dompurify": "^3.4.13",
     "esbuild": "^0.28.2",
+    "glob": "^13.0.6",
     "highlight.js": "^11.12.0",
     "jsdom": "^29.1.1",
     "marked": "^18.0.9",
+    "mocha": "^11.8.0",
     "typescript": "^5.5.4",
     "vitest": "^4.1.10"
   }
