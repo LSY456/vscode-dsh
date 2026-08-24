@@ -47,8 +47,16 @@ export interface OpenAIModelOptions {
   model?: string;
 }
 
+export interface AnthropicModelOptions {
+  baseURL?: string;
+  apiKey: string;
+  model?: string;
+}
+
 const DEFAULT_BASE_URL = 'https://api.deepseek.com/v1';
 const DEFAULT_MODEL = 'deepseek-chat';
+const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
+const DEFAULT_ANTHROPIC_MODEL = 'claude-3-5-sonnet-latest';
 
 export class OpenAICompatibleModel implements ChatModel {
   private readonly baseURL: string;
@@ -84,6 +92,135 @@ export class OpenAICompatibleModel implements ChatModel {
     }
     return parseSSE(res.body as unknown as AsyncIterable<Uint8Array>, opts.onChunk ?? (() => {}));
   }
+}
+
+/**
+ * Anthropic Messages API 适配（P3.5+ 多 provider）。
+ *
+ * 与 OpenAI 兼容端点不同：`/v1/messages`、`x-api-key` 头、`anthropic-version` 头、
+ * system 为顶层字段（无 system 角色消息）、工具结果降级为 user 消息。
+ * 流式 SSE 以 content_block_delta 事件区分 text_delta（正文）与 thinking_delta（思维链）。
+ */
+export class AnthropicModel implements ChatModel {
+  private readonly baseURL: string;
+  private readonly apiKey: string;
+  private readonly model: string;
+
+  constructor(opts: AnthropicModelOptions) {
+    this.baseURL = (opts.baseURL || DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
+    this.apiKey = opts.apiKey;
+    this.model = opts.model || DEFAULT_ANTHROPIC_MODEL;
+  }
+
+  async chat(messages: ChatMessage[], opts: ChatStreamOptions = {}): Promise<ChatCompletionResult> {
+    const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
+    const res = await fetch(`${this.baseURL}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': this.apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: this.model,
+        max_tokens: 4096,
+        stream: true,
+        system,
+        messages: anthropicMessages,
+      }),
+      signal: opts.signal,
+    });
+
+    if (!res.ok || !res.body) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`模型请求失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+    return parseAnthropicSSE(res.body as unknown as AsyncIterable<Uint8Array>, opts.onChunk ?? (() => {}));
+  }
+}
+
+/** 将统一的 ChatMessage[] 转换为 Anthropic Messages 载荷（system 置顶、tool 降级为 user）。 */
+function toAnthropicMessages(messages: ChatMessage[]): {
+  system: string;
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+} {
+  const system = messages
+    .filter((m) => m.role === 'system')
+    .map((m) => m.content)
+    .join('\n\n');
+  const out: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  for (const m of messages) {
+    if (m.role === 'system') continue;
+    if (m.role === 'tool') {
+      // Anthropic 无 tool 角色；工具结果作为 user 消息回灌给模型
+      out.push({ role: 'user', content: `[工具结果]\n${m.content}` });
+    } else {
+      out.push({ role: m.role, content: m.content });
+    }
+  }
+  return { system, messages: out };
+}
+
+/** 解析 Anthropic SSE 流，累积 thinking_delta（reasoning）与 text_delta（content）并回调增量。 */
+async function parseAnthropicSSE(
+  stream: AsyncIterable<Uint8Array>,
+  onChunk: (chunk: StreamChunk) => void
+): Promise<ChatCompletionResult> {
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let reasoning = '';
+  let content = '';
+
+  for await (const value of stream) {
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      // Anthropic SSE 为 `event:` + `data:` 两行；只处理 data 行
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (!data) continue;
+      try {
+        const obj = JSON.parse(data) as {
+          type?: string;
+          delta?: { type?: string; text?: string; thinking?: string };
+        };
+        if (obj.type !== 'content_block_delta' || !obj.delta) continue;
+        if (obj.delta.type === 'text_delta' && typeof obj.delta.text === 'string') {
+          content += obj.delta.text;
+          onChunk({ type: 'content', text: obj.delta.text });
+        } else if (obj.delta.type === 'thinking_delta' && typeof obj.delta.thinking === 'string') {
+          reasoning += obj.delta.thinking;
+          onChunk({ type: 'reasoning', text: obj.delta.thinking });
+        }
+      } catch {
+        /* 忽略非 JSON 行（保持健壮） */
+      }
+    }
+  }
+  return { reasoning, content };
+}
+
+// ---------------------------------------------------------------------------
+// Provider 工厂（P3.5+ 多点位）
+// ---------------------------------------------------------------------------
+
+export interface ProviderModelOptions {
+  /** provider：openai（OpenAI 兼容，含 DeepSeek/通义/月之暗面/Ollama 等）| anthropic | auto（缺省=openai） */
+  provider?: 'openai' | 'anthropic' | 'auto';
+  baseURL?: string;
+  apiKey: string;
+  model?: string;
+}
+
+/** 依据 provider 选择模型适配器；缺省/auto 走 OpenAI 兼容（覆盖国产模型与本地推理服务）。 */
+export function createModel(opts: ProviderModelOptions): ChatModel {
+  const provider = opts.provider ?? 'auto';
+  if (provider === 'anthropic') {
+    return new AnthropicModel({ baseURL: opts.baseURL, apiKey: opts.apiKey, model: opts.model });
+  }
+  return new OpenAICompatibleModel({ baseURL: opts.baseURL, apiKey: opts.apiKey, model: opts.model });
 }
 
 /** 解析 OpenAI 兼容 SSE 流，累积 reasoning_content 与 content 并回调增量。 */
@@ -210,6 +347,15 @@ export function createKeywordFakeModel(): ChatModel {
       return {
         reasoning: '用户需要修改文件，生成补丁并提交审查。',
         toolcall: { tool: 'write_file', input: { path: file, content: 'REAL-DAEMON-WRITE' } },
+      };
+    }
+    if (/bash|执行命令|run[\s-]?command/i.test(userText)) {
+      // 命令刻意无引号/无括号：Windows cmd.exe 对嵌套引号解析不可靠，
+      // 用 echo + cd/pwd 验证「命令真实执行 + cwd 被约束到工作区」。
+      const bashCommand = process.platform === 'win32' ? 'echo SMOKE_BASH_OK && cd' : 'echo SMOKE_BASH_OK && pwd';
+      return {
+        reasoning: '用户需要执行 shell 命令，调用 bash_execute（真实 spawn，验证命令沙箱 cwd 约束）。',
+        toolcall: { tool: 'bash_execute', input: { command: bashCommand } },
       };
     }
     return {

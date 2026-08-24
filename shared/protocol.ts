@@ -104,6 +104,8 @@ export interface ModelConfig {
   apiKey?: string;
   /** 实现选择：real（真实模型）| mock（内置模拟）| auto（缺省，有 key 则 real） */
   agent?: 'mock' | 'real' | 'auto';
+  /** 模型 provider（P3.5+ 多点位）：openai（OpenAI 兼容，含 DeepSeek/通义等）| anthropic | auto（缺省=openai） */
+  provider?: 'openai' | 'anthropic' | 'auto';
 }
 
 export interface InitializeParams {

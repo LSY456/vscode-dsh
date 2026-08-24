@@ -29,6 +29,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   const inpApiKey = $('inp-apikey');
   const inpModel = $('inp-model');
   const inpBaseURL = $('inp-baseurl');
+  const inpProvider = $('inp-provider');
   const inpPreset = $('inp-preset');
   const btnSettingsRestart = $('btn-settings-restart');
   const btnSettingsClose = $('btn-settings-close');
@@ -229,6 +230,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     inpApiKey.placeholder = params && params.hasApiKey ? '已设置（留空不修改）' : '未设置';
     inpModel.value = cfg.model || '';
     inpBaseURL.value = cfg.baseURL || '';
+    inpProvider.value = cfg.provider || 'auto';
     inpPreset.value = cfg.preset || '';
   }
 
@@ -621,6 +623,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     const apiKey = inpApiKey.value.trim();
     const model = inpModel.value.trim();
     const baseURL = inpBaseURL.value.trim();
+    const provider = inpProvider.value.trim() || 'auto';
     const preset = inpPreset.value.trim();
     // apiKey 留空表示不修改（不上报空串，避免误删已存凭据）
     vscode.postMessage({
@@ -629,6 +632,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
         ...(apiKey ? { apiKey } : {}),
         model,
         baseURL,
+        provider,
         preset,
       },
     });

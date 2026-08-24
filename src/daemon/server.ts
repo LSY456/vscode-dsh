@@ -35,7 +35,7 @@ import {
   SessionSendParams,
 } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
-import { ChatModel, createKeywordFakeModel, OpenAICompatibleModel } from './model';
+import { ChatModel, createKeywordFakeModel, createModel as createProviderModel } from './model';
 import { assertPathInside } from './paths';
 import { RealAgentConfig, runRealAgent } from './realAgent';
 import { Session, SessionManager } from './sessionManager';
@@ -43,6 +43,7 @@ import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';
 import { readBuildId } from '../../shared/buildId';
 import { TrustStore } from './trust';
+import { detectSandbox } from './sandbox';
 
 export interface DaemonServerOptions {
   token: string;
@@ -52,6 +53,8 @@ export interface DaemonServerOptions {
   port?: number;
   /** Agent 实现：mock | real | auto（缺省） */
   agent?: 'mock' | 'real' | 'auto';
+  /** 模型 provider（P3.5+）：openai | anthropic | auto（缺省） */
+  provider?: 'openai' | 'anthropic' | 'auto';
   /** 集成冒烟：agent=real 时用关键字假模型（不起网络） */
   fakeModel?: boolean;
   /** 端口就绪后回调（随机端口时用于上报） */
@@ -70,6 +73,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
   const trajectoryStore = new TrajectoryStore(path.join(opts.workspaceRoot, '.dsh', 'trajectory'));
   // B1 信任记忆：免审批白名单，持久化于 <workspace>/.dsh/trust.json（0600，用户可审阅/删除）
   const trustStore = new TrustStore({ file: path.join(opts.workspaceRoot, '.dsh', 'trust.json') });
+  // P3.5+ 命令沙箱：检测 OS 级后端（Linux bwrap），不可用则应用层兜底；降级原因经 warnings 披露
+  const { sandbox, warnings } = detectSandbox(opts.workspaceRoot);
+  if (warnings.length > 0) console.warn(`[dsh-daemon] 命令沙箱：${warnings.join('；')}`);
   let capabilities: Required<AgentCapabilities> & { maxConcurrency: number } = {
     allowedTools: [],
     allowedDirs: [],
@@ -82,6 +88,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     baseURL: '',
     model: '',
     agent: opts.agent ?? 'auto',
+    provider: opts.provider ?? 'auto',
   };
 
   /** 解析最终生效的 Agent 实现。 */
@@ -94,7 +101,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
   /** 依据运行时配置创建真实模型（auto 切换 + 集成假模型）。 */
   function createModel(): ChatModel {
     if (opts.fakeModel) return createKeywordFakeModel();
-    return new OpenAICompatibleModel({
+    return createProviderModel({
+      provider: runtime.provider,
       baseURL: runtime.baseURL || undefined,
       apiKey: runtime.apiKey,
       model: runtime.model || undefined,
@@ -221,6 +229,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           if (p.model?.baseURL) runtime.baseURL = p.model.baseURL;
           if (p.model?.model) runtime.model = p.model.model;
           if (p.model?.agent) runtime.agent = p.model.agent;
+          if (p.model?.provider) runtime.provider = p.model.provider;
           const session = sessions.create();
           attach(conn, session);
           const result: InitializeResult = {
@@ -312,7 +321,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           const agentMode = resolveAgentMode();
           if (agentMode === 'real') {
             const model = createModel();
-            const agentConfig: RealAgentConfig = { model };
+            const agentConfig: RealAgentConfig = { model, sandbox };
             void runRealAgent(ctx, p, agentConfig).finally(() => {
               session.end();
               // 会话结束时立即落盘轨迹缓冲（审计完整性，不等定时器）

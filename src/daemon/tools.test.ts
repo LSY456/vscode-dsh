@@ -12,6 +12,7 @@ import {
   tryReadFile,
   writeTextFile,
 } from './tools';
+import { ProcessSandbox } from './sandbox';
 
 let root: string;
 beforeAll(() => {
@@ -133,5 +134,21 @@ describe('命令策略与执行', () => {
     const r = await executeCommand('x', root, { runner });
     expect(r.ok).toBe(false);
     expect(r.output).toContain('spawn failed');
+  });
+
+  it('executeCommand 经沙箱包装后传给 runner（cwd 约束 + 环境清洗）', async () => {
+    const seen: Array<{ cwd: string; env: Record<string, string> }> = [];
+    const runner = async (spec: { cwd: string; env: Record<string, string> }) => {
+      seen.push({ cwd: spec.cwd, env: spec.env });
+      return { exitCode: 0, stdout: 'ok', stderr: '' };
+    };
+    const sandbox = new ProcessSandbox({ workspaceRoot: root });
+    const r = await executeCommand('echo hi', root, { runner, sandbox });
+
+    expect(r.ok).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].cwd).toBe(root);
+    expect(seen[0].env.DSH_DAEMON_TOKEN).toBeUndefined();
+    expect(seen[0].env.PATH).toBeDefined();
   });
 });

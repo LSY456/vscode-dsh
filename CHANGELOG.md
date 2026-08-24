@@ -11,6 +11,10 @@
   （激活连接 / 补丁流程 / 审批流程 / 路径护栏 / 编辑后应用），`npm run test:integration` 运行。
 - CI 新增 `integration` job（ubuntu headless，`xvfb-run`），覆盖扩展宿主层 ↔ daemon 完整闭环。
 - 扩展 `activate()` 暴露测试钩子（`DshApi`：daemon / diff），运行时不改变产品行为。
+- 模型多点位：新增 Anthropic Messages 适配与 `createModel` 工厂，经 `dsh.model.provider`
+  （auto/openai/anthropic）选择；OpenAI 兼容仍覆盖 DeepSeek/通义/本地推理等。
+- 命令执行沙箱：可插拔后端（Linux 检测到 bubblewrap 时命名空间隔离）+ 应用层兜底
+  （cwd 约束 / 环境最小化 / 超时进程树终止），降级原因经日志显式披露。
 
 ## [0.3.0] - 2026-08-23
 

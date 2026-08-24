@@ -23,6 +23,7 @@ interface CliArgs {
   apiKey?: string;
   token: string;
   agent: 'mock' | 'real' | 'auto';
+  provider: 'openai' | 'anthropic' | 'auto';
   fakeModel: boolean;
   /** C2：日志落盘路径（缺省 <workspace>/.dsh/logs/daemon.log） */
   logFile: string;
@@ -35,6 +36,7 @@ function parseArgs(argv: string[]): CliArgs {
     preset: 'default',
     token: process.env.DSH_DAEMON_TOKEN ?? '',
     agent: 'auto',
+    provider: 'auto',
     fakeModel: false,
     logFile: '',
   };
@@ -62,6 +64,9 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case '--agent':
         args.agent = next() as CliArgs['agent'];
+        break;
+      case '--provider':
+        args.provider = next() as CliArgs['provider'];
         break;
       case '--fake-model':
         args.fakeModel = true;
@@ -94,6 +99,7 @@ async function main(): Promise<void> {
     preset: args.preset,
     apiKey: args.apiKey,
     agent: args.agent,
+    provider: args.provider,
     fakeModel: args.fakeModel,
     port: args.port,
     onPort: (port) => {

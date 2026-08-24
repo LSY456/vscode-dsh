@@ -98,6 +98,7 @@ describe('ConfigAccessor：面板配置读写（非凭据项）', () => {
       baseURL: 'https://api.deepseek.com/v1',
       model: '',
       preset: 'coder',
+      provider: 'auto',
     });
   });
 
@@ -108,10 +109,12 @@ describe('ConfigAccessor：面板配置读写（非凭据项）', () => {
       model: 'deepseek-reasoner',
       baseURL: 'https://x/v1',
       preset: 'default',
+      provider: 'anthropic',
     });
     expect(map.get('model.model')).toBe('deepseek-reasoner');
     expect(map.get('model.baseURL')).toBe('https://x/v1');
     expect(map.get('preset')).toBe('default');
+    expect(map.get('model.provider')).toBe('anthropic');
     // 只写普通项，apiKey 走 SecretStorage 单独入口
     expect(updates.some(([k]) => k === 'apiKey')).toBe(false);
   });
