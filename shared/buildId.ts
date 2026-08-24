@@ -5,7 +5,7 @@
  * （VSCode reload 不回收扩展拉起的 node 子进程），auto 模式探测到端口可 ping 就复用，
  * 导致跑在旧代码上（真实事故：mock 补丁路径解析修复后仍复现旧行为）。
  *
- * 版本号不能用：扩展与 daemon 打包同一份 VSD_DSH_VERSION，"0.2.1" 区分不了新旧构建。
+ * 版本号不能用：扩展与 daemon 打包同一份 VSD_DSH_VERSION，同一版本号下多次构建仍无法区分新旧。
  * 因此每次构建生成随机 buildId（out/buildId.json，随构建变化、跨进程固定）：
  *  - daemon 在 Initialize 握手响应里上报 buildId；
  *  - 扩展对比自己读到的 buildId，不一致 => 复用了旧构建的 daemon，主动回收重启。

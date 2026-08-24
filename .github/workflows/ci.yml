@@ -23,13 +23,8 @@ jobs:
       - name: npm audit（生产依赖，高危阻断）
         run: npm audit --omit=dev --audit-level=high
 
-      # 全量漏洞扫描（真实执行、结果可见于 PR Annotation）。
-      # 生产依赖的硬门禁由上方 `npm audit --omit=dev --audit-level=high` 承担；
-      # 此处不阻断的理由：dev-only 工具链漏洞（如 esbuild 0.23 的 dev-server GHSA）
-      # 既不随扩展分发、也不进入运行时，仅影响本仓库本地构建。TODO：升级 esbuild 至 0.25+ 后移除 continue-on-error。
       - name: OSV-Scanner 漏洞扫描
         uses: google/osv-scanner-action@v1
-        continue-on-error: true
 
   test:
     name: typecheck / build / unit / smoke
@@ -60,6 +55,27 @@ jobs:
 
       - name: End-to-end smoke test
         run: npm run smoke
+
+  integration:
+    name: integration test（vscode extension host）
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Integration tests（T1-T5，真实扩展宿主 ↔ daemon）
+        run: xvfb-run -a node scripts/runIntegrationTests.js
 
   package:
     name: vsix package

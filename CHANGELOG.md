@@ -3,6 +3,46 @@
 本项目版本变化遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- 集成测试：`@vscode/test-electron` 启动真实 VSCode Extension Host，自动化 T1-T5
+  （激活连接 / 补丁流程 / 审批流程 / 路径护栏 / 编辑后应用），`npm run test:integration` 运行。
+- CI 新增 `integration` job（ubuntu headless，`xvfb-run`），覆盖扩展宿主层 ↔ daemon 完整闭环。
+- 扩展 `activate()` 暴露测试钩子（`DshApi`：daemon / diff），运行时不改变产品行为。
+
+## [0.3.0] - 2026-08-23
+
+### 新增
+
+- **A1 Webview Markdown 渲染**：marked + GFM + highlight.js 代码高亮，DOMPurify 统一净化
+  （配合 CSP 双层防 XSS），流式结束一次性安全渲染。
+- **A2 流式渲染批处理**：token 级 delta 按帧（rAF）节流写 DOM，消息结束前冲刷兜底，长回答不再高频 reflow。
+- **A3 会话历史**：extension 侧 workspaceState 持久化（按工作区隔离）、历史回放、异常中断最后一段兜底落库。
+- **A4 配置面板 + 凭据安全化**：apiKey 迁移 VSCode SecretStorage（旧明文自动回迁并清除）、
+  面板化模型配置（API Key / 模型 / BaseURL / 预设），保存后一键重启 daemon 生效。
+- **B1 信任记忆（免审批白名单）**：审批卡「接受并记住」按「程序+首参」脱敏生成 prefix 规则、
+  高危程序仅精确匹配、工具白名单优先于信任放行、规则落 `.dsh/trust.json`（`trust.list` / `trust.clear`）。
+- **P2 补丁编辑（Diff 编辑后应用）**：补丁卡「编辑并应用」两段式，`file.patch.respond`
+  携带编辑后 `content` 写盘，daemon 写盘优先用户编辑后的内容。
+- **C1 CI 安全扫描**：新增 `security` job（`npm audit --omit=dev --audit-level=high` 生产依赖
+  高危阻断 + OSV-Scanner 全量扫描）。
+- **C2 daemon 日志落盘**：tee stdout/stderr 到 `.dsh/logs/daemon.log`（轮转归档 + 目录 0700 / 文件 0600）。
+- **C3 trajectory.list 协议化**：以协议方法回放脱敏轨迹，替代直接读 `.dsh/trajectory/*.jsonl`。
+
+### 变更
+
+- esbuild `0.23.1` → `0.28.2`（消除 dev-server 漏洞，OSV 恢复全量硬门禁）。
+- 测试基线更新为 153 个用例（新增 trust 15 例、logFile 4 例、P2 补丁编辑 2 例、mock B1 信任 2 例）。
+
+### 修复
+
+- mock 目标路径解析：修正 `extractPath` 正则捕获组（`rel[0]`），无匹配时兜底到工作区 `output.txt`
+  （原 `rel[1]` 恒为 undefined 且 `process.cwd()` 会误落到进程启动目录）。
+- 陈旧 daemon 复用防护：esbuild 每次构建写随机 `buildId` 指纹，扩展比对不一致即回收旧 daemon
+  （杀掉旧 pid + 删除端口文件 + 重启），避免升级后连旧进程导致行为漂移。
+
 ## [0.2.1] - 2026-08-17
 
 ### 安全（企业级加固）
