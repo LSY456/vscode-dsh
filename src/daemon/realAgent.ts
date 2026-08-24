@@ -27,6 +27,7 @@ import {
   tryReadFile,
   writeTextFile,
 } from './tools';
+import { CommandSandbox } from './sandbox';
 
 export interface RealAgentConfig {
   model: ChatModel;
@@ -38,6 +39,8 @@ export interface RealAgentConfig {
   maxToolRounds?: number;
   /** 工具读取单文件上限（字节） */
   maxReadBytes?: number;
+  /** 命令沙箱（P3.5+）：可选，缺省 executeCommand 内部兜底 ProcessSandbox */
+  sandbox?: CommandSandbox;
 }
 
 let stepCounter = 0;
@@ -283,7 +286,7 @@ async function dispatchTool(
     };
     // B1 信任记忆：命中白名单 -> 免审批直接执行（不发起 approval.request）
     if (ctx.isTrusted?.(command)) {
-      const run = await executeCommand(command, ctx.workspaceRoot, { timeoutMs: 30_000, runner: config.commandRunner });
+      const run = await executeCommand(command, ctx.workspaceRoot, { timeoutMs: 30_000, runner: config.commandRunner, sandbox: config.sandbox });
       ctx.notify(EVENTS.ToolExecuted, {
         sessionId,
         tool: 'bash_execute',
@@ -311,7 +314,7 @@ async function dispatchTool(
       return '已取消：用户拒绝了该命令。';
     }
 
-    const run = await executeCommand(command, ctx.workspaceRoot, { timeoutMs: 30_000, runner: config.commandRunner });
+    const run = await executeCommand(command, ctx.workspaceRoot, { timeoutMs: 30_000, runner: config.commandRunner, sandbox: config.sandbox });
     ctx.notify(EVENTS.ToolExecuted, { sessionId, tool: 'bash_execute', ok: run.ok, output: run.output, durationMs: run.durationMs });
     trajectory('tool', 'bash_execute 完成');
     return run.output;

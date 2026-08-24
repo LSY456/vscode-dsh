@@ -64,18 +64,25 @@ export class ConfigAccessor {
   }
 
   /** 面板可编辑的普通配置项（不含凭据项）。 */
-  getPanelConfig(): { baseURL: string; model: string; preset: string } {
+  getPanelConfig(): { baseURL: string; model: string; preset: string; provider: string } {
     return {
       baseURL: this.config.get('model.baseURL', ''),
       model: this.config.get('model.model', ''),
       preset: this.config.get('preset', 'default'),
+      provider: this.config.get('model.provider', 'auto'),
     };
   }
 
   /** 面板提交的普通配置项写入（目标：全局用户配置）。 */
-  async applyPanelConfig(values: { baseURL?: string; model?: string; preset?: string }): Promise<void> {
+  async applyPanelConfig(values: {
+    baseURL?: string;
+    model?: string;
+    preset?: string;
+    provider?: string;
+  }): Promise<void> {
     if (values.baseURL !== undefined) await this.config.update('model.baseURL', values.baseURL || '');
     if (values.model !== undefined) await this.config.update('model.model', values.model || '');
     if (values.preset !== undefined) await this.config.update('preset', values.preset || 'default');
+    if (values.provider !== undefined) await this.config.update('model.provider', values.provider || 'auto');
   }
 }

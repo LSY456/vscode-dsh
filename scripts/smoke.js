@@ -412,6 +412,29 @@ async function main() {
   assert(fs.readFileSync(samplePath, 'utf8').includes('REAL-DAEMON-WRITE'), '真实 Agent 补丁已落盘');
   await rconn.rpc.waitFor((m) => m.method === 'session.ended', '真实写会话结束');
 
+  // bash_execute 工具：审批 → 真实 spawn 执行（验证命令沙箱 cwd 约束 + 环境清洗）
+  console.log('[smoke] 真实 bash_execute（命令沙箱）…');
+  rconn.rpc.resetEvents();
+  await rconn.rpc.request('session.send', {
+    sessionId: rsessionId,
+    prompt: '请执行命令（bash）',
+  });
+  const rbashApproval = await rconn.rpc.waitFor((m) => m.method === 'approval.request', '真实 bash_execute 审批');
+  assert(rbashApproval.params.tool === 'bash_execute', '真实 bash_execute 发起审批');
+  await rconn.rpc.request('approval.respond', {
+    sessionId: rsessionId,
+    approvalId: rbashApproval.params.approvalId,
+    approved: true,
+  });
+  const rbashDone = await rconn.rpc.waitFor(
+    (m) => m.method === 'tool.executed' && m.params.tool === 'bash_execute',
+    '真实 bash_execute 完成'
+  );
+  assert(rbashDone.params.ok === true, '真实 bash_execute 执行成功');
+  assert(rbashDone.params.output.includes('SMOKE_BASH_OK'), '命令输出含 SMOKE_BASH_OK');
+  assert(rbashDone.params.output.includes(path.basename(tmpDir)), '命令 cwd 被约束到工作区');
+  await rconn.rpc.waitFor((m) => m.method === 'session.ended', '真实 bash 会话结束');
+
   // 验证轨迹已持久化到 .dsh/trajectory
   const trajFile = path.join(tmpDir, '.dsh', 'trajectory', rsessionId + '.jsonl');
   assert(fs.existsSync(trajFile) && fs.statSync(trajFile).size > 0, '轨迹已持久化（.dsh/trajectory/*.jsonl）');

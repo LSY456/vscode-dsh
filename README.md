@@ -191,11 +191,13 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，153 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
-  会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析）、工具沙箱（护栏/策略/默认拒绝）、
-  轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、Webview Markdown 渲染与净化（XSS 安全）。
+- **单元测试**：`npm test`（vitest，164 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+  会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
+  工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
+  Webview Markdown 渲染与净化（XSS 安全）。
 - **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
-  `file.read` 越界拒绝、以及真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘）。
+  `file.read` 越界拒绝、真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘），
+  以及真实 `bash_execute`（审批 → spawn 执行 → cwd 约束校验）。
 - **集成测试**：`npm run test:integration` 用 `@vscode/test-electron` 启动真实 VSCode Extension Host，
   覆盖扩展宿主层 ↔ daemon 的完整闭环（T1 激活连接 / T2 补丁 / T3 审批 / T4 路径护栏 / T5 编辑后应用）。
 - **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 security（npm audit + osv-scanner）、
@@ -253,15 +255,20 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - [x] **C 系列工程化**：CI 安全扫描（`npm audit --omit=dev` 生产依赖高危阻断 + OSV-Scanner 全量扫描）、
       daemon 日志落盘（tee stdout/stderr 到 `.dsh/logs/daemon.log`，带轮转与 0600 权限）、
       `trajectory.list` 协议化（以协议回放脱敏轨迹，替代直接读 JSONL 文件）
+- [x] **集成测试**：`@vscode/test-electron` 启动真实 VSCode Extension Host，自动化 T1-T5
+      （激活连接 / 补丁 / 审批 / 路径护栏 / 编辑后应用）
+- [x] **P3.5+ 生产化**：命令执行沙箱（可插拔后端：Linux 检测到 bubblewrap 即启用命名空间隔离，
+      其余平台应用层兜底 cwd 约束 + 环境最小化 + 超时进程树终止，降级原因显式告警）、模型多点位
+      （OpenAI 兼容全家桶 + Anthropic Messages 适配，经 `dsh.model.provider` 选择）
 
 ### 待办
-- [ ] P3.5+：把真实 daemon 打磨为生产可用（命令执行沙箱化 OS 隔离、模型 provider 多点位、审批信任记忆）
 - [ ] P4：VSCode Remote-SSH / WSL / Containers 场景（TLS + 鉴权升级）
 
 ## 已知局限
 
-- 真实模型经 OpenAI 兼容端点调用（DeepSeek/OpenAI）；其他 provider 需扩展 `ChatModel` 适配器。
-- 命令执行是"策略门控 + 人工审批"而非 OS 级沙箱隔离，确需运行时请谨慎配置命令白名单。
+- 模型支持 OpenAI 兼容端点（DeepSeek/OpenAI/通义/本地推理等）与 Anthropic Messages，经 `dsh.model.provider` 选择。
+- 命令执行在"策略门控 + 人工审批"之外已加应用层加固（cwd 约束 + 环境最小化 + 超时进程树终止）；
+  OS 级命名空间隔离仅在 Linux 且检测到 bubblewrap 时启用，其余平台仍非容器/VM 隔离，请谨慎配置命令白名单。
 - 断线续跑仅限同一 daemon 进程内；daemon 进程重启后会话丢失（`resume` 返回 `NotFound`，客户端新建会话）。
 - 未覆盖 VSCode Remote-SSH / WSL / Containers 场景（"仅 127.0.0.1"模型需升级为 TLS + 鉴权）。
 - 会话历史存于 extension 侧（workspaceState），按工作区隔离，跨工作区/换机不可见。
