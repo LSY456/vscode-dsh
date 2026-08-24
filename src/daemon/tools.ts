@@ -12,6 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { assertPathInside, PathError } from './paths';
+import { CommandSandbox, ProcessSandbox, SandboxedCommand } from './sandbox';
 
 export { PathError };
 
@@ -154,21 +155,22 @@ export interface CommandRunResult {
 }
 
 export type CommandRunner = (
-  command: string,
-  cwd: string,
+  spec: SandboxedCommand,
   timeoutMs: number
 ) => Promise<{ exitCode: number | null; stdout: string; stderr: string }>;
 
 export async function executeCommand(
   command: string,
   cwd: string,
-  opts: { timeoutMs?: number; runner?: CommandRunner } = {}
+  opts: { timeoutMs?: number; runner?: CommandRunner; sandbox?: CommandSandbox } = {}
 ): Promise<CommandRunResult> {
   const t0 = Date.now();
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const runner = opts.runner ?? defaultRunner;
+  const sandbox = opts.sandbox ?? new ProcessSandbox({ workspaceRoot: cwd });
   try {
-    const { exitCode, stdout, stderr } = await runner(command, cwd, timeoutMs);
+    const spec = sandbox.prepare(command, cwd);
+    const { exitCode, stdout, stderr } = await runner(spec, timeoutMs);
     const output = [stdout, stderr].filter(Boolean).join('\n').slice(-8000) || '(无输出)';
     return { ok: exitCode === 0, output, durationMs: Date.now() - t0 };
   } catch (e) {
@@ -176,26 +178,72 @@ export async function executeCommand(
   }
 }
 
-function defaultRunner(command: string, cwd: string, timeoutMs: number): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+function defaultRunner(spec: SandboxedCommand, timeoutMs: number): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
   // 延迟 require 避免测试环境无 child_process 场景也被加载
   const cp = require('child_process') as typeof import('child_process');
-  const exec = cp.exec as unknown as (
-    cmd: string,
-    opts: Record<string, unknown>,
-    cb: (error: { code?: number | string; message?: string } | null, stdout: string, stderr: string) => void
-  ) => unknown;
+  const spawnOpts: import('child_process').SpawnOptions = {
+    cwd: spec.cwd,
+    env: spec.env,
+    windowsHide: true,
+    shell: spec.shell,
+  };
+  // POSIX：detached 使子进程成为进程组组长，便于超时后整组终止
+  if (process.platform !== 'win32') spawnOpts.detached = true;
+
   return new Promise((resolve, reject) => {
-    exec(
-      command,
-      { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true },
-      (error, stdout, stderr) => {
-        if (error && typeof error.code !== 'number') {
-          reject(new Error(error.message ?? '命令执行失败'));
-          return;
-        }
-        const exitCode = error && typeof error.code === 'number' ? error.code : 0;
-        resolve({ exitCode: exitCode || 0, stdout: String(stdout), stderr: String(stderr) });
+    const child = cp.spawn(spec.command, spec.args, spawnOpts);
+    let stdout = '';
+    let stderr = '';
+    // 单流累积上限：防止 fork bomb 等命令的输出撑爆内存
+    const MAX_CAPTURE = 1024 * 1024;
+    let killed = false;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      killed = true;
+      killTree(cp, child);
+    }, timeoutMs);
+
+    child.stdout?.on('data', (d: Buffer) => {
+      if (stdout.length < MAX_CAPTURE) stdout += d.toString().slice(0, MAX_CAPTURE - stdout.length);
+    });
+    child.stderr?.on('data', (d: Buffer) => {
+      if (stderr.length < MAX_CAPTURE) stderr += d.toString().slice(0, MAX_CAPTURE - stderr.length);
+    });
+    const settle = (fn: () => void) => {
+      if (!settled) {
+        settled = true;
+        fn();
       }
-    );
+    };
+    child.on('error', (err: Error) => {
+      clearTimeout(timer);
+      settle(() => reject(err));
+    });
+    child.on('close', (code: number | null) => {
+      clearTimeout(timer);
+      // 超时被杀以传统 timeout 退出码 124 表示
+      settle(() => resolve({ exitCode: killed ? 124 : code, stdout, stderr }));
+    });
   });
+}
+
+/** 终止整棵进程树：Windows 走 taskkill /T /F，POSIX 用负 pid 杀进程组。 */
+function killTree(
+  cp: typeof import('child_process'),
+  child: import('child_process').ChildProcess
+): void {
+  try {
+    if (process.platform === 'win32') {
+      if (child.pid) cp.execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+    } else if (child.pid) {
+      process.kill(-child.pid, 'SIGKILL');
+    }
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* ignore */
+    }
+  }
 }

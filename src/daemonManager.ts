@@ -154,6 +154,7 @@ export class DaemonManager {
           model: cfg.get<string>('model.model', ''),
           apiKey,
           agent: 'auto',
+          provider: cfg.get<string>('model.provider', 'auto') as 'openai' | 'anthropic' | 'auto',
         },
         capabilities: {
           allowedTools: cfg.get<string[]>('capabilities.allowedTools', []),

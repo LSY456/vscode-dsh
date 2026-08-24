@@ -119,6 +119,16 @@
           "default": "deepseek-chat",
           "description": "模型名（如 deepseek-chat / deepseek-reasoner）。"
         },
+        "dsh.model.provider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "openai",
+            "anthropic"
+          ],
+          "default": "auto",
+          "description": "模型 provider：auto/openai（OpenAI 兼容，含 DeepSeek/通义/本地推理等）、anthropic（Claude Messages）。"
+        },
         "dsh.context.gitStatus": {
           "type": "boolean",
           "default": true,

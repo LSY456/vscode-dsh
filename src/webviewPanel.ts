@@ -65,7 +65,7 @@ interface FromWebview {
   patchId?: string;
   sessionId?: string;
   /** 设置面板提交项；apiKey 留空表示不修改 */
-  settings?: { apiKey?: string; model?: string; baseURL?: string; preset?: string };
+  settings?: { apiKey?: string; model?: string; baseURL?: string; preset?: string; provider?: string };
 }
 
 export class WebviewPanelHost {

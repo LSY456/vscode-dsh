@@ -35,6 +35,14 @@
         <input id="inp-model" placeholder="deepseek-chat" spellcheck="false" />
       </label>
       <label class="settings-field">
+        <span>模型 Provider <em class="muted">（OpenAI 兼容 / Anthropic）</em></span>
+        <select id="inp-provider">
+          <option value="auto">auto（缺省 = OpenAI 兼容）</option>
+          <option value="openai">openai</option>
+          <option value="anthropic">anthropic</option>
+        </select>
+      </label>
+      <label class="settings-field">
         <span>API Base URL</span>
         <input id="inp-baseurl" placeholder="https://api.deepseek.com/v1" spellcheck="false" />
       </label>
