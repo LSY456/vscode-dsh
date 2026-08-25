@@ -200,6 +200,8 @@ vscode-dsh/
   以及真实 `bash_execute`（审批 → spawn 执行 → cwd 约束校验）。
 - **集成测试**：`npm run test:integration` 用 `@vscode/test-electron` 启动真实 VSCode Extension Host，
   覆盖扩展宿主层 ↔ daemon 的完整闭环（T1 激活连接 / T2 补丁 / T3 审批 / T4 路径护栏 / T5 编辑后应用）。
+- **真实连通冒烟**：`npm run smoke:real`（可选，需真实 apiKey，不参与 CI）用真实 endpoint 的 SSE 流
+  验证 OpenAI 兼容与 Anthropic 两条适配链解析出非空正文且流式增量触发；缺 key 诚实跳过（退出 0）。
 - **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 security（npm audit + osv-scanner）、
   typecheck → build → unit → smoke（win/ubuntu）、integration（vscode extension host，ubuntu）；
   main 分支额外产出 VSIX 构件。
