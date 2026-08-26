@@ -3,20 +3,7 @@
 本项目版本变化遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
-
-### 新增
-
-- 集成测试：`@vscode/test-electron` 启动真实 VSCode Extension Host，自动化 T1-T5
-  （激活连接 / 补丁流程 / 审批流程 / 路径护栏 / 编辑后应用），`npm run test:integration` 运行。
-- CI 新增 `integration` job（ubuntu headless，`xvfb-run`），覆盖扩展宿主层 ↔ daemon 完整闭环。
-- 扩展 `activate()` 暴露测试钩子（`DshApi`：daemon / diff），运行时不改变产品行为。
-- 模型多点位：新增 Anthropic Messages 适配与 `createModel` 工厂，经 `dsh.model.provider`
-  （auto/openai/anthropic）选择；OpenAI 兼容仍覆盖 DeepSeek/通义/本地推理等。
-- 命令执行沙箱：可插拔后端（Linux 检测到 bubblewrap 时命名空间隔离）+ 应用层兜底
-  （cwd 约束 / 环境最小化 / 超时进程树终止），降级原因经日志显式披露。
-
-## [0.3.0] - 2026-08-23
+## [0.3.0] - 2026-08-26
 
 ### 新增
 
@@ -34,11 +21,21 @@
   高危阻断 + OSV-Scanner 全量扫描）。
 - **C2 daemon 日志落盘**：tee stdout/stderr 到 `.dsh/logs/daemon.log`（轮转归档 + 目录 0700 / 文件 0600）。
 - **C3 trajectory.list 协议化**：以协议方法回放脱敏轨迹，替代直接读 `.dsh/trajectory/*.jsonl`。
+- 集成测试：`@vscode/test-electron` 启动真实 VSCode Extension Host，自动化 T1-T5
+  （激活连接 / 补丁流程 / 审批流程 / 路径护栏 / 编辑后应用），`npm run test:integration` 运行。
+- CI `integration` job（ubuntu headless，`xvfb-run`）覆盖扩展宿主层 ↔ daemon 完整闭环。
+- 扩展 `activate()` 暴露测试钩子（`DshApi`：daemon / diff），运行时不改变产品行为。
+- 模型多点位：Anthropic Messages 适配与 `createModel` 工厂，经 `dsh.model.provider`
+  （auto/openai/anthropic）选择；OpenAI 兼容仍覆盖 DeepSeek/通义/本地推理等。
+- 命令执行沙箱：可插拔后端（Linux 检测到 bubblewrap 时命名空间隔离）+ 应用层兜底
+  （cwd 约束 / 环境最小化 / 超时进程树终止），降级原因经日志显式披露。
+- 真实连通冒烟：`npm run smoke:real`（需真实 apiKey，不参与 CI）用真实 endpoint 的 SSE 流
+  验证 OpenAI 兼容与 Anthropic 两条适配链解析出正文、流式增量触发；缺 key 诚实跳过。
 
 ### 变更
 
 - esbuild `0.23.1` → `0.28.2`（消除 dev-server 漏洞，OSV 恢复全量硬门禁）。
-- 测试基线更新为 153 个用例（新增 trust 15 例、logFile 4 例、P2 补丁编辑 2 例、mock B1 信任 2 例）。
+- 测试基线更新为 164 个用例（在 153 例之上追加命令沙箱、多 provider、密钥脱敏、日志落盘等）。
 
 ### 修复
 

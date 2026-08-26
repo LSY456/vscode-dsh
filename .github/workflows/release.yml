@@ -1,0 +1,38 @@
+name: Release
+
+# 发布流水线：打 tag（v*）即打包 VSIX 并创建 GitHub Release。
+# 与 ci.yml 的 package job（main push 产 artifact）互补——本 flow 面向正式版本发布。
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    name: tag 触发发布 VSIX
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Package VSIX
+        run: npx vsce package --out dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.vsix
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
