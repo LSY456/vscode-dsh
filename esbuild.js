@@ -52,8 +52,9 @@ async function main() {
     entryPoints: {
       extension: 'src/extension.ts',
       'daemon/index': 'src/daemon/index.ts',
-      // 独立产出 model 适配层，供 scripts/smokeReal.js 真实连通验证复用（不经 daemon 入口）
+      // 独立产出 model 适配层与 toolcall 解析，供 scripts/smokeReal.js 真实连通验证复用（不经 daemon 入口）
       'daemon/model': 'src/daemon/model.ts',
+      'daemon/toolcall': 'src/daemon/toolcall.ts',
     },
     outdir: 'out',
   });
