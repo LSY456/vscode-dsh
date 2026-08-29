@@ -55,7 +55,7 @@ const SYSTEM_PROMPT = [
   '3. 需要执行高危命令（如 rm、npm build 等 shell 命令）时调用工具 bash_execute {command}；',
   '   该调用需要用户审批后才能执行。',
   '4. 所有路径必须是工作区内的绝对路径；越界操作会被拒绝。',
-  '5. 工具调用必须且只能使用如下格式输出（一个 fenced JSON 块，可含多个对象）：',
+  '5. 需要调用工具时，输出一个 fenced JSON 块（```toolcall 或 ```json 均可，块内为单个 JSON 对象或对象数组）：',
   '   ```toolcall',
   '   {"tool":"read_file","input":{"path":"..."}}',
   '   ```',
