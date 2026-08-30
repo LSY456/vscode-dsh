@@ -8,8 +8,10 @@
  * 解析出非空正文，并确认流式 onChunk 在真实响应下被触发。
  *
  * 场景一（硬断言）：单轮 chat 连通——正文非空且流式增量到达。
- * 场景二（软探针）：工具调用——引导模型输出 fenced JSON 工具调用，再用
+ * 场景二（软探针）：fenced 工具调用——引导模型输出 fenced JSON 工具调用，再用
  *   parseToolCalls 解析并报告结果（真实模型行为不完全可控，故只报告、不硬失败）。
+ * 场景三（软探针）：原生 function calling——给 chat 传 tools，检查返回的
+ *   result.toolCalls 是否解析出原生工具调用（OpenAI tool_calls / Anthropic tool_use）。
  *
  * 运行：node scripts/smokeReal.js（先执行 npm run build 产出 out/daemon/model.js 与 toolcall.js）
  * 环境变量（不硬编码、不写盘、不打印 key）：
@@ -32,8 +34,41 @@ const TOOL_SYSTEM = [
 
 const TOOL_USER = '请读取当前工作区文件 README.md 的内容（用工具调用格式回复，不要直接回答内容）。';
 
+/** 场景三（原生 function calling）：暴露给模型的工具 schema（与 realAgent 的 read_file 一致）。 */
+const NATIVE_TOOLS = [
+  {
+    name: 'read_file',
+    description: '读取工作区内的文本文件',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: '工作区内的绝对路径' } },
+      required: ['path'],
+    },
+  },
+];
+
+const NATIVE_USER = '请读取工作区 README.md 的内容（用 read_file 工具，不要直接回答内容）。';
+
 function errMsg(e) {
   return e && e.message ? e.message : String(e);
+}
+
+function makeModel(t) {
+  return createModel({ provider: t.provider, baseURL: t.baseURL, apiKey: t.apiKey, model: t.model });
+}
+
+/** 软探针统一报告：不硬失败，按 parsed 打印 ok / 提示，异常打印并吞掉。 */
+async function reportProbe(t, label, probe) {
+  try {
+    const p = await probe(t);
+    if (p.parsed) {
+      console.log(`[smokeReal] ${label} ok     ${t.name}  ${p.okDetail}`);
+    } else {
+      console.log(`[smokeReal] ${label} 提示   ${t.name}  ${p.hintDetail}`);
+    }
+  } catch (e) {
+    console.log(`[smokeReal] ${label} 异常   ${t.name}: ${errMsg(e)}`);
+  }
 }
 
 function resolveTargets() {
@@ -60,12 +95,7 @@ function resolveTargets() {
 }
 
 async function runOne(t) {
-  const model = createModel({
-    provider: t.provider,
-    baseURL: t.baseURL,
-    apiKey: t.apiKey,
-    model: t.model,
-  });
+  const model = makeModel(t);
   let reasoningChunks = 0;
   let contentChunks = 0;
   const res = await model.chat([{ role: 'user', content: PROMPT }], {
@@ -87,12 +117,7 @@ async function runOne(t) {
 }
 
 async function runToolProbe(t) {
-  const model = createModel({
-    provider: t.provider,
-    baseURL: t.baseURL,
-    apiKey: t.apiKey,
-    model: t.model,
-  });
+  const model = makeModel(t);
   const res = await model.chat(
     [
       { role: 'system', content: TOOL_SYSTEM },
@@ -103,9 +128,22 @@ async function runToolProbe(t) {
   const calls = parseToolCalls(res.content);
   return {
     parsed: calls.length > 0,
-    count: calls.length,
-    firstTool: calls.length > 0 ? calls[0].tool : undefined,
-    preview: res.content.slice(0, 240),
+    okDetail: `解析出 ${calls.length} 个调用，首个=${calls[0]?.tool}`,
+    hintDetail: `模型未输出可解析的工具调用；正文前 240 字：${JSON.stringify(res.content.slice(0, 240))}`,
+  };
+}
+
+async function runNativeToolProbe(t) {
+  const model = makeModel(t);
+  const res = await model.chat([{ role: 'user', content: NATIVE_USER }], {
+    temperature: 0,
+    tools: NATIVE_TOOLS,
+  });
+  const calls = res.toolCalls ?? [];
+  return {
+    parsed: calls.length > 0,
+    okDetail: `原生 tool_calls 解析出 ${calls.length} 个，首个=${calls[0]?.tool}`,
+    hintDetail: `模型未返回原生 tool_calls；正文前 240 字：${JSON.stringify(res.content.slice(0, 240))}`,
   };
 }
 
@@ -139,19 +177,11 @@ async function main() {
       console.error(`[smokeReal] 连通 FAIL   ${t.name}  异常: ${errMsg(e)}`);
     }
 
-    // 场景二：工具调用探针（软报告，不硬失败）
-    try {
-      const p = await runToolProbe(t);
-      if (p.parsed) {
-        console.log(`[smokeReal] 工具探针 ok     ${t.name}  解析出 ${p.count} 个调用，首个=${p.firstTool}`);
-      } else {
-        console.log(
-          `[smokeReal] 工具探针 提示   ${t.name}  模型未输出可解析的工具调用；正文前 240 字：${JSON.stringify(p.preview)}`
-        );
-      }
-    } catch (e) {
-      console.log(`[smokeReal] 工具探针 异常   ${t.name}: ${errMsg(e)}`);
-    }
+    // 场景二：fenced 工具调用探针（软报告，不硬失败）
+    await reportProbe(t, '工具探针', runToolProbe);
+
+    // 场景三：原生 function calling 探针（软报告，不硬失败）
+    await reportProbe(t, '原生探针', runNativeToolProbe);
   }
 
   if (failures > 0) {
