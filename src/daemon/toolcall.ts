@@ -13,6 +13,8 @@
 export interface ToolCall {
   tool: string;
   input: Record<string, unknown>;
+  /** 原生协议调用 id（OpenAI tool_call.id / Anthropic tool_use.id）；fenced 场景无 */
+  id?: string;
 }
 
 export const TOOLCALL_FENCE = 'toolcall';

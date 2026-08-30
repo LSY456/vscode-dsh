@@ -155,3 +155,156 @@ describe('createModel 工厂', () => {
     expect(createModel({ provider: 'auto', apiKey: 'k' })).toBeInstanceOf(OpenAICompatibleModel);
   });
 });
+
+describe('原生 function calling：OpenAI tool_calls', () => {
+  it('请求体携带 tools（function 格式 + tool_choice auto）', async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      body = JSON.parse(init.body);
+      return { ok: true, body: sseChunks(['data: [DONE]']), text: async () => '' };
+    });
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    await model.chat([{ role: 'user', content: 'hi' }], {
+      tools: [{ name: 'read_file', description: '读取文件', parameters: { type: 'object', properties: {} } }],
+    });
+    expect(body.tools).toEqual([
+      { type: 'function', function: { name: 'read_file', description: '读取文件', parameters: { type: 'object', properties: {} } } },
+    ]);
+    expect(body.tool_choice).toBe('auto');
+  });
+
+  it('解析流式 tool_calls 增量，归一为 ToolCall（含 id 与入参对象）', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      body: sseChunks([
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":"}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"/a\\"}"}}]}}]}',
+        'data: [DONE]',
+      ]),
+      text: async () => '',
+    }));
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    const res = await model.chat([{ role: 'user', content: '读' }]);
+    expect(res.toolCalls).toEqual([{ tool: 'read_file', input: { path: '/a' }, id: 'call_1' }]);
+  });
+
+  it('多个 tool_calls 且 index 非连续时不错序、不漏槽', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      body: sseChunks([
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}},{"index":2,"id":"call_b","type":"function","function":{"name":"list_dir","arguments":""}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"/a\\"}"}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\\"path\\":\\"/\\"}"}}]}}]}',
+        'data: [DONE]',
+      ]),
+      text: async () => '',
+    }));
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    const res = await model.chat([{ role: 'user', content: '读' }]);
+    expect(res.toolCalls).toEqual([
+      { tool: 'read_file', input: { path: '/a' }, id: 'call_a' },
+      { tool: 'list_dir', input: { path: '/' }, id: 'call_b' },
+    ]);
+  });
+
+  it('原生消息序列化：assistant tool_calls 与 tool 结果 tool_call_id', async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      body = JSON.parse(init.body);
+      return { ok: true, body: sseChunks(['data: [DONE]']), text: async () => '' };
+    });
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    await model.chat([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', toolCalls: [{ tool: 'read_file', input: { path: '/a' }, id: 'call_1' }] },
+      { role: 'tool', content: 'tool=read_file\nTODO', toolCallId: 'call_1' },
+    ]);
+    expect(body.messages).toEqual([
+      { role: 'user', content: 'hi' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"/a"}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: 'tool=read_file\nTODO' },
+    ]);
+  });
+});
+
+describe('原生 function calling：Anthropic tool_use', () => {
+  it('请求体携带 tools（input_schema 格式）', async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      body = JSON.parse(init.body);
+      return { ok: true, body: sseChunks(['data: {"type":"message_stop"}']), text: async () => '' };
+    });
+    const model = new AnthropicModel({ apiKey: 'ak' });
+    await model.chat([{ role: 'user', content: 'hi' }], {
+      tools: [{ name: 'read_file', description: '读取文件', parameters: { type: 'object', properties: {} } }],
+    });
+    expect(body.tools).toEqual([
+      { name: 'read_file', description: '读取文件', input_schema: { type: 'object', properties: {} } },
+    ]);
+  });
+
+  it('解析 tool_use 块（content_block_start + input_json_delta）为 ToolCall', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      body: sseChunks([
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"/a\\"}"}}',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+      ]),
+      text: async () => '',
+    }));
+    const model = new AnthropicModel({ apiKey: 'ak' });
+    const res = await model.chat([{ role: 'user', content: '读' }]);
+    expect(res.toolCalls).toEqual([{ tool: 'read_file', input: { path: '/a' }, id: 'toolu_1' }]);
+  });
+
+  it('tool_use 前有 text block 时 index 非连续仍正确归一', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      body: sseChunks([
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"我先读取。"}}',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}',
+        'event: content_block_delta',
+        'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"/a\\"}"}}',
+        'event: message_stop',
+        'data: {"type":"message_stop"}',
+      ]),
+      text: async () => '',
+    }));
+    const model = new AnthropicModel({ apiKey: 'ak' });
+    const res = await model.chat([{ role: 'user', content: '读' }]);
+    expect(res.content).toBe('我先读取。');
+    expect(res.toolCalls).toEqual([{ tool: 'read_file', input: { path: '/a' }, id: 'toolu_1' }]);
+  });
+
+  it('原生消息序列化：assistant tool_use 块与 tool 结果 tool_result 块', async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      body = JSON.parse(init.body);
+      return { ok: true, body: sseChunks(['data: {"type":"message_stop"}']), text: async () => '' };
+    });
+    const model = new AnthropicModel({ apiKey: 'ak' });
+    await model.chat([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', toolCalls: [{ tool: 'read_file', input: { path: '/a' }, id: 'toolu_1' }] },
+      { role: 'tool', content: 'tool=read_file\nTODO', toolCallId: 'toolu_1' },
+    ]);
+    expect(body.messages).toEqual([
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'read_file', input: { path: '/a' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'tool=read_file\nTODO' }] },
+    ]);
+  });
+});

@@ -11,9 +11,15 @@
  * 真实 daemon 通过 ChatModel 接口调用模型，替换底座不影响 Agent 循环。
  */
 
+import { ToolCall } from './toolcall';
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** 原生工具调用（assistant 消息）；fenced 场景不设此字段 */
+  toolCalls?: ToolCall[];
+  /** tool 消息对应的原生调用 id（OpenAI tool_call_id / Anthropic tool_use_id） */
+  toolCallId?: string;
 }
 
 export type StreamChunkType = 'reasoning' | 'content';
@@ -23,11 +29,21 @@ export interface StreamChunk {
   text: string;
 }
 
+/** 工具的 JSON Schema 定义（OpenAI function / Anthropic tool）。 */
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  /** JSON Schema 参数定义（OpenAI function.parameters / Anthropic input_schema） */
+  parameters: Record<string, unknown>;
+}
+
 export interface ChatCompletionResult {
   /** 思维链文本（可为空） */
   reasoning: string;
   /** 回答正文（包含可能的工具调用块） */
   content: string;
+  /** 原生工具调用（模型以 function calling / tool_use 发起时） */
+  toolCalls?: ToolCall[];
 }
 
 export interface ChatStreamOptions {
@@ -35,6 +51,8 @@ export interface ChatStreamOptions {
   signal?: AbortSignal;
   /** 每个增量到达时回调（reasoning 与 content 分别触发） */
   onChunk?: (chunk: StreamChunk) => void;
+  /** 暴露给模型的工具清单（原生 function calling） */
+  tools?: ToolDefinition[];
 }
 
 export interface ChatModel {
@@ -76,13 +94,7 @@ export class OpenAICompatibleModel implements ChatModel {
         'content-type': 'application/json',
         authorization: `Bearer ${this.apiKey}`,
       },
-      body: JSON.stringify({
-        model: this.model,
-        stream: true,
-        stream_options: { include_usage: false },
-        messages,
-        temperature: opts.temperature ?? 0.2,
-      }),
+      body: JSON.stringify(toOpenAIBody(this.model, messages, opts)),
       signal: opts.signal,
     });
 
@@ -121,13 +133,7 @@ export class AnthropicModel implements ChatModel {
         'x-api-key': this.apiKey,
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify({
-        model: this.model,
-        max_tokens: 4096,
-        stream: true,
-        system,
-        messages: anthropicMessages,
-      }),
+      body: JSON.stringify(toAnthropicBody(this.model, opts, system, anthropicMessages)),
       signal: opts.signal,
     });
 
@@ -139,21 +145,45 @@ export class AnthropicModel implements ChatModel {
   }
 }
 
-/** 将统一的 ChatMessage[] 转换为 Anthropic Messages 载荷（system 置顶、tool 降级为 user）。 */
+/** Anthropic Messages 中一条消息 content 的块形状（text / tool_use / tool_result）。 */
+type AnthropicContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; tool_use_id: string; content: string };
+
+/** Anthropic 消息 content：纯文本或块数组。 */
+type AnthropicContent = string | AnthropicContentBlock[];
+
+/** fenced 兜底场景：无原生调用 id 的工具结果作为 user 文本回灌时的前缀。 */
+const TOOL_RESULT_PREFIX = '[工具结果]\n';
+
+/** 将统一的 ChatMessage[] 转换为 Anthropic Messages 载荷（system 置顶、原生 tool_use/tool_result、无 id 的 tool 降级为 user 文本）。 */
 function toAnthropicMessages(messages: ChatMessage[]): {
   system: string;
-  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  messages: Array<{ role: 'user' | 'assistant'; content: AnthropicContent }>;
 } {
   const system = messages
     .filter((m) => m.role === 'system')
     .map((m) => m.content)
     .join('\n\n');
-  const out: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  const out: Array<{ role: 'user' | 'assistant'; content: AnthropicContent }> = [];
   for (const m of messages) {
     if (m.role === 'system') continue;
-    if (m.role === 'tool') {
-      // Anthropic 无 tool 角色；工具结果作为 user 消息回灌给模型
-      out.push({ role: 'user', content: `[工具结果]\n${m.content}` });
+    if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+      // 原生：assistant 的 tool_use 块（正文为可选的 text 块）
+      out.push({
+        role: 'assistant',
+        content: [
+          ...(m.content ? [{ type: 'text' as const, text: m.content }] : []),
+          ...m.toolCalls.map((tc) => ({ type: 'tool_use' as const, id: tc.id ?? '', name: tc.tool, input: tc.input })),
+        ],
+      });
+    } else if (m.role === 'tool' && m.toolCallId) {
+      // 原生：tool 结果回灌为 user 的 tool_result 块
+      out.push({ role: 'user', content: [{ type: 'tool_result' as const, tool_use_id: m.toolCallId, content: m.content }] });
+    } else if (m.role === 'tool') {
+      // 向后兼容（fenced 场景无 id）：工具结果作为 user 文本回灌
+      out.push({ role: 'user', content: `${TOOL_RESULT_PREFIX}${m.content}` });
     } else {
       out.push({ role: m.role, content: m.content });
     }
@@ -161,7 +191,7 @@ function toAnthropicMessages(messages: ChatMessage[]): {
   return { system, messages: out };
 }
 
-/** 解析 Anthropic SSE 流，累积 thinking_delta（reasoning）与 text_delta（content）并回调增量。 */
+/** 解析 Anthropic SSE 流，累积 thinking_delta（reasoning）、text_delta（content）与 tool_use 块并回调增量。 */
 async function parseAnthropicSSE(
   stream: AsyncIterable<Uint8Array>,
   onChunk: (chunk: StreamChunk) => void
@@ -170,6 +200,7 @@ async function parseAnthropicSSE(
   let buffer = '';
   let reasoning = '';
   let content = '';
+  const toolUses = new Map<number, ToolCallAccumulator>();
 
   for await (const value of stream) {
     buffer += decoder.decode(value, { stream: true });
@@ -184,22 +215,40 @@ async function parseAnthropicSSE(
       try {
         const obj = JSON.parse(data) as {
           type?: string;
-          delta?: { type?: string; text?: string; thinking?: string };
+          index?: number;
+          content_block?: { type?: string; id?: string; name?: string };
+          delta?: { type?: string; text?: string; thinking?: string; partial_json?: string };
         };
-        if (obj.type !== 'content_block_delta' || !obj.delta) continue;
-        if (obj.delta.type === 'text_delta' && typeof obj.delta.text === 'string') {
-          content += obj.delta.text;
-          onChunk({ type: 'content', text: obj.delta.text });
-        } else if (obj.delta.type === 'thinking_delta' && typeof obj.delta.thinking === 'string') {
-          reasoning += obj.delta.thinking;
-          onChunk({ type: 'reasoning', text: obj.delta.thinking });
+        if (obj.type === 'content_block_start' && obj.content_block?.type === 'tool_use') {
+          toolUses.set(obj.index ?? 0, {
+            id: obj.content_block.id ?? '',
+            name: obj.content_block.name ?? '',
+            args: '',
+          });
+        } else if (obj.type === 'content_block_delta' && obj.delta) {
+          if (obj.delta.type === 'text_delta' && typeof obj.delta.text === 'string') {
+            content += obj.delta.text;
+            onChunk({ type: 'content', text: obj.delta.text });
+          } else if (obj.delta.type === 'thinking_delta' && typeof obj.delta.thinking === 'string') {
+            reasoning += obj.delta.thinking;
+            onChunk({ type: 'reasoning', text: obj.delta.thinking });
+          } else if (obj.delta.type === 'input_json_delta' && typeof obj.delta.partial_json === 'string') {
+            const i = obj.index ?? 0;
+            const acc = toolUses.get(i) ?? { id: '', name: '', args: '' };
+            acc.args += obj.delta.partial_json;
+            toolUses.set(i, acc);
+          }
         }
       } catch {
         /* 忽略非 JSON 行（保持健壮） */
       }
     }
   }
-  return { reasoning, content };
+
+  const result: ChatCompletionResult = { reasoning, content };
+  const nativeCalls = assembleToolCalls(toolUses);
+  if (nativeCalls) result.toolCalls = nativeCalls;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +272,99 @@ export function createModel(opts: ProviderModelOptions): ChatModel {
   return new OpenAICompatibleModel({ baseURL: opts.baseURL, apiKey: opts.apiKey, model: opts.model });
 }
 
-/** 解析 OpenAI 兼容 SSE 流，累积 reasoning_content 与 content 并回调增量。 */
+/** 构建 OpenAI 兼容 chat/completions 请求体（含原生 tools）。 */
+function toOpenAIBody(model: string, messages: ChatMessage[], opts: ChatStreamOptions): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model,
+    stream: true,
+    stream_options: { include_usage: false },
+    messages: toOpenAIMessages(messages),
+    temperature: opts.temperature ?? 0.2,
+  };
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    }));
+    body.tool_choice = 'auto';
+  }
+  return body;
+}
+
+/** 序列化 OpenAI 消息：assistant 的原生 tool_calls；tool 原生带 tool_call_id、fenced 兜底降级为 user 文本。 */
+function toOpenAIMessages(messages: ChatMessage[]): unknown[] {
+  return messages.map((m) => {
+    if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+      return {
+        role: 'assistant',
+        content: m.content || null,
+        tool_calls: m.toolCalls.map((tc) => ({
+          id: tc.id ?? '',
+          type: 'function',
+          function: { name: tc.tool, arguments: JSON.stringify(tc.input) },
+        })),
+      };
+    }
+    if (m.role === 'tool') {
+      if (m.toolCallId) return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
+      // fenced 兜底（无原生 tool_call id）：作为 user 文本回灌
+      return { role: 'user', content: `${TOOL_RESULT_PREFIX}${m.content}` };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
+/** 构建 Anthropic /v1/messages 请求体（含原生 tools）。 */
+function toAnthropicBody(
+  model: string,
+  opts: ChatStreamOptions,
+  system: string,
+  messages: Array<{ role: 'user' | 'assistant'; content: AnthropicContent }>
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model,
+    max_tokens: 4096,
+    stream: true,
+    system,
+    messages,
+  };
+  if (opts.tools && opts.tools.length > 0) {
+    body.tools = opts.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.parameters,
+    }));
+  }
+  return body;
+}
+
+/** 一次原生工具调用的流式累积状态（OpenAI 与 Anthropic 归一后共享）。 */
+interface ToolCallAccumulator {
+  id: string;
+  name: string;
+  args: string;
+}
+
+/** 把原生协议的 JSON 参数串解析为对象（失败或非对象时回退空对象）。 */
+function parseArgsJson(args: string): Record<string, unknown> {
+  if (!args) return {};
+  try {
+    const parsed = JSON.parse(args);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 把按 index 累积的原生工具调用归一为 ToolCall[]（按 index 排序；无调用返回 undefined）。 */
+function assembleToolCalls(accs: Map<number, ToolCallAccumulator>): ToolCall[] | undefined {
+  if (accs.size === 0) return undefined;
+  return [...accs.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([, acc]) => ({ tool: acc.name, input: parseArgsJson(acc.args), id: acc.id }));
+}
+
+/** 解析 OpenAI 兼容 SSE 流，累积 reasoning_content、content 与 tool_calls 增量并回调。 */
 async function parseSSE(
   stream: AsyncIterable<Uint8Array>,
   onChunk: (chunk: StreamChunk) => void
@@ -232,6 +373,7 @@ async function parseSSE(
   let buffer = '';
   let reasoning = '';
   let content = '';
+  const toolCalls = new Map<number, ToolCallAccumulator>();
 
   for await (const value of stream) {
     buffer += decoder.decode(value, { stream: true });
@@ -244,7 +386,13 @@ async function parseSSE(
       if (data === '[DONE]' || data === '') continue;
       try {
         const obj = JSON.parse(data) as {
-          choices?: Array<{ delta?: { reasoning_content?: unknown; content?: unknown } }>;
+          choices?: Array<{
+            delta?: {
+              reasoning_content?: unknown;
+              content?: unknown;
+              tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }>;
+            };
+          }>;
         };
         const delta = obj.choices?.[0]?.delta;
         if (!delta) continue;
@@ -258,12 +406,24 @@ async function parseSSE(
           content += c;
           onChunk({ type: 'content', text: c });
         }
+        for (const tc of delta.tool_calls ?? []) {
+          const i = tc.index ?? 0;
+          const acc = toolCalls.get(i) ?? { id: '', name: '', args: '' };
+          if (tc.id) acc.id = tc.id;
+          if (tc.function?.name) acc.name = tc.function.name;
+          if (tc.function?.arguments) acc.args += tc.function.arguments;
+          toolCalls.set(i, acc);
+        }
       } catch {
         /* 忽略非 JSON 行（保持健壮） */
       }
     }
   }
-  return { reasoning, content };
+
+  const result: ChatCompletionResult = { reasoning, content };
+  const nativeCalls = assembleToolCalls(toolCalls);
+  if (nativeCalls) result.toolCalls = nativeCalls;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +436,8 @@ export interface FakeTurn {
   content?: string;
   /** 若提供，则附带一个 fenced 工具调用块（见 toolcall.ts） */
   toolcall?: { tool: string; input: Record<string, unknown> };
+  /** 原生工具调用（function calling / tool_use，带 id） */
+  toolCalls?: ToolCall[];
 }
 
 export type FakeResponder = (messages: ChatMessage[]) => FakeTurn;
@@ -300,7 +462,7 @@ export class FakeChatModel implements ChatModel {
       if (opts.signal?.aborted) break;
       opts.onChunk?.({ type: 'content', text: ch });
     }
-    return { reasoning, content };
+    return { reasoning, content, toolCalls: turn.toolCalls };
   }
 }
 
