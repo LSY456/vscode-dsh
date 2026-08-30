@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatModel, FakeChatModel, FakeTurn } from './model';
+import { ChatMessage, ChatModel, FakeChatModel, FakeTurn } from './model';
 import { RealAgentConfig, runRealAgent } from './realAgent';
 
 let root = '';
@@ -250,5 +250,45 @@ describe('realAgent：取消', () => {
     expect(ended.params.reason).toBe('canceled');
     // 模型正文未被流式输出（仅取消提示）
     expect(ctx.events.some((e) => e.method === EVENTS.MessageDelta && e.params.delta.includes('不应输出'))).toBe(false);
+  });
+});
+
+describe('realAgent：原生 function calling', () => {
+  it('原生 tool_calls 优先消费，并回灌 tool_call_id 供下一轮模型', async () => {
+    const ctx = makeCtx();
+    const target = path.join(root, 'native.txt');
+    fs.writeFileSync(target, 'NATIVE-READ\n', 'utf8');
+    const seen: ChatMessage[][] = [];
+    const model = new FakeChatModel((messages) => {
+      seen.push(messages.map((m) => ({ ...m })));
+      if (seen.length === 1) {
+        return { reasoning: '原生调用', toolCalls: [{ tool: 'read_file', input: { path: target }, id: 'call_1' }] };
+      }
+      return { content: '读取完成' };
+    });
+
+    await runRealAgent(ctx, baseParams, { model });
+
+    const te = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
+    expect(te.params.ok).toBe(true);
+    expect(te.params.output).toContain('NATIVE-READ');
+    // 第二轮模型收到的 assistant 消息带 toolCalls、tool 消息带 toolCallId
+    const round2 = seen[1];
+    expect(round2.some((m) => m.role === 'assistant' && m.toolCalls?.[0]?.id === 'call_1')).toBe(true);
+    expect(round2.some((m) => m.role === 'tool' && m.toolCallId === 'call_1')).toBe(true);
+  });
+
+  it('无原生 tool_calls 时兜底解析 fenced 文本（向后兼容）', async () => {
+    const ctx = makeCtx();
+    const target = path.join(root, 'fenced.txt');
+    fs.writeFileSync(target, 'FENCED-READ\n', 'utf8');
+    const model = scripted([
+      { toolcall: { tool: 'read_file', input: { path: target } } },
+      { content: 'done' },
+    ]);
+    await runRealAgent(ctx, baseParams, { model });
+    const te = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
+    expect(te.params.ok).toBe(true);
+    expect(te.params.output).toContain('FENCED-READ');
   });
 });

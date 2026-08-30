@@ -14,7 +14,7 @@ import {
 } from '../../shared/protocol';
 import * as path from 'path';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatMessage, ChatModel } from './model';
+import { ChatMessage, ChatModel, ToolDefinition } from './model';
 import { parseToolCalls, ToolCall } from './toolcall';
 import {
   CommandPolicy,
@@ -55,13 +55,69 @@ const SYSTEM_PROMPT = [
   '3. 需要执行高危命令（如 rm、npm build 等 shell 命令）时调用工具 bash_execute {command}；',
   '   该调用需要用户审批后才能执行。',
   '4. 所有路径必须是工作区内的绝对路径；越界操作会被拒绝。',
-  '5. 需要调用工具时，输出一个 fenced JSON 块（```toolcall 或 ```json 均可，块内为单个 JSON 对象或对象数组）：',
+  '5. 调用工具时优先使用原生 function calling（工具定义已随请求提供）；若需以文本形式表达，',
+  '   输出 fenced JSON 块（```toolcall 或 ```json 均可，块内为单个 JSON 对象或对象数组）：',
   '   ```toolcall',
   '   {"tool":"read_file","input":{"path":"..."}}',
   '   ```',
   '6. 工具执行结果会以 tool 角色消息回灌，你需要据此继续作答或发起下一轮工具调用。',
   '7. 最终给用户的正文应简洁、以中文为主，并给出关键结论。',
 ].join('\n');
+
+/** 暴露给模型的原生工具清单（JSON Schema；与 dispatchTool 支持的工具一一对应）。 */
+const TOOL_DEFINITIONS: ToolDefinition[] = [
+  {
+    name: 'read_file',
+    description: '读取工作区内的文本文件',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: '工作区内的绝对路径' } },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'list_dir',
+    description: '列出目录内容',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: '目录路径（缺省为工作区根）' } },
+    },
+  },
+  {
+    name: 'write_file',
+    description: '写入/覆盖文件（提交用户 Diff 审查后应用）',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '工作区内绝对路径' },
+        content: { type: 'string', description: '文件完整内容' },
+      },
+      required: ['path', 'content'],
+    },
+  },
+  {
+    name: 'apply_patch',
+    description: '字符串替换修改文件（提交用户 Diff 审查后应用）',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '工作区内绝对路径' },
+        search: { type: 'string', description: '待替换的原字符串' },
+        replace: { type: 'string', description: '替换后的新字符串' },
+      },
+      required: ['path', 'search', 'replace'],
+    },
+  },
+  {
+    name: 'bash_execute',
+    description: '执行 shell 命令（高危，需用户审批）',
+    parameters: {
+      type: 'object',
+      properties: { command: { type: 'string', description: '要执行的命令' } },
+      required: ['command'],
+    },
+  },
+];
 
 export async function runRealAgent(
   ctx: AgentContext,
@@ -91,10 +147,12 @@ export async function runRealAgent(
 
     let reasoning = '';
     let content = '';
+    let nativeToolCalls: ToolCall[] | undefined;
     let streamFailed: Error | null = null;
     try {
       const result = await config.model.chat(messages, {
         signal: abort.signal,
+        tools: TOOL_DEFINITIONS,
         onChunk: (c) => {
           if (ctx.isCanceled() || abort.signal.aborted) {
             abort.abort();
@@ -110,6 +168,7 @@ export async function runRealAgent(
       });
       reasoning = result.reasoning;
       content = result.content;
+      nativeToolCalls = result.toolCalls;
     } catch (err) {
       streamFailed = err instanceof Error ? err : new Error(String(err));
     }
@@ -129,14 +188,15 @@ export async function runRealAgent(
 
     ctx.notify(EVENTS.MessageDone, { sessionId: ctx.sessionId });
 
-    const calls = parseToolCalls(content);
+    // 原生 function calling 优先；无原生调用时兜底解析 fenced 文本
+    const calls = nativeToolCalls && nativeToolCalls.length > 0 ? nativeToolCalls : parseToolCalls(content);
     if (calls.length === 0) break; // 无工具调用 => 最终回答已流式输出
 
-    messages.push({ role: 'assistant', content });
+    messages.push({ role: 'assistant', content, toolCalls: nativeToolCalls });
     for (const call of calls) {
       if (ctx.isCanceled()) break;
       const toolOutput = await dispatchTool(ctx, call, caps, config, trajectory);
-      messages.push({ role: 'tool', content: `tool=${call.tool}\n${toolOutput}` });
+      messages.push({ role: 'tool', content: `tool=${call.tool}\n${toolOutput}`, toolCallId: call.id });
     }
   }
 
