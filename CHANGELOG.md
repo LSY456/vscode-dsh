@@ -12,6 +12,7 @@
   工具 schema 驱动原生调用、fenced 解析兜底，工具结果回灌带调用 id。
 - **smokeReal 场景三**：真实连通冒烟新增原生工具探针（给 `chat` 传 `tools`，检查 `result.toolCalls`），
   与场景一（连通，硬断言）/场景二（fenced 探针，软报告）共同覆盖三条链路。
+- **会话历史持久化**：历史外置到工作区 `.dsh/history.json`（跨 daemon 重启 / 换机持久），不再依赖 workspaceState。
 
 ## [0.3.0] - 2026-08-26
 
