@@ -3,6 +3,16 @@
 本项目版本变化遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **原生 function calling**：`ChatModel` 支持 `tools` 参数（ToolDefinition JSON Schema），OpenAI 兼容
+  `tool_calls` 与 Anthropic `tool_use` 流式解析（按 index 累积归一为原生 ToolCall）；`realAgent`
+  工具 schema 驱动原生调用、fenced 解析兜底，工具结果回灌带调用 id。
+- **smokeReal 场景三**：真实连通冒烟新增原生工具探针（给 `chat` 传 `tools`，检查 `result.toolCalls`），
+  与场景一（连通，硬断言）/场景二（fenced 探针，软报告）共同覆盖三条链路。
+
 ## [0.3.0] - 2026-08-26
 
 ### 新增

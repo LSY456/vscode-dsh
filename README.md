@@ -241,7 +241,7 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
 - [x] **P3 真实 daemon**：模型适配层（OpenAI 兼容流式 + 思维链分离）、真实 Agent 循环（同一 AgentContext
-      契约）、真实工具沙箱（只读/写入 Diff 审查/高危命令策略+审批）、轨迹持久化（JSONL 轮转）、
+      契约 + 原生 function calling）、真实工具沙箱（只读/写入 Diff 审查/高危命令策略+审批）、轨迹持久化（JSONL 轮转）、
       按 `dsh.apiKey` 自动切换 mock/real
 - [x] **A1 Webview 渲染**：Markdown 渲染（marked + GFM）+ 代码高亮（highlight.js，常用语言）+ DOMPurify
       统一净化（配合 CSP 双层防御 XSS），流式期间纯文本、结束时一次性安全渲染
@@ -264,7 +264,8 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
       （OpenAI 兼容全家桶 + Anthropic Messages 适配，经 `dsh.model.provider` 选择）
 
 ### 待办
-- [ ] P4：VSCode Remote-SSH / WSL / Containers 场景（TLS + 鉴权升级）
+- [ ] P4a：Remote-SSH / WSL / Containers 场景实测（核心链路已由 CI Linux 拓扑覆盖，待真实环境确认 drvfs 路径 / remote server 环境 / 容器网络等边界）
+- [ ] P4b：跨主机 TLS + 鉴权升级（仅当 daemon 需监听非 127.0.0.1 供跨机访问时；标准 Remote 场景 extension 与 daemon 同在 remote 走 localhost，不需要）
 
 ## 已知局限
 
@@ -272,7 +273,7 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - 命令执行在"策略门控 + 人工审批"之外已加应用层加固（cwd 约束 + 环境最小化 + 超时进程树终止）；
   OS 级命名空间隔离仅在 Linux 且检测到 bubblewrap 时启用，其余平台仍非容器/VM 隔离，请谨慎配置命令白名单。
 - 断线续跑仅限同一 daemon 进程内；daemon 进程重启后会话丢失（`resume` 返回 `NotFound`，客户端新建会话）。
-- 未覆盖 VSCode Remote-SSH / WSL / Containers 场景（"仅 127.0.0.1"模型需升级为 TLS + 鉴权）。
+- Remote-SSH / WSL / Containers 场景尚未在真实环境实测；daemon 仍仅监听 127.0.0.1，跨主机访问需先做 TLS + 鉴权升级。
 - 会话历史存于 extension 侧（workspaceState），按工作区隔离，跨工作区/换机不可见。
 
 ---
