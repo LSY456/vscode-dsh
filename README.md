@@ -272,9 +272,9 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - 模型支持 OpenAI 兼容端点（DeepSeek/OpenAI/通义/本地推理等）与 Anthropic Messages，经 `dsh.model.provider` 选择。
 - 命令执行在"策略门控 + 人工审批"之外已加应用层加固（cwd 约束 + 环境最小化 + 超时进程树终止）；
   OS 级命名空间隔离仅在 Linux 且检测到 bubblewrap 时启用，其余平台仍非容器/VM 隔离，请谨慎配置命令白名单。
-- 断线续跑仅限同一 daemon 进程内；daemon 进程重启后会话丢失（`resume` 返回 `NotFound`，客户端新建会话）。
+- 断线续跑（`resume` 继续进行中的对话）仍限同一 daemon 进程内；daemon 重启后已在进行的会话无法续跑，需新建会话（历史记录不受影响）。
 - Remote-SSH / WSL / Containers 场景尚未在真实环境实测；daemon 仍仅监听 127.0.0.1，跨主机访问需先做 TLS + 鉴权升级。
-- 会话历史存于 extension 侧（workspaceState），按工作区隔离，跨工作区/换机不可见。
+- 会话历史外置到工作区 `.dsh/history.json`（跨 daemon 重启持久、换机随工作区迁移），仍按工作区分文件隔离。
 
 ---
 

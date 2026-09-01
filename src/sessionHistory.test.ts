@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { MAX_SESSIONS, MementoLike, SessionHistoryStore } from './sessionHistory';
+import { afterAll, describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { FileMemento, MAX_SESSIONS, MementoLike, SessionHistoryStore } from './sessionHistory';
 
 /** 内存假体：模拟 vscode.Memento（workspaceState）的同步读写语义。 */
 class FakeMemento implements MementoLike {
@@ -150,5 +153,63 @@ describe('SessionHistoryStore：边界', () => {
     // 空输入不应创建会话记录（无实质内容）
     expect(store.get('s1')).toBeUndefined();
     expect(store.list()).toEqual([]);
+  });
+});
+
+describe('FileMemento：历史外置到文件（daemon 重启 / 换机持久）', () => {
+  const base = path.join(
+    os.tmpdir(),
+    `dsh-history-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  );
+
+  afterAll(() => {
+    try {
+      fs.rmSync(base, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it('跨实例往返：写文件后新实例从同一文件恢复，数据一致', async () => {
+    const file = path.join(base, '.dsh', 'history.json');
+    const memento = new FileMemento(file);
+    const first = new SessionHistoryStore(memento, makeClock());
+    first.appendUser('s1', '问题A');
+    first.appendAssistantDelta('s1', '回答A');
+    first.finishAssistant('s1');
+    first.endSession('s1');
+    await memento.flush();
+
+    // 等价于 daemon 重启后新起存储实例：仅凭文件即可恢复
+    const second = new SessionHistoryStore(new FileMemento(file), makeClock());
+    expect(second.list()).toHaveLength(1);
+    expect(second.get('s1')!.messages.map((m) => m.text)).toEqual(['问题A', '回答A']);
+    expect(second.get('s1')!.endedAt).toBeDefined();
+  });
+
+  it('目录不存在时自动创建，文件真实落盘', async () => {
+    const file = path.join(base, 'nested', 'dir', 'history.json');
+    const memento = new FileMemento(file);
+    const store = new SessionHistoryStore(memento, makeClock());
+    store.appendUser('s2', '持久化');
+    store.persist();
+    await memento.flush();
+    expect(fs.existsSync(file)).toBe(true);
+  });
+
+  it('损坏 JSON 安全回退为空', () => {
+    const file = path.join(base, 'bad.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'garbage-not-json');
+    const store = new SessionHistoryStore(new FileMemento(file), makeClock());
+    expect(store.list()).toEqual([]);
+  });
+
+  it('无文件路径（无工作区降级）时不落盘，内存仍可用', () => {
+    const store = new SessionHistoryStore(new FileMemento(''), makeClock());
+    store.appendUser('s3', '不落盘');
+    store.persist();
+    expect(store.list()).toHaveLength(1);
+    expect(store.get('s3')!.messages[0].text).toBe('不落盘');
   });
 });

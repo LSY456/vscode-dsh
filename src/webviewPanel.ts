@@ -29,7 +29,7 @@ import { captureContext } from './contextCapture';
 import { ConfigAccessor } from './configAccessor';
 import { DaemonManager } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
-import { SessionHistoryStore, SessionSummary } from './sessionHistory';
+import { FileMemento, SessionHistoryStore, SessionSummary } from './sessionHistory';
 
 interface ToWebview {
   kind: 'status' | 'event' | 'init';
@@ -80,7 +80,7 @@ export class WebviewPanelHost {
     private readonly diff: DshDiffManager,
     private readonly configAccessor: ConfigAccessor
   ) {
-    this.history = new SessionHistoryStore(context.workspaceState);
+    this.history = new SessionHistoryStore(new FileMemento(this.resolveHistoryFile()));
     // 订阅 daemon 事件并转发到面板（同时拦截补丁事件交给 Diff 管理器）
     this.daemon.client.onEvent((n) => {
       if (n.method === EVENTS.FilePatchPending) {
@@ -117,6 +117,13 @@ export class WebviewPanelHost {
       default:
         break;
     }
+  }
+
+  /** 历史文件路径：优先工作区 .dsh/history.json，无工作区时退化为扩展全局存储。 */
+  private resolveHistoryFile(): string {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (root) return path.join(root, '.dsh', 'history.json');
+    return path.join(this.context.globalStorageUri.fsPath, 'history.json');
   }
 
   createOrShow(): void {
