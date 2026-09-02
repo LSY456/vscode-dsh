@@ -21,6 +21,9 @@ import {
   CommandRunner,
   evaluateCommandPolicy,
   executeCommand,
+  globFiles,
+  GrepResult,
+  grepFiles,
   listDirectory,
   readTextFile,
   resolveTarget,
@@ -48,7 +51,8 @@ let stepCounter = 0;
 const SYSTEM_PROMPT = [
   '你是 dsh，运行在 VSCode 扩展中的编程智能体。你通过工具与工作区交互，并遵守以下规则：',
   '',
-  '1. 需要读取文件时调用工具 read_file；需要列出目录调用 list_dir。',
+  '1. 需要读取文件时调用工具 read_file；列出目录调用 list_dir；按文件名定位文件调用 glob（如 `*.ts`）；',
+  '   跨文件搜索关键字/符号调用 grep。以上三类只读工具均无需审批。',
   '2. 需要修改/创建文件时，不要直接写盘，而是调用工具 write_file {path, content}（全量覆盖）',
   '   或 apply_patch {path, search, replace}（字符串替换）。修改会先提交给用户做 Diff 审查，',
   '   只有用户接受后才会真正写入。',
@@ -81,6 +85,31 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: { path: { type: 'string', description: '目录路径（缺省为工作区根）' } },
+    },
+  },
+  {
+    name: 'grep',
+    description: '跨文件搜索包含指定关键字/符号的行（无需审批的只读工具，跳过 node_modules/.git 与二进制、超大文件）',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: '要搜索的字面量关键字' },
+        path: { type: 'string', description: '搜索目录（缺省为工作区根）' },
+        include: { type: 'string', description: '文件名过滤通配（如 *.ts，可选）' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
+    name: 'glob',
+    description: '按文件名通配符定位文件（无需审批的只读工具，跳过 node_modules/.git）',
+    parameters: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: '文件名通配（如 *.ts、test*）' },
+        path: { type: 'string', description: '搜索目录（缺省为工作区根）' },
+      },
+      required: ['pattern'],
     },
   },
   {
@@ -231,23 +260,36 @@ async function dispatchTool(
   const allowedDirs = caps.allowedDirs ?? [];
   const start = Date.now();
 
-  // ---- 只读：read_file / list_dir
-  if (tool === 'read_file' || tool === 'list_dir') {
+  // ---- 只读：read_file / list_dir / grep / glob
+  if (tool === 'read_file' || tool === 'list_dir' || tool === 'grep' || tool === 'glob') {
     if (!toolAllowed(caps, tool)) return disabledTool(ctx, sessionId, caps, tool);
     ctx.notify(EVENTS.ToolStarted, { sessionId, tool, input });
     trajectory('tool', `${tool} ${JSON.stringify(input)}`);
     try {
+      let output: string;
       if (tool === 'list_dir') {
-        const { names } = listDirectory(ctx.workspaceRoot, allowedDirs, String(input.path ?? '.'));
-        const output = names.length ? names.join('\n') : '(空目录)';
-        ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: true, output, durationMs: Date.now() - start });
-        trajectory('tool', `${tool} 完成`);
-        return output;
+        const { names } = listDirectory(ctx.workspaceRoot, allowedDirs, String(input.path ?? ctx.workspaceRoot));
+        output = names.length ? names.join('\n') : '(空目录)';
+      } else if (tool === 'grep') {
+        const res = grepFiles(ctx.workspaceRoot, allowedDirs, String(input.pattern ?? ''), {
+          dir: input.path ? String(input.path) : undefined,
+          include: input.include ? String(input.include) : undefined,
+        });
+        output = formatGrepResult(res);
+      } else if (tool === 'glob') {
+        const res = globFiles(ctx.workspaceRoot, allowedDirs, String(input.pattern ?? ''), {
+          dir: input.path ? String(input.path) : undefined,
+        });
+        output = res.files.length
+          ? res.files.join('\n') + (res.truncated ? '\n…（结果过多已截断）' : '')
+          : '(无匹配文件)';
+      } else {
+        const data = readTextFile(ctx.workspaceRoot, allowedDirs, String(input.path ?? ''), config.maxReadBytes ?? 64 * 1024);
+        output = data.content;
       }
-      const data = readTextFile(ctx.workspaceRoot, allowedDirs, String(input.path ?? ''), config.maxReadBytes ?? 64 * 1024);
-      ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: true, output: data.content, durationMs: Date.now() - start });
+      ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: true, output, durationMs: Date.now() - start });
       trajectory('tool', `${tool} 完成`);
-      return data.content;
+      return output;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: false, output: msg, durationMs: Date.now() - start });
@@ -389,6 +431,13 @@ async function dispatchTool(
     durationMs: 0,
   });
   return `未知工具：${tool}`;
+}
+
+function formatGrepResult(res: GrepResult): string {
+  if (res.matches.length === 0) return '(无匹配)';
+  const lines = res.matches.map((m) => `${m.file}:${m.line}: ${m.text}`);
+  if (res.truncated) lines.push('…（匹配过多已截断）');
+  return lines.join('\n');
 }
 
 function disabledTool(ctx: AgentContext, sessionId: string, caps: AgentCapabilities, tool: string): string {

@@ -241,7 +241,7 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
 - [x] **P3 真实 daemon**：模型适配层（OpenAI 兼容流式 + 思维链分离）、真实 Agent 循环（同一 AgentContext
-      契约 + 原生 function calling）、真实工具沙箱（只读/写入 Diff 审查/高危命令策略+审批）、轨迹持久化（JSONL 轮转）、
+      契约 + 原生 function calling）、真实工具沙箱（只读搜索 read_file/list_dir/grep/glob、写入 Diff 审查、高危命令策略+审批）、轨迹持久化（JSONL 轮转）、
       按 `dsh.apiKey` 自动切换 mock/real
 - [x] **A1 Webview 渲染**：Markdown 渲染（marked + GFM）+ 代码高亮（highlight.js，常用语言）+ DOMPurify
       统一净化（配合 CSP 双层防御 XSS），流式期间纯文本、结束时一次性安全渲染
