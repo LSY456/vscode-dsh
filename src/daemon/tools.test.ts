@@ -64,6 +64,11 @@ describe('只读/写入工具', () => {
     expect(names).toEqual(['a.txt', 'sub/']);
   });
 
+  it('listDirectory：空字符串路径兜底为工作区根', () => {
+    const { names } = listDirectory(root, [], '');
+    expect(names).toEqual(['a.txt', 'sub/']);
+  });
+
   it('readTextFile 读取并支持截断', () => {
     expect(readTextFile(root, [], path.join(root, 'a.txt')).content).toBe('hello\nworld');
     const r = readTextFile(root, [], path.join(root, 'a.txt'), 5);
@@ -149,6 +154,30 @@ describe('grep / glob 只读搜索', () => {
   it('glob：*.dat 能定位二进制文件（glob 不过滤内容）', () => {
     const res = globFiles(base, [], '*.dat');
     expect(res.files.map((f) => path.basename(f))).toEqual(['bin.dat']);
+  });
+
+  it('grep：不跟随符号链接/联结目录逃出搜索根', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-outside-'));
+    fs.writeFileSync(path.join(outside, 'leak.txt'), 'foo leak\n', 'utf8');
+    try {
+      const type = process.platform === 'win32' ? 'junction' : 'dir';
+      fs.symlinkSync(outside, path.join(base, 'esc'), type);
+      const res = grepFiles(base, [], 'foo');
+      expect(res.matches.some((m) => path.basename(m.file) === 'leak.txt')).toBe(false);
+      // 正向：拦截逃逸不应波及搜索根内的正常命中
+      expect(res.matches.some((m) => path.basename(m.file) === 'src.ts')).toBe(true);
+    } finally {
+      try {
+        fs.rmSync(path.join(base, 'esc'), { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+      try {
+        fs.rmSync(outside, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
   });
 
   it('glob：无匹配返回空；空 pattern 抛错', () => {

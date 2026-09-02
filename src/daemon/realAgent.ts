@@ -268,17 +268,17 @@ async function dispatchTool(
     try {
       let output: string;
       if (tool === 'list_dir') {
-        const { names } = listDirectory(ctx.workspaceRoot, allowedDirs, String(input.path ?? ctx.workspaceRoot));
+        const { names } = listDirectory(ctx.workspaceRoot, allowedDirs, String(input.path ?? ''));
         output = names.length ? names.join('\n') : '(空目录)';
       } else if (tool === 'grep') {
         const res = grepFiles(ctx.workspaceRoot, allowedDirs, String(input.pattern ?? ''), {
-          dir: input.path ? String(input.path) : undefined,
+          dir: String(input.path ?? ''),
           include: input.include ? String(input.include) : undefined,
         });
         output = formatGrepResult(res);
       } else if (tool === 'glob') {
         const res = globFiles(ctx.workspaceRoot, allowedDirs, String(input.pattern ?? ''), {
-          dir: input.path ? String(input.path) : undefined,
+          dir: String(input.path ?? ''),
         });
         output = res.files.length
           ? res.files.join('\n') + (res.truncated ? '\n…（结果过多已截断）' : '')

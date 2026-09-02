@@ -11,7 +11,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { assertPathInside, PathError } from './paths';
+import { assertPathInside, isPathInside, PathError } from './paths';
 import { CommandSandbox, ProcessSandbox, SandboxedCommand } from './sandbox';
 
 export { PathError };
@@ -45,8 +45,8 @@ export interface ListResult {
   names: string[];
 }
 
-export function listDirectory(root: string, allowedDirs: string[], dirPath: string): ListResult {
-  const resolved = resolveTarget(root, allowedDirs, dirPath);
+export function listDirectory(root: string, allowedDirs: string[], dirPath?: string): ListResult {
+  const resolved = resolveTarget(root, allowedDirs, dirPath || root);
   const entries = fs.readdirSync(resolved, { withFileTypes: true });
   return {
     names: entries.map((e) => (e.isDirectory() ? e.name + '/' : e.name)).sort(),
@@ -105,8 +105,20 @@ function globToRegex(pattern: string): RegExp {
   return new RegExp('^' + pattern.split('*').map(escape).join('.*') + '$');
 }
 
-/** 递归遍历目录下所有文件（跳过 .git/node_modules 与符号链接），惰性产出绝对路径。 */
-function* walkFiles(dir: string): Generator<string> {
+/**
+ * 递归遍历目录下所有文件，惰性产出绝对路径。
+ * 进入每个目录前做 realpath canonical 校验：Windows junction / 符号链接目录可能被 isDirectory()
+ * 报告为 true，跟随会逃出搜索根 —— 与 paths.ts 同源的 canonical 护栏必须在此一并拦截。
+ */
+function* walkFiles(dir: string, rootCanon: string): Generator<string> {
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    return;
+  }
+  if (!isPathInside(rootCanon, real)) return; // 逃逸：拦截
+
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -116,7 +128,7 @@ function* walkFiles(dir: string): Generator<string> {
   for (const e of entries) {
     if (SKIP_DIRS.has(e.name)) continue;
     const full = path.join(dir, e.name);
-    if (e.isDirectory()) yield* walkFiles(full);
+    if (e.isDirectory()) yield* walkFiles(full, rootCanon);
     else if (e.isFile()) yield full;
   }
 }
@@ -151,13 +163,13 @@ export function grepFiles(
 ): GrepResult {
   const needle = String(pattern ?? '');
   if (!needle) throw new Error('grep 需要非空 pattern');
-  const base = resolveTarget(root, allowedDirs, opts.dir ?? root);
+  const base = resolveTarget(root, allowedDirs, opts.dir || root);
   const includeRx = opts.include ? globToRegex(String(opts.include)) : null;
   const maxResults = opts.maxResults ?? MAX_GREP_RESULTS;
   const matches: GrepMatch[] = [];
   let truncated = false;
 
-  for (const file of walkFiles(base)) {
+  for (const file of walkFiles(base, base)) {
     if (includeRx && !includeRx.test(path.basename(file))) continue;
     const lines = readLines(file);
     if (lines === null) continue;
@@ -183,13 +195,13 @@ export function globFiles(
 ): GlobResult {
   const pat = String(pattern ?? '');
   if (!pat) throw new Error('glob 需要非空 pattern');
-  const base = resolveTarget(root, allowedDirs, opts.dir ?? root);
+  const base = resolveTarget(root, allowedDirs, opts.dir || root);
   const rx = globToRegex(pat);
   const maxResults = opts.maxResults ?? MAX_GLOB_RESULTS;
   const files: string[] = [];
   let truncated = false;
 
-  for (const file of walkFiles(base)) {
+  for (const file of walkFiles(base, base)) {
     if (!rx.test(path.basename(file))) continue;
     if (files.length >= maxResults) {
       truncated = true;
