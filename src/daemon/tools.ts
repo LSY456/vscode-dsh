@@ -11,7 +11,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { assertPathInside, PathError } from './paths';
+import { assertPathInside, isPathInside, PathError } from './paths';
 import { CommandSandbox, ProcessSandbox, SandboxedCommand } from './sandbox';
 
 export { PathError };
@@ -45,8 +45,8 @@ export interface ListResult {
   names: string[];
 }
 
-export function listDirectory(root: string, allowedDirs: string[], dirPath: string): ListResult {
-  const resolved = resolveTarget(root, allowedDirs, dirPath);
+export function listDirectory(root: string, allowedDirs: string[], dirPath?: string): ListResult {
+  const resolved = resolveTarget(root, allowedDirs, dirPath || root);
   const entries = fs.readdirSync(resolved, { withFileTypes: true });
   return {
     names: entries.map((e) => (e.isDirectory() ? e.name + '/' : e.name)).sort(),
@@ -68,6 +68,148 @@ export function readTextFile(
   const raw = fs.readFileSync(resolved, 'utf8');
   const truncated = raw.length > maxBytes;
   return { content: truncated ? raw.slice(0, maxBytes) : raw, truncated };
+}
+
+// ---------------------------------------------------------------------------
+// 只读搜索：grep（跨文件关键字搜索）与 glob（文件名通配匹配）
+// ---------------------------------------------------------------------------
+
+export interface GrepMatch {
+  /** 匹配文件绝对路径 */
+  file: string;
+  /** 1-based 行号 */
+  line: number;
+  /** 匹配行内容（已截断） */
+  text: string;
+}
+
+export interface GrepResult {
+  matches: GrepMatch[];
+  truncated: boolean;
+}
+
+export interface GlobResult {
+  files: string[];
+  truncated: boolean;
+}
+
+const SKIP_DIRS = new Set(['.git', 'node_modules']);
+const MAX_GREP_RESULTS = 200;
+const MAX_GLOB_RESULTS = 200;
+const MAX_GREP_LINE_LEN = 200;
+const MAX_GREP_FILE_BYTES = 1024 * 1024;
+
+/** `*` 通配 → 正则（匹配 basename：`*` 匹配任意字符序列，其余字符转义）。 */
+function globToRegex(pattern: string): RegExp {
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('^' + pattern.split('*').map(escape).join('.*') + '$');
+}
+
+/**
+ * 递归遍历目录下所有文件，惰性产出绝对路径。
+ * 进入每个目录前做 realpath canonical 校验：Windows junction / 符号链接目录可能被 isDirectory()
+ * 报告为 true，跟随会逃出搜索根 —— 与 paths.ts 同源的 canonical 护栏必须在此一并拦截。
+ */
+function* walkFiles(dir: string, rootCanon: string): Generator<string> {
+  let real: string;
+  try {
+    real = fs.realpathSync(dir);
+  } catch {
+    return;
+  }
+  if (!isPathInside(rootCanon, real)) return; // 逃逸：拦截
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (SKIP_DIRS.has(e.name)) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) yield* walkFiles(full, rootCanon);
+    else if (e.isFile()) yield full;
+  }
+}
+
+function isBinary(buf: Buffer): boolean {
+  const n = Math.min(buf.length, 8192);
+  for (let i = 0; i < n; i++) {
+    if (buf[i] === 0) return true;
+  }
+  return false;
+}
+
+/** 读文件并拆行；二进制 / 超大 / 不可读返回 null。 */
+function readLines(file: string): string[] | null {
+  let raw: Buffer;
+  try {
+    if (fs.statSync(file).size > MAX_GREP_FILE_BYTES) return null;
+    raw = fs.readFileSync(file);
+  } catch {
+    return null;
+  }
+  if (isBinary(raw)) return null;
+  return raw.toString('utf8').split('\n');
+}
+
+/** 在指定目录（默认工作区根）递归搜索包含 pattern 的行，返回「文件:行号:内容」。 */
+export function grepFiles(
+  root: string,
+  allowedDirs: string[],
+  pattern: string,
+  opts: { dir?: string; include?: string; maxResults?: number } = {}
+): GrepResult {
+  const needle = String(pattern ?? '');
+  if (!needle) throw new Error('grep 需要非空 pattern');
+  const base = resolveTarget(root, allowedDirs, opts.dir || root);
+  const includeRx = opts.include ? globToRegex(String(opts.include)) : null;
+  const maxResults = opts.maxResults ?? MAX_GREP_RESULTS;
+  const matches: GrepMatch[] = [];
+  let truncated = false;
+
+  for (const file of walkFiles(base, base)) {
+    if (includeRx && !includeRx.test(path.basename(file))) continue;
+    const lines = readLines(file);
+    if (lines === null) continue;
+    for (let i = 0; i < lines.length; i++) {
+      if (!lines[i].includes(needle)) continue;
+      if (matches.length >= maxResults) {
+        truncated = true;
+        break;
+      }
+      matches.push({ file, line: i + 1, text: lines[i].slice(0, MAX_GREP_LINE_LEN) });
+    }
+    if (truncated) break;
+  }
+  return { matches, truncated };
+}
+
+/** 在指定目录（默认工作区根）递归匹配 basename 通配模式的文件，返回绝对路径列表。 */
+export function globFiles(
+  root: string,
+  allowedDirs: string[],
+  pattern: string,
+  opts: { dir?: string; maxResults?: number } = {}
+): GlobResult {
+  const pat = String(pattern ?? '');
+  if (!pat) throw new Error('glob 需要非空 pattern');
+  const base = resolveTarget(root, allowedDirs, opts.dir || root);
+  const rx = globToRegex(pat);
+  const maxResults = opts.maxResults ?? MAX_GLOB_RESULTS;
+  const files: string[] = [];
+  let truncated = false;
+
+  for (const file of walkFiles(base, base)) {
+    if (!rx.test(path.basename(file))) continue;
+    if (files.length >= maxResults) {
+      truncated = true;
+      break;
+    }
+    files.push(file);
+  }
+  return { files, truncated };
 }
 
 export function writeTextFile(root: string, allowedDirs: string[], filePath: string, content: string): void {

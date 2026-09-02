@@ -13,6 +13,8 @@
 - **smokeReal 场景三**：真实连通冒烟新增原生工具探针（给 `chat` 传 `tools`，检查 `result.toolCalls`），
   与场景一（连通，硬断言）/场景二（fenced 探针，软报告）共同覆盖三条链路。
 - **会话历史持久化**：历史外置到工作区 `.dsh/history.json`（跨 daemon 重启 / 换机持久），不再依赖 workspaceState。
+- **grep / glob 只读搜索工具**：新增跨文件关键字搜索（grep）与文件名通配定位（glob），免审批只读、
+  路径护栏 + 匹配上限截断，跳过 node_modules/.git 与二进制/超大文件。
 
 ## [0.3.0] - 2026-08-26
 
