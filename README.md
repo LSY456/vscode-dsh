@@ -95,7 +95,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test               # 单元测试（vitest，153 用例）
+npm test               # 单元测试（vitest，203 用例）
 npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 
 # 4. 配置真实模型（可选）：打开面板 → 设置，填写 API Key（SecretStorage 安全存储）与模型名；
@@ -148,17 +148,22 @@ vscode-dsh/
 │   ├── contextCapture.ts   # 主动上下文捕获（文件/选区/诊断/git，大文件按需读取）
 │   ├── diffProvider.ts     # 虚拟文档 + vscode.diff + 补丁审批
 │   ├── webviewPanel.ts     # Webview 面板宿主与消息桥
+│   ├── sessionHistory.ts   # 会话历史持久化（FileMemento，工作区 .dsh/history.json）
+│   ├── configAccessor.ts   # 配置存取（apiKey SecretStorage 安全化 + 面板数据源）
 │   ├── logger.ts           # OutputChannel 分级日志
 │   └── daemon/
 │       ├── index.ts        # daemon CLI 入口（--agent mock|real|auto --fake-model）
 │       ├── server.ts       # WS/JSON-RPC 服务端（安全握手/能力分级/resume/file.read/agent 切换）
 │       ├── sessionManager.ts # 会话状态机 + 事件缓冲 + 审批/补丁强校验（纯逻辑，可单测）
-│       ├── paths.ts        # 路径护栏
+│       ├── paths.ts        # 路径护栏（canonical，防 symlink/junction 逃逸）
 │       ├── agent.ts        # 模拟 Agent 循环（mock 实现，演示/测试用）
 │       ├── realAgent.ts    # 真实 Agent 循环（模型 + 工具 + 审批门控）
-│       ├── model.ts        # 模型适配层（OpenAI 兼容流式 + FakeChatModel）
-│       ├── tools.ts        # 真实工具沙箱（list/read/write/bash 策略门控）
+│       ├── model.ts        # 模型适配层（OpenAI 兼容流式 + Anthropic Messages + FakeChatModel）
+│       ├── tools.ts        # 真实工具沙箱（只读搜索/写入 Diff 审查/bash 策略门控）
 │       ├── toolcall.ts     # 模型工具调用 fenced 块协议
+│       ├── trust.ts        # 信任记忆（免审批白名单，.dsh/trust.json）
+│       ├── sandbox.ts      # 命令执行沙箱（bubblewrap 命名空间 / 应用层兜底，可插拔后端）
+│       ├── logFile.ts      # daemon 日志落盘（.dsh/logs/daemon.log，轮转 + 0600）
 │       └── trajectoryStore.ts # 轨迹持久化（.dsh/trajectory/*.jsonl）
 ├── media/                  # Webview 静态资源（HTML/CSS/JS）
 ├── scripts/smoke.js        # 端到端冒烟测试（无 VSCode 依赖）
@@ -191,7 +196,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，164 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，203 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
   Webview Markdown 渲染与净化（XSS 安全）。
@@ -236,7 +241,7 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - [x] 协议契约 + 参考 daemon（安全握手/流式/审批/补丁/迹线/取消）
 - [x] Extension Host（进程管理/上下文捕获/Diff 提供器/Webview 桥）
 - [x] Webview UI（推理流/打字机/工具卡/审批卡/补丁卡/迹线面板）
-- [x] **P0 工程质量**：vitest 单元测试（67 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **P0 工程质量**：vitest 单元测试（203 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
 - [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
