@@ -1,11 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
 import { ChatMessage, ChatModel, FakeChatModel, FakeTurn } from './model';
-import { applyTokenBudget, estimateTokens, RealAgentConfig, runRealAgent } from './realAgent';
+import { applyTokenBudget, estimateTokens, generateTitle, RealAgentConfig, runRealAgent, TITLE_SYSTEM_PROMPT } from './realAgent';
 
 let root = '';
 let file = '';
@@ -51,9 +51,16 @@ function makeCtx(caps?: AgentCapabilities): MockCtx {
   return ctx;
 }
 
+function isTitleRequest(messages: ChatMessage[]): boolean {
+  return messages.length === 2 && messages[0].role === 'system' && messages[0].content === TITLE_SYSTEM_PROMPT;
+}
+
 function scripted(turns: FakeTurn[], chunkSize = 4): ChatModel {
   const queue = [...turns];
-  return new FakeChatModel(() => queue.shift() ?? { content: '(无更多脚本回复)' }, chunkSize);
+  return new FakeChatModel((messages) => {
+    if (isTitleRequest(messages)) return { content: '测试标题' };
+    return queue.shift() ?? { content: '(无更多脚本回复)' };
+  }, chunkSize);
 }
 
 async function waitEvent(ctx: MockCtx, method: string, timeoutMs = 4000) {
@@ -260,6 +267,7 @@ describe('realAgent：原生 function calling', () => {
     fs.writeFileSync(target, 'NATIVE-READ\n', 'utf8');
     const seen: ChatMessage[][] = [];
     const model = new FakeChatModel((messages) => {
+      if (isTitleRequest(messages)) return { content: '测试标题' };
       seen.push(messages.map((m) => ({ ...m })));
       if (seen.length === 1) {
         return { reasoning: '原生调用', toolCalls: [{ tool: 'read_file', input: { path: target }, id: 'call_1' }] };
@@ -351,6 +359,7 @@ describe('realAgent：上下文预算裁剪', () => {
     const seen: ChatMessage[][] = [];
     let turn = 0;
     const model = new FakeChatModel((messages) => {
+      if (isTitleRequest(messages)) return { content: '测试标题' };
       seen.push(messages.map((m) => ({ ...m })));
       turn++;
       if (turn <= 2) {
@@ -369,5 +378,66 @@ describe('realAgent：上下文预算裁剪', () => {
     expect(seen[2][1].role).toBe('user');
     // 裁剪轨迹被记录
     expect(ctx.events.some((e) => e.method === EVENTS.Trajectory && e.params.detail.includes('上下文裁剪'))).toBe(true);
+  });
+});
+
+describe('标题生成', () => {
+  it('generateTitle：模型返回标题，去空白保留语义', async () => {
+    const model = new FakeChatModel(() => ({ content: '  解释递归 概念  ' }));
+    const t = await generateTitle(model, '请解释什么是递归');
+    expect(t).toBe('解释递归 概念');
+  });
+
+  it('generateTitle：模型返回超长则截断 40 字', async () => {
+    const model = new FakeChatModel(() => ({ content: 'x'.repeat(100) }));
+    const t = await generateTitle(model, '问');
+    expect(t).toBe('x'.repeat(40));
+  });
+
+  it('generateTitle：空内容兜底 prompt 前 40 字', async () => {
+    const model = new FakeChatModel(() => ({ content: '' }));
+    const t = await generateTitle(model, 'x'.repeat(100));
+    expect(t).toBe('x'.repeat(40));
+  });
+
+  it('generateTitle：模型抛错兜底 prompt 前 40 字', async () => {
+    const model: ChatModel = {
+      chat: async () => {
+        throw new Error('boom');
+      },
+    };
+    const t = await generateTitle(model, 'hello world');
+    expect(t).toBe('hello world');
+  });
+
+  it('generateTitle：超时未返回则 abort 兜底', async () => {
+    vi.useFakeTimers();
+    try {
+      const model: ChatModel = {
+        chat: (_messages, opts) =>
+          new Promise((_resolve, reject) => {
+            opts?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+          }),
+      };
+      const p = generateTitle(model, 'question');
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(p).resolves.toBe('question');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('realAgent：标题生成', () => {
+  it('会话开始时生成标题并写入 SessionStarted', async () => {
+    const ctx = makeCtx();
+    const model = new FakeChatModel((messages) => {
+      if (isTitleRequest(messages)) return { content: '解释递归' };
+      return { content: '最终回答' };
+    });
+    await runRealAgent(ctx, baseParams, { model });
+
+    const started = ctx.events.find((e) => e.method === EVENTS.SessionStarted)!;
+    expect(started.params.title).toBe('解释递归');
   });
 });
