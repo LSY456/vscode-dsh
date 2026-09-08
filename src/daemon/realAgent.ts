@@ -168,7 +168,8 @@ export async function runRealAgent(
       ts: Date.now(),
     });
 
-  ctx.notify(EVENTS.SessionStarted, { sessionId: ctx.sessionId, title: prompt.slice(0, 60) });
+  const title = ctx.isCanceled() ? prompt.slice(0, TITLE_MAX) : await generateTitle(config.model, prompt);
+  ctx.notify(EVENTS.SessionStarted, { sessionId: ctx.sessionId, title });
   trajectory('system', `session 开始（real agent）：${prompt.slice(0, 80)}`);
 
   const messages: ChatMessage[] = buildMessages(prompt, attachments);
@@ -487,6 +488,39 @@ function buildMessages(prompt: string, attachments: SessionSendParams['attachmen
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: parts.join('\n') },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// 标题生成
+// ---------------------------------------------------------------------------
+
+/** 标题最大长度（与 sessionHistory 的截断同值，保持一致）。 */
+const TITLE_MAX = 40;
+
+/** 标题生成用的 system 提示（测试据此识别标题生成请求）。 */
+export const TITLE_SYSTEM_PROMPT =
+  '你是标题生成器。根据用户的请求生成一个不超过 40 字的中文标题，直接输出标题本身，不要解释、标点或引号。';
+
+/** 用模型把用户请求总结成简洁标题（≤40 字）；失败 / 空 / 超时（5s）兜底 prompt 前 40 字。 */
+export async function generateTitle(model: ChatModel, prompt: string): Promise<string> {
+  const fallback = prompt.slice(0, TITLE_MAX);
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 5000);
+  try {
+    const result = await model.chat(
+      [
+        { role: 'system', content: TITLE_SYSTEM_PROMPT },
+        { role: 'user', content: prompt },
+      ],
+      { signal: abort.signal }
+    );
+    const t = (result.content ?? '').replace(/\s+/g, ' ').trim();
+    return t ? t.slice(0, TITLE_MAX) : fallback;
+  } catch {
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------
