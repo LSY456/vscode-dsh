@@ -9,6 +9,7 @@ import {
   grepFiles,
   listDirectory,
   PathError,
+  readFileRange,
   readTextFile,
   resolveTarget,
   tryReadFile,
@@ -86,6 +87,89 @@ describe('只读/写入工具', () => {
   it('越界写入/读取抛 PathError', () => {
     expect(() => writeTextFile(root, [], path.join(root, '..', 'x'), 'y')).toThrow();
     expect(() => readTextFile(root, [], path.join(root, '..', 'x'))).toThrow();
+  });
+});
+
+describe('readFileRange 行号范围读取', () => {
+  let base: string;
+  let bigFile: string;
+  beforeAll(() => {
+    base = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-range-'));
+    bigFile = path.join(base, 'big.txt');
+    const lines: string[] = [];
+    for (let i = 1; i <= 250; i++) lines.push(`line ${i}`);
+    fs.writeFileSync(bigFile, lines.join('\n'), 'utf8');
+    // 含 null 字节的"伪二进制"
+    fs.writeFileSync(path.join(base, 'bin.dat'), Buffer.from([0x66, 0x00, 0x6f]));
+  });
+  afterAll(() => {
+    try {
+      fs.rmSync(base, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it('读取指定行号范围，返回带行号内容与起止行', () => {
+    const r = readFileRange(base, [], bigFile, { startLine: 10, endLine: 12 });
+    expect(r.startLine).toBe(10);
+    expect(r.endLine).toBe(12);
+    expect(r.totalLines).toBe(250);
+    expect(r.content).toBe('10| line 10\n11| line 11\n12| line 12');
+  });
+
+  it('缺省时从首行读前 200 行（单次上限截断）', () => {
+    const r = readFileRange(base, [], bigFile);
+    expect(r.startLine).toBe(1);
+    expect(r.endLine).toBe(200);
+    expect(r.totalLines).toBe(250);
+    expect(r.content.startsWith('1| line 1\n2| line 2')).toBe(true);
+    expect(r.content.endsWith('200| line 200')).toBe(true);
+  });
+
+  it('只给 startLine 时读该行起至多 200 行，越界钳到末行', () => {
+    const r = readFileRange(base, [], bigFile, { startLine: 240 });
+    expect(r.startLine).toBe(240);
+    expect(r.endLine).toBe(250);
+    expect(r.content).toBe(
+      ['240| line 240', '241| line 241', '242| line 242', '243| line 243', '244| line 244',
+        '245| line 245', '246| line 246', '247| line 247', '248| line 248', '249| line 249', '250| line 250'].join('\n')
+    );
+  });
+
+  it('只给 endLine 时读首行起到该行', () => {
+    const r = readFileRange(base, [], bigFile, { endLine: 3 });
+    expect(r.startLine).toBe(1);
+    expect(r.endLine).toBe(3);
+    expect(r.content).toBe('1| line 1\n2| line 2\n3| line 3');
+  });
+
+  it('endLine 超末行钳到末行；endLine 小于 startLine 回退 startLine', () => {
+    const r1 = readFileRange(base, [], bigFile, { startLine: 248, endLine: 999 });
+    expect(r1.endLine).toBe(250);
+    const r2 = readFileRange(base, [], bigFile, { startLine: 5, endLine: 2 });
+    expect(r2.startLine).toBe(5);
+    expect(r2.endLine).toBe(5);
+    expect(r2.content).toBe('5| line 5');
+  });
+
+  it('startLine 非法（0 / NaN）回退到首行；endLine 非法（负 / 小数）钳制', () => {
+    expect(readFileRange(base, [], bigFile, { startLine: 0, endLine: 3 }).startLine).toBe(1);
+    expect(readFileRange(base, [], bigFile, { startLine: Number.NaN, endLine: 3 }).startLine).toBe(1);
+    expect(readFileRange(base, [], bigFile, { startLine: 1, endLine: -5 }).endLine).toBe(1);
+    expect(readFileRange(base, [], bigFile, { startLine: 1, endLine: 3.9 }).endLine).toBe(3);
+  });
+
+  it('maxLines 自定义更小的单次上限', () => {
+    const r = readFileRange(base, [], bigFile, { startLine: 1, endLine: 50, maxLines: 5 });
+    expect(r.startLine).toBe(1);
+    expect(r.endLine).toBe(5);
+    expect(r.content).toBe('1| line 1\n2| line 2\n3| line 3\n4| line 4\n5| line 5');
+  });
+
+  it('越界路径抛 PathError；二进制文件抛错', () => {
+    expect(() => readFileRange(base, [], path.join(base, '..', 'x'), { startLine: 1 })).toThrow(PathError);
+    expect(() => readFileRange(base, [], path.join(base, 'bin.dat'))).toThrow();
   });
 });
 
