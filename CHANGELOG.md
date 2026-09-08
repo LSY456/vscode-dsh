@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **上下文 token 预算**：realAgent 发送前估算 token（CJK 约 1、其余约 4 字符/token），
+  超预算按整轮丢弃最旧工具轮次，保留 system + 初始请求 + 最近轮；`maxContextTokens` 可配（缺省 48K）。
+
 ## [0.4.0] - 2026-09-02
 
 ### 新增
