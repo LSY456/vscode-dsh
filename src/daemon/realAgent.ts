@@ -42,6 +42,8 @@ export interface RealAgentConfig {
   maxToolRounds?: number;
   /** 工具读取单文件上限（字节） */
   maxReadBytes?: number;
+  /** 上下文 token 预算（发送前裁剪历史，防止超出模型上下文窗口） */
+  maxContextTokens?: number;
   /** 命令沙箱（P3.5+）：可选，缺省 executeCommand 内部兜底 ProcessSandbox */
   sandbox?: CommandSandbox;
 }
@@ -170,6 +172,7 @@ export async function runRealAgent(
   trajectory('system', `session 开始（real agent）：${prompt.slice(0, 80)}`);
 
   const messages: ChatMessage[] = buildMessages(prompt, attachments);
+  const maxContextTokens = config.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS;
 
   for (let round = 0; round < maxRounds; round++) {
     if (ctx.isCanceled()) break;
@@ -179,7 +182,11 @@ export async function runRealAgent(
     let nativeToolCalls: ToolCall[] | undefined;
     let streamFailed: Error | null = null;
     try {
-      const result = await config.model.chat(messages, {
+      const trimmed = applyTokenBudget(messages, maxContextTokens);
+      if (trimmed.length < messages.length) {
+        trajectory('system', `上下文裁剪：${messages.length} → ${trimmed.length} 条消息（预算 ${maxContextTokens} token）`);
+      }
+      const result = await config.model.chat(trimmed, {
         signal: abort.signal,
         tools: TOOL_DEFINITIONS,
         onChunk: (c) => {
@@ -480,4 +487,46 @@ function buildMessages(prompt: string, attachments: SessionSendParams['attachmen
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: parts.join('\n') },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// 上下文 token 预算
+// ---------------------------------------------------------------------------
+
+/** 默认上下文预算（token）：为 DeepSeek 64K 窗口留出输出与余量。 */
+const DEFAULT_MAX_CONTEXT_TOKENS = 48 * 1024;
+
+/** CJK 统一表意文字、注音/假名扩展与全角字符范围（约 1 token/字）。 */
+const CJK_RE = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g;
+
+/** 粗略估算 token（CJK 及全角约 1 token，其余约 4 字符/token）；用于预算裁剪，非精确计数。 */
+export function estimateTokens(text: string): number {
+  const cjk = (text.match(CJK_RE) || []).length;
+  return Math.ceil(cjk + (text.length - cjk) / 4);
+}
+
+function estimateMessageTokens(messages: ChatMessage[]): number {
+  let total = 0;
+  for (const m of messages) {
+    total += estimateTokens(m.content);
+    if (m.toolCalls) total += estimateTokens(JSON.stringify(m.toolCalls));
+  }
+  return total;
+}
+
+/**
+ * 上下文预算裁剪：超出 maxTokens 时从最旧的工具轮次（assistant + 紧随的 tool 结果）
+ * 整轮向前丢弃，保留 system + 初始 user + 最近轮次；整轮裁剪不拆散原生 toolCalls/toolCallId 配对。
+ */
+export function applyTokenBudget(messages: ChatMessage[], maxTokens: number): ChatMessage[] {
+  if (estimateMessageTokens(messages) <= maxTokens || messages.length <= 2) return messages;
+  // 不变量：[0]=system，[1]=user(初始)，[2..] 为 assistant→tool* 轮次序列；非此结构不裁剪（防御外部误用）
+  if (messages[0].role !== 'system' || messages[1].role !== 'user') return messages;
+  const copy = messages.slice();
+  while (copy.length > 2 && estimateMessageTokens(copy) > maxTokens) {
+    let end = 3;
+    while (end < copy.length && copy[end].role === 'tool') end++;
+    copy.splice(2, end - 2);
+  }
+  return copy;
 }
