@@ -309,6 +309,12 @@ describe('上下文 token 预算', () => {
     expect(estimateTokens('ab中文')).toBe(3);
   });
 
+  it('estimateTokens：平/片假名与注音按 1 token/字（不被低估）', () => {
+    expect(estimateTokens('こんにちは')).toBe(5);
+    expect(estimateTokens('カタカナ')).toBe(4);
+    expect(estimateTokens('ㄅㄆㄇ')).toBe(3);
+  });
+
   it('applyTokenBudget：不超预算原样返回（同一引用）', () => {
     const msgs: ChatMessage[] = [
       { role: 'system', content: 'S' },
@@ -348,6 +354,16 @@ describe('上下文 token 预算', () => {
     // 不计 toolCalls 时恰为 4 token 不超；计入 JSON 后超预算 → 裁剪到 system+user
     expect(applyTokenBudget(msgs, 4).length).toBe(2);
     expect(applyTokenBudget(msgs, 0).length).toBe(2);
+  });
+
+  it('applyTokenBudget：结构异常（第三位非 assistant）原样返回不裁剪', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'system', content: 'S' },
+      { role: 'user', content: 'U' },
+      { role: 'user', content: 'extra' },
+      { role: 'tool', content: 'T', toolCallId: 'c1' },
+    ];
+    expect(applyTokenBudget(msgs, 2)).toBe(msgs);
   });
 });
 
