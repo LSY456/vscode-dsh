@@ -175,7 +175,8 @@ export async function runRealAgent(
       ts: Date.now(),
     });
 
-  ctx.notify(EVENTS.SessionStarted, { sessionId: ctx.sessionId, title: prompt.slice(0, 60) });
+  const title = ctx.isCanceled() ? prompt.slice(0, TITLE_MAX) : await generateTitle(config.model, prompt);
+  ctx.notify(EVENTS.SessionStarted, { sessionId: ctx.sessionId, title });
   trajectory('system', `session 开始（real agent）：${prompt.slice(0, 80)}`);
 
   const messages: ChatMessage[] = buildMessages(prompt, attachments);
@@ -192,8 +193,11 @@ export async function runRealAgent(
       const trimmed = applyTokenBudget(messages, maxContextTokens);
       if (trimmed.length < messages.length) {
         trajectory('system', `上下文裁剪：${messages.length} → ${trimmed.length} 条消息（预算 ${maxContextTokens} token）`);
+        // 就地收缩：丢弃已裁剪掉的最旧轮次，避免完整历史（含大 tool 输出）随轮次累积占用内存
+        messages.length = 0;
+        messages.push(...trimmed);
       }
-      const result = await config.model.chat(trimmed, {
+      const result = await config.model.chat(messages, {
         signal: abort.signal,
         tools: TOOL_DEFINITIONS,
         onChunk: (c) => {
@@ -511,16 +515,49 @@ function buildMessages(prompt: string, attachments: SessionSendParams['attachmen
 }
 
 // ---------------------------------------------------------------------------
+// 标题生成
+// ---------------------------------------------------------------------------
+
+/** 标题最大长度（与 sessionHistory 的截断同值，保持一致）。 */
+const TITLE_MAX = 40;
+
+/** 标题生成用的 system 提示（测试据此识别标题生成请求）。 */
+export const TITLE_SYSTEM_PROMPT =
+  '你是标题生成器。根据用户的请求生成一个不超过 40 字的中文标题，直接输出标题本身，不要解释、标点或引号。';
+
+/** 用模型把用户请求总结成简洁标题（≤40 字）；失败 / 空 / 超时（5s）兜底 prompt 前 40 字。 */
+export async function generateTitle(model: ChatModel, prompt: string): Promise<string> {
+  const fallback = prompt.slice(0, TITLE_MAX);
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 5000);
+  try {
+    const result = await model.chat(
+      [
+        { role: 'system', content: TITLE_SYSTEM_PROMPT },
+        { role: 'user', content: prompt },
+      ],
+      { signal: abort.signal }
+    );
+    const t = (result.content ?? '').replace(/\s+/g, ' ').trim();
+    return t ? t.slice(0, TITLE_MAX) : fallback;
+  } catch {
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 上下文 token 预算
 // ---------------------------------------------------------------------------
 
 /** 默认上下文预算（token）：为 DeepSeek 64K 窗口留出输出与余量。 */
 const DEFAULT_MAX_CONTEXT_TOKENS = 48 * 1024;
 
-/** CJK 统一表意文字、注音/假名扩展与全角字符范围（约 1 token/字）。 */
-const CJK_RE = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g;
+/** 宽字符（CJK 汉字、平/片假名、注音符号、CJK 标点与全角）范围，约 1 token/字。 */
+const CJK_RE = /[\u3040-\u30ff\u3100-\u312f\u31a0-\u31bf\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]/g;
 
-/** 粗略估算 token（CJK 及全角约 1 token，其余约 4 字符/token）；用于预算裁剪，非精确计数。 */
+/** 粗略估算 token（宽字符约 1 token，其余约 4 字符/token）；用于预算裁剪，非精确计数。 */
 export function estimateTokens(text: string): number {
   const cjk = (text.match(CJK_RE) || []).length;
   return Math.ceil(cjk + (text.length - cjk) / 4);
@@ -541,8 +578,8 @@ function estimateMessageTokens(messages: ChatMessage[]): number {
  */
 export function applyTokenBudget(messages: ChatMessage[], maxTokens: number): ChatMessage[] {
   if (estimateMessageTokens(messages) <= maxTokens || messages.length <= 2) return messages;
-  // 不变量：[0]=system，[1]=user(初始)，[2..] 为 assistant→tool* 轮次序列；非此结构不裁剪（防御外部误用）
-  if (messages[0].role !== 'system' || messages[1].role !== 'user') return messages;
+  // 不变量：[0]=system，[1]=user(初始)，[2]=assistant（首轮，其后为 tool* 轮次序列）；非此结构不裁剪（防御外部误用）
+  if (messages[0].role !== 'system' || messages[1].role !== 'user' || messages[2]?.role !== 'assistant') return messages;
   const copy = messages.slice();
   while (copy.length > 2 && estimateMessageTokens(copy) > maxTokens) {
     let end = 3;
