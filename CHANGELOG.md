@@ -7,8 +7,8 @@
 
 ### 新增
 
-- **read_file 行号范围读取**：`startLine`/`endLine` 精读片段（grep 定位后按行号取，带行号输出），
-  单次 200 行上限 + 路径/二进制护栏，缺省仍读全文。
+- **上下文 token 预算**：realAgent 发送前估算 token（CJK 约 1、其余约 4 字符/token），
+  超预算按整轮丢弃最旧工具轮次，保留 system + 初始请求 + 最近轮；`maxContextTokens` 可配（缺省 48K）。
 
 ## [0.4.0] - 2026-09-02
 

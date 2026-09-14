@@ -5,7 +5,7 @@ import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
 import { ChatMessage, ChatModel, FakeChatModel, FakeTurn } from './model';
-import { RealAgentConfig, runRealAgent } from './realAgent';
+import { applyTokenBudget, estimateTokens, RealAgentConfig, runRealAgent } from './realAgent';
 
 let root = '';
 let file = '';
@@ -290,5 +290,84 @@ describe('realAgent：原生 function calling', () => {
     const te = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
     expect(te.params.ok).toBe(true);
     expect(te.params.output).toContain('FENCED-READ');
+  });
+});
+
+describe('上下文 token 预算', () => {
+  it('estimateTokens：CJK 约 1 token、ASCII 约 4 字符、空串 0', () => {
+    expect(estimateTokens('')).toBe(0);
+    expect(estimateTokens('四个汉字')).toBe(4);
+    expect(estimateTokens('abcdefgh')).toBe(2);
+    expect(estimateTokens('ab中文')).toBe(3);
+  });
+
+  it('applyTokenBudget：不超预算原样返回（同一引用）', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'system', content: 'S' },
+      { role: 'user', content: 'U' },
+      { role: 'assistant', content: 'A' },
+      { role: 'tool', content: 'T', toolCallId: 'c1' },
+    ];
+    expect(applyTokenBudget(msgs, 1000)).toBe(msgs);
+  });
+
+  it('applyTokenBudget：超预算整轮丢弃最旧轮次，保留 system+初始 user+最近轮', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'system', content: 'S' },
+      { role: 'user', content: 'U' },
+      { role: 'assistant', content: 'A'.repeat(100), toolCalls: [{ id: 'c1', tool: 'read_file', input: { path: '/x' } }] },
+      { role: 'tool', content: 'T'.repeat(100), toolCallId: 'c1' },
+      { role: 'assistant', content: 'B'.repeat(50) },
+      { role: 'tool', content: 'U'.repeat(50), toolCallId: 'c2' },
+    ];
+    const r = applyTokenBudget(msgs, 60);
+    expect(r.length).toBe(4);
+    expect(r[0].role).toBe('system');
+    expect(r[1].role).toBe('user');
+    expect(r[2].role).toBe('assistant');
+    expect(r[2].content).toBe('B'.repeat(50));
+    expect(r[3].role).toBe('tool');
+    expect(r[3].toolCallId).toBe('c2');
+  });
+
+  it('applyTokenBudget：计入原生 toolCalls JSON；极紧预算至少保留 system+user', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'system', content: 'S' },
+      { role: 'user', content: 'U' },
+      { role: 'assistant', content: 'x', toolCalls: [{ id: 'c1', tool: 'read_file', input: { path: '/x' } }] },
+      { role: 'tool', content: 'y', toolCallId: 'c1' },
+    ];
+    // 不计 toolCalls 时恰为 4 token 不超；计入 JSON 后超预算 → 裁剪到 system+user
+    expect(applyTokenBudget(msgs, 4).length).toBe(2);
+    expect(applyTokenBudget(msgs, 0).length).toBe(2);
+  });
+});
+
+describe('realAgent：上下文预算裁剪', () => {
+  it('多轮读大文件超预算时，后续 chat 只收到 system+user 且记录裁剪轨迹', async () => {
+    const ctx = makeCtx();
+    const big = path.join(root, 'big.txt');
+    fs.writeFileSync(big, 'x'.repeat(2000), 'utf8');
+    const seen: ChatMessage[][] = [];
+    let turn = 0;
+    const model = new FakeChatModel((messages) => {
+      seen.push(messages.map((m) => ({ ...m })));
+      turn++;
+      if (turn <= 2) {
+        return { toolCalls: [{ tool: 'read_file', input: { path: big }, id: `call_${turn}` }] };
+      }
+      return { content: 'done' };
+    });
+    await runRealAgent(ctx, baseParams, { model, maxContextTokens: 100, maxToolRounds: 4 });
+
+    expect(seen).toHaveLength(3);
+    // 每轮 chat 都被裁剪到 system+user（丢掉了前一轮的 assistant + tool 结果）
+    expect(seen[0].length).toBe(2);
+    expect(seen[1].length).toBe(2);
+    expect(seen[2].length).toBe(2);
+    expect(seen[2][0].role).toBe('system');
+    expect(seen[2][1].role).toBe('user');
+    // 裁剪轨迹被记录
+    expect(ctx.events.some((e) => e.method === EVENTS.Trajectory && e.params.detail.includes('上下文裁剪'))).toBe(true);
   });
 });
