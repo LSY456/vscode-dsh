@@ -21,10 +21,12 @@ import {
   CommandRunner,
   evaluateCommandPolicy,
   executeCommand,
+  FileRangeResult,
   globFiles,
   GrepResult,
   grepFiles,
   listDirectory,
+  readFileRange,
   readTextFile,
   resolveTarget,
   tryReadFile,
@@ -53,8 +55,9 @@ let stepCounter = 0;
 const SYSTEM_PROMPT = [
   '你是 dsh，运行在 VSCode 扩展中的编程智能体。你通过工具与工作区交互，并遵守以下规则：',
   '',
-  '1. 需要读取文件时调用工具 read_file；列出目录调用 list_dir；按文件名定位文件调用 glob（如 `*.ts`）；',
-  '   跨文件搜索关键字/符号调用 grep。以上三类只读工具均无需审批。',
+  '1. 需要读取文件时调用工具 read_file（配合 grep 定位的 文件:行号，用 startLine/endLine 精读片段）；',
+  '   列出目录调用 list_dir；按文件名定位文件调用 glob（如 `*.ts`）；跨文件搜索关键字调用 grep。',
+  '   以上三类只读工具均无需审批。',
   '2. 需要修改/创建文件时，不要直接写盘，而是调用工具 write_file {path, content}（全量覆盖）',
   '   或 apply_patch {path, search, replace}（字符串替换）。修改会先提交给用户做 Diff 审查，',
   '   只有用户接受后才会真正写入。',
@@ -74,10 +77,14 @@ const SYSTEM_PROMPT = [
 const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'read_file',
-    description: '读取工作区内的文本文件',
+    description: '读取工作区内的文本文件（可用 startLine/endLine 精读片段，缺省读全文）',
     parameters: {
       type: 'object',
-      properties: { path: { type: 'string', description: '工作区内的绝对路径' } },
+      properties: {
+        path: { type: 'string', description: '工作区内的绝对路径' },
+        startLine: { type: 'number', description: '起始行（1-based，可选；配合 endLine 精读片段）' },
+        endLine: { type: 'number', description: '结束行（1-based 含，可选）' },
+      },
       required: ['path'],
     },
   },
@@ -290,9 +297,19 @@ async function dispatchTool(
         output = res.files.length
           ? res.files.join('\n') + (res.truncated ? '\n…（结果过多已截断）' : '')
           : '(无匹配文件)';
+      } else if (tool === 'read_file') {
+        const pathArg = String(input.path ?? '');
+        const startLine = typeof input.startLine === 'number' ? input.startLine : undefined;
+        const endLine = typeof input.endLine === 'number' ? input.endLine : undefined;
+        if (startLine !== undefined || endLine !== undefined) {
+          const r = readFileRange(ctx.workspaceRoot, allowedDirs, pathArg, { startLine, endLine });
+          output = formatFileRange(pathArg, r);
+        } else {
+          const data = readTextFile(ctx.workspaceRoot, allowedDirs, pathArg, config.maxReadBytes ?? 64 * 1024);
+          output = data.content;
+        }
       } else {
-        const data = readTextFile(ctx.workspaceRoot, allowedDirs, String(input.path ?? ''), config.maxReadBytes ?? 64 * 1024);
-        output = data.content;
+        output = '(未知只读工具)';
       }
       ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: true, output, durationMs: Date.now() - start });
       trajectory('tool', `${tool} 完成`);
@@ -438,6 +455,10 @@ async function dispatchTool(
     durationMs: 0,
   });
   return `未知工具：${tool}`;
+}
+
+function formatFileRange(filePath: string, r: FileRangeResult): string {
+  return `（${filePath} 共 ${r.totalLines} 行，显示第 ${r.startLine}-${r.endLine} 行）\n${r.content}`;
 }
 
 function formatGrepResult(res: GrepResult): string {
