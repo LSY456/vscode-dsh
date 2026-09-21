@@ -155,6 +155,75 @@ describe('realAgent：写入（补丁审批）', () => {
     expect(fs.readFileSync(p, 'utf8')).toBe('AAA-XXX-CCC');
   });
 
+  it('P0-2 乐观锁：审阅期间文件被外部修改 -> 拒绝应用且不覆盖并发修改', async () => {
+    const ctx = makeCtx();
+    const p = path.join(root, 'conflict.txt');
+    fs.writeFileSync(p, 'ORIGINAL\n', 'utf8');
+    const model = scripted([
+      { toolcall: { tool: 'write_file', input: { path: p, content: 'AGENT-CONTENT\n' } } },
+      { content: 'done' },
+    ]);
+    const run = runRealAgent(ctx, { prompt: 'x', attachments: [{ kind: 'file', path: p }] }, { model });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    // 模拟用户在审阅 Diff 期间从外部改动该文件（编辑器保存 / 另一会话的补丁）
+    fs.writeFileSync(p, 'USER-EDIT-DURING-REVIEW\n', 'utf8');
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    // 关键断言：并发修改未被静默覆盖
+    expect(fs.readFileSync(p, 'utf8')).toBe('USER-EDIT-DURING-REVIEW\n');
+    const pr = ctx.events.find((e) => e.method === EVENTS.FilePatchResult)!;
+    expect(pr.params.accepted).toBe(true);
+    expect(pr.params.applied).toBe(false);
+    expect(pr.params.error).toContain('乐观锁冲突');
+    // 冲突须显式告知用户，不得静默
+    expect(
+      ctx.events.some(
+        (e) => e.method === EVENTS.MessageDelta && String(e.params.delta).includes('乐观锁冲突')
+      )
+    ).toBe(true);
+  });
+
+  it('P0-2 乐观锁：审阅期间文件未被改动 -> 正常应用（无误伤）', async () => {
+    const ctx = makeCtx();
+    const p = path.join(root, 'noconflict.txt');
+    fs.writeFileSync(p, 'ORIGINAL\n', 'utf8');
+    const model = scripted([
+      { toolcall: { tool: 'write_file', input: { path: p, content: 'AGENT-CONTENT\n' } } },
+      { content: 'done' },
+    ]);
+    const run = runRealAgent(ctx, { prompt: 'x', attachments: [{ kind: 'file', path: p }] }, { model });
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    expect(fs.readFileSync(p, 'utf8')).toBe('AGENT-CONTENT\n');
+    const pr = ctx.events.find((e) => e.method === EVENTS.FilePatchResult)!;
+    expect(pr.params.applied).toBe(true);
+    expect(pr.params.error).toBeUndefined();
+  });
+
+  it('P0-2 乐观锁：文件在审阅期间被外部创建 -> 快照 undefined 与磁盘不一致亦判冲突', async () => {
+    const ctx = makeCtx();
+    const p = path.join(root, 'created-late.txt');
+    const model = scripted([
+      { toolcall: { tool: 'write_file', input: { path: p, content: 'AGENT-CONTENT\n' } } },
+      { content: 'done' },
+    ]);
+    const run = runRealAgent(ctx, { prompt: 'x', attachments: [{ kind: 'file', path: p }] }, { model });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    const pending = ctx.events.find((e) => e.method === EVENTS.FilePatchPending)!;
+    expect(pending.params.oldContent).toBeUndefined(); // 审阅时文件尚不存在
+    fs.writeFileSync(p, 'RACED-IN\n', 'utf8'); // 外部抢先创建
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    expect(fs.readFileSync(p, 'utf8')).toBe('RACED-IN\n');
+    expect(ctx.events.find((e) => e.method === EVENTS.FilePatchResult)!.params.applied).toBe(false);
+  });
+
   it('write_file 越界 -> Error(-32012)，不发起补丁', async () => {
     const outside = path.join(root, '..', 'outside.txt');
     const ctx = makeCtx();

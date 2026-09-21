@@ -25,7 +25,7 @@ npm run check        # typecheck + build + 单元测试 + 端到端冒烟
 npm run package      # VSIX 打包验证（产物见 dist/）
 ```
 
-- 单元测试：`npm test`（vitest，253 用例）。
+- 单元测试：`npm test`（vitest，262 用例）。
 - 集成测试：`npm run test:integration`（@vscode/test-electron，本机有 VSCode 时复用，否则下载 stable）。
 - 冒烟测试：`npm run smoke`（无 VSCode 依赖的真实协议闭环，win / linux 均可跑）。
 

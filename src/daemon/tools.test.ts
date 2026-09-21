@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  checkPatchConflict,
   evaluateCommandPolicy,
   executeCommand,
   globFiles,
@@ -86,6 +87,49 @@ describe('只读/写入工具', () => {
   it('越界写入/读取抛 PathError', () => {
     expect(() => writeTextFile(root, [], path.join(root, '..', 'x'), 'y')).toThrow();
     expect(() => readTextFile(root, [], path.join(root, '..', 'x'))).toThrow();
+  });
+});
+
+describe('checkPatchConflict（P0-2 乐观并发校验）', () => {
+  it('磁盘内容与快照一致 -> ok', () => {
+    const p = path.join(root, 'opt-same.txt');
+    fs.writeFileSync(p, 'SNAP\n', 'utf8');
+    expect(checkPatchConflict(root, [], p, 'SNAP\n')).toEqual({ ok: true });
+  });
+
+  it('磁盘内容与快照不一致 -> conflict，并回传当前内容', () => {
+    const p = path.join(root, 'opt-diff.txt');
+    fs.writeFileSync(p, 'CHANGED\n', 'utf8');
+    const r = checkPatchConflict(root, [], p, 'SNAP\n');
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.conflict).toBe(true);
+      expect(r.currentContent).toBe('CHANGED\n');
+    }
+  });
+
+  it('快照 undefined + 文件已存在 -> conflict（外部抢先创建）', () => {
+    const p = path.join(root, 'opt-created.txt');
+    fs.writeFileSync(p, 'RACED\n', 'utf8');
+    const r = checkPatchConflict(root, [], p, undefined);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.currentContent).toBe('RACED\n');
+  });
+
+  it('快照 undefined + 文件仍不存在 -> ok（新建语义，不算冲突）', () => {
+    const p = path.join(root, 'opt-absent.txt');
+    expect(checkPatchConflict(root, [], p, undefined)).toEqual({ ok: true });
+  });
+
+  it('快照有内容但文件被删除 -> conflict（不能盲写覆盖为新建）', () => {
+    const p = path.join(root, 'opt-deleted.txt');
+    const r = checkPatchConflict(root, [], p, 'SNAP\n');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.currentContent).toBeUndefined();
+  });
+
+  it('越界路径抛 PathError（护栏仍然生效）', () => {
+    expect(() => checkPatchConflict(root, [], path.join(root, '..', 'x.txt'), 'a')).toThrow();
   });
 });
 

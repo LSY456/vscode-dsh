@@ -27,6 +27,7 @@ import {
   listDirectory,
   readTextFile,
   resolveTarget,
+  checkPatchConflict,
   tryReadFile,
   writeTextFile,
 } from './tools';
@@ -346,10 +347,20 @@ async function dispatchTool(
       let error: string | undefined;
       if (accepted) {
         try {
-          // P2 编辑后应用：优先写用户编辑后的内容，否则写 agent 计算出的 newContent
-          const finalContent = ctx.getPatchContent?.(patchId) ?? newContent;
-          writeTextFile(ctx.workspaceRoot, allowedDirs, resolved, finalContent);
-          applied = true;
+          // P0-2 乐观并发校验：用户在审阅期间可能从外部改动了该文件（编辑器保存 / 另一会话），
+          // 快照与当前磁盘不一致即拒绝应用，避免静默覆盖并发修改。
+          const conflict = checkPatchConflict(ctx.workspaceRoot, allowedDirs, resolved, oldContent);
+          if (!conflict.ok) {
+            error =
+              `文件已被外部修改，补丁未应用（乐观锁冲突）。` +
+              `请重新读取 ${path.basename(resolved)} 后再次发起修改。`;
+            ctx.notify(EVENTS.MessageDelta, { sessionId, delta: `\n\n[补丁] ${error}\n` });
+          } else {
+            // P2 编辑后应用：优先写用户编辑后的内容，否则写 agent 计算出的 newContent
+            const finalContent = ctx.getPatchContent?.(patchId) ?? newContent;
+            writeTextFile(ctx.workspaceRoot, allowedDirs, resolved, finalContent);
+            applied = true;
+          }
         } catch (e) {
           error = e instanceof Error ? e.message : String(e);
         }
@@ -395,7 +406,7 @@ async function dispatchTool(
       input: { command },
       risk: 'high',
       reason: `高危命令需要人工审批：${command.slice(0, 200)}`,
-      expiresAt: Date.now() + 60_000,
+      // expiresAt 由 daemon 按 approvalTtlMs 统一盖戳（见 server.ts notify）
     };
     // B1 信任记忆：命中白名单 -> 免审批直接执行（不发起 approval.request）
     if (ctx.isTrusted?.(command)) {
