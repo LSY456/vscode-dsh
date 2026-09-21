@@ -228,6 +228,30 @@ export function tryReadFile(root: string, allowedDirs: string[], filePath: strin
   }
 }
 
+/**
+ * 补丁落地前的乐观并发校验（P0-2）。
+ *
+ * Agent 在发出 `file.patch.pending` 时对目标文件拍了快照（`oldContent`），但用户可能在
+ * 看到 Diff、点「应用」之前的这段窗口里从外部改动了该文件（编辑器保存 / 另一个工具 / 另一个
+ * 会话的补丁）。旧实现 accept 后直接 `writeTextFile`，会把那段并发修改**静默覆盖**。
+ *
+ * 这里以「快照 vs 当前磁盘内容」为乐观锁：不一致即判定为冲突，由调用方拒绝应用并显式回报，
+ * 而不是悄悄吞掉用户的改动。文件不存在（undefined）与快照 undefined 视为一致——覆盖语义都
+ * 是"从无到有"的新建，不构成冲突。
+ *
+ * @returns `{ ok: true }` 或 `{ ok: false, conflict: true, currentContent }`
+ */
+export function checkPatchConflict(
+  root: string,
+  allowedDirs: string[],
+  filePath: string,
+  expectedOldContent: string | undefined
+): { ok: true } | { ok: false; conflict: true; currentContent: string | undefined } {
+  const current = tryReadFile(root, allowedDirs, filePath);
+  if (current === expectedOldContent) return { ok: true };
+  return { ok: false, conflict: true, currentContent: current };
+}
+
 // ---------------------------------------------------------------------------
 // 命令策略（默认拒绝）
 // ---------------------------------------------------------------------------

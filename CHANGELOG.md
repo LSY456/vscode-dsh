@@ -33,6 +33,13 @@
 
 ### 修复
 
+- **补丁静默覆盖用户并发修改（乐观锁缺失）**：补丁在发出 `file.patch.pending` 时对目标文件拍了
+  快照，但用户在审阅 Diff 到点「应用」之间若从外部改动了该文件（编辑器保存 / 另一会话的补丁 /
+  外部工具），accept 后会直接写盘把那段并发修改**静默覆盖**。现落地前以「快照 vs 当前磁盘」做
+  乐观并发校验（`checkPatchConflict`）：不一致即拒绝应用，`file.patch.result` 返回
+  `applied:false` + `error`，并在消息流显式告知冲突，请用户重新读取后再发起修改。文件「从无到有」
+  的新建语义不视为冲突。mock 与 real 两条补丁链路均已加固；`tools.test.ts` 补 6 例纯函数用例，
+  `realAgent.test.ts` 补 3 例端到端回归（外部修改 / 无误伤 / 抢先创建）。
 - **多窗口共用 daemon 时能力声明互相污染**：`capabilities`（`allowedTools` / `allowedDirs` /
   `maxConcurrency`）、挂起项 TTL 与模型运行时配置此前定义在 **daemon 服务实例**作用域——而同一
   工作区的多个 VSCode 窗口会复用同一 daemon（auto 探测复用 `.dsh/daemon.json`），后握手的窗口

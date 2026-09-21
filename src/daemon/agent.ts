@@ -23,6 +23,7 @@ import {
   SessionSendParams,
 } from '../../shared/protocol';
 import { assertPathInside } from './paths';
+import { checkPatchConflict } from './tools';
 
 export interface AgentCapabilities {
   allowedTools?: string[];
@@ -128,35 +129,38 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
       const newContent = buildNewContent(oldContent ?? '');
 
       const patchId = `patch_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-      ctx.notify(EVENTS.FilePatchPending, {
+      const patchPayload: EventFilePatchPending = {
         sessionId: ctx.sessionId,
         patchId,
         path: target,
         oldContent,
         newContent,
         description: `模拟 Agent 提议修改 ${path.basename(target)}（TODO -> DONE 并追加签名）`,
-      });
+      };
+      ctx.notify(EVENTS.FilePatchPending, patchPayload);
       trajectory(ctx, 'patch', `file.patch.pending ${target}`);
 
-      const accepted = await ctx.waitForUser('patch', {
-        sessionId: ctx.sessionId,
-        patchId,
-        path: target,
-        oldContent,
-        newContent,
-        description: `模拟 Agent 提议修改 ${path.basename(target)}（TODO -> DONE 并追加签名）`,
-      });
+      const accepted = await ctx.waitForUser('patch', patchPayload);
       trajectory(ctx, 'patch', `file.patch.respond ${accepted ? 'accept' : 'reject'}`);
 
       let applied = false;
       let error: string | undefined;
       if (accepted) {
         try {
-          // P2 编辑后应用：优先写用户编辑后的内容，否则写 agent 原始 newContent
-          const finalContent = ctx.getPatchContent?.(patchId) ?? newContent;
-          fs.mkdirSync(path.dirname(target), { recursive: true });
-          fs.writeFileSync(target, finalContent, 'utf8');
-          applied = true;
+          // P0-2 乐观并发校验：审阅期间文件可能被外部改动，快照不一致即拒绝应用
+          const conflict = checkPatchConflict(ctx.workspaceRoot, [], target, oldContent);
+          if (!conflict.ok) {
+            error =
+              `文件已被外部修改，补丁未应用（乐观锁冲突）。` +
+              `请重新读取 ${path.basename(target)} 后再次发起修改。`;
+            ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: `\n\n[补丁] ${error}\n` });
+          } else {
+            // P2 编辑后应用：优先写用户编辑后的内容，否则写 agent 原始 newContent
+            const finalContent = ctx.getPatchContent?.(patchId) ?? newContent;
+            fs.mkdirSync(path.dirname(target), { recursive: true });
+            fs.writeFileSync(target, finalContent, 'utf8');
+            applied = true;
+          }
         } catch (e) {
           error = e instanceof Error ? e.message : String(e);
         }
@@ -208,7 +212,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
         input: { command: 'rm -rf build/ && npm run build' },
         risk: 'high',
         reason: '高危命令：递归删除目录，可能造成不可恢复的数据丢失。',
-        expiresAt: Date.now() + 60_000,
+        // expiresAt 由 daemon 按 approvalTtlMs 统一盖戳（见 server.ts notify）
       };
       ctx.notify(EVENTS.ApprovalRequest, approvalParams);
       trajectory(ctx, 'approval', 'approval.request bash_execute');
