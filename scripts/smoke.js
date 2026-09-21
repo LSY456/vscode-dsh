@@ -7,6 +7,7 @@
  *  - 安全握手：无 token / 带浏览器 Origin 均被拒绝
  *  - initialize 返回 sessionId 与能力声明（resume/fileRead）
  *  - 能力分级：allowedTools 为空时高危工具直接禁用（不发审批）
+ *  - 连接级能力隔离（P0-4）：同 daemon 两连接各自声明 allowedTools，互不污染
  *  - 补丁流程：file.patch.pending -> 接受 -> file.patch.result -> 磁盘已变更
  *  - 审批流程：approval.request -> 批准 -> tool.executed
  *  - 多会话并发：同一连接两个会话并行（不再 -32009）
@@ -230,6 +231,58 @@ async function main() {
   await connDisabled.rpc.waitFor((m) => m.method === 'session.ended', '禁用流程结束');
   connDisabled.ws.close();
 
+  // ---- 3b. 连接级能力隔离（P0-4 回归）：同一 daemon 上两个连接声明不同 allowedTools，
+  // 必须各按各的语义执行——旧实现里 capabilities 是服务实例级，后 initialize 的连接会
+  // 把先者的白名单整体冲掉，这里正是那处污染的可执行反例。
+  console.log('[smoke] 连接级能力隔离（P0-4）…');
+  const connStrict = await openSession(port, {
+    workspaceRoot: tmpDir,
+    capabilities: { allowedTools: ['read_file'] }, // 白名单：不含 bash_execute
+    client: { name: 'smoke-strict', version: '0.0.0' },
+  });
+  const connLoose = await openSession(port, {
+    workspaceRoot: tmpDir,
+    capabilities: { allowedTools: [] }, // 空数组 = 全部允许
+    client: { name: 'smoke-loose', version: '0.0.0' },
+  });
+
+  // 宽松连接**后**握手，若能力是实例级，此时严格连接的白名单已被置空
+  connStrict.rpc.resetEvents();
+  await connStrict.rpc.request('session.send', {
+    sessionId: connStrict.init.sessionId,
+    prompt: '危险操作：bash rm -rf build（danger）',
+  });
+  const strictTool = await connStrict.rpc.waitFor(
+    (m) => m.method === 'tool.executed' && m.params.tool === 'bash_execute',
+    '严格连接 tool.executed'
+  );
+  assert(strictTool.params.ok === false, 'P0-4：严格连接仍被禁用（未被宽松连接冲掉白名单）');
+  assert(
+    !connStrict.rpc.events.some((m) => m.method === 'approval.request'),
+    'P0-4：严格连接不发起审批'
+  );
+  await connStrict.rpc.waitFor((m) => m.method === 'session.ended', '严格连接流程结束');
+
+  // 同一时刻，宽松连接的同类请求应正常进入审批（证明两者互不影响、各自生效）
+  connLoose.rpc.resetEvents();
+  await connLoose.rpc.request('session.send', {
+    sessionId: connLoose.init.sessionId,
+    prompt: '危险操作：bash rm -rf build（danger）',
+  });
+  const looseApproval = await connLoose.rpc.waitFor(
+    (m) => m.method === 'approval.request',
+    '宽松连接 approval.request'
+  );
+  assert(looseApproval.params.tool === 'bash_execute', 'P0-4：宽松连接按全允许语义发起审批');
+  await connLoose.rpc.request('approval.respond', {
+    sessionId: connLoose.init.sessionId,
+    approvalId: looseApproval.params.approvalId,
+    approved: false,
+  });
+  await connLoose.rpc.waitFor((m) => m.method === 'session.ended', '宽松连接流程结束');
+  connStrict.ws.close();
+  connLoose.ws.close();
+
   // ---- 4. 主连接：默认能力
   console.log('[smoke] 握手…');
   const { rpc, ws, init } = await openSession(port, {
@@ -282,6 +335,9 @@ async function main() {
   const approval = await rpc.waitFor((m) => m.method === 'approval.request', 'approval.request');
   assert(approval.params.tool === 'bash_execute', '审批对象为 bash_execute');
   assert(approval.params.risk === 'high', '风险级别 high');
+  // 挂起项超时由 daemon 统一盖戳（TTL 可经 initialize.capabilities.approvalTtlMs 配置）
+  const ttl = approval.params.expiresAt - Date.now();
+  assert(ttl > 0 && ttl <= 61_000, `approval.request 应带 expiresAt（缺省 60s，实际 ${ttl}ms）`);
 
   await rpc.request('approval.respond', {
     sessionId,
