@@ -38,7 +38,7 @@ import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
 import { ChatModel, createKeywordFakeModel, createModel as createProviderModel } from './model';
 import { assertPathInside } from './paths';
 import { RealAgentConfig, runRealAgent } from './realAgent';
-import { Session, SessionManager } from './sessionManager';
+import { DEFAULT_APPROVAL_TTL_MS, clampApprovalTtlMs, Session, SessionManager } from './sessionManager';
 import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';
 import { readBuildId } from '../../shared/buildId';
@@ -68,6 +68,53 @@ export interface DaemonServerHandle {
 
 const MAX_READ_BYTES = 1024 * 1024; // file.read 单文件上限 1MB
 
+/** 模型运行时配置（CLI 缺省 + initialize 覆盖；P0-4 后为连接级）。 */
+export interface RuntimeConfig {
+  apiKey: string;
+  preset?: string;
+  baseURL: string;
+  model: string;
+  agent: 'mock' | 'real' | 'auto';
+  provider: 'openai' | 'anthropic' | 'auto';
+}
+
+/**
+ * 连接级运行状态（P0-4 下沉）。
+ *
+ * capabilities / approvalTtlMs / 模型配置原先定义在**服务实例**作用域，而 daemon 可被同一
+ * 工作区的多个 VSCode 窗口复用（auto 探测复用 .dsh/daemon.json）——最后一个 initialize 会
+ * 整体覆盖所有人，导致 A 窗口声明的 allowedTools 白名单被 B 窗口的空配置冲掉，安全语义被
+ * 跨窗口静默污染。现改为每个 WebSocket 连接各持一份，互不影响。
+ */
+export interface ConnectionRuntime {
+  capabilities: Required<AgentCapabilities> & { maxConcurrency: number };
+  approvalTtlMs: number;
+  runtime: RuntimeConfig;
+}
+
+/** 解析最终生效的 Agent 实现：显式 real/mock 优先，auto 时以是否有 apiKey 决定。 */
+export function resolveAgentMode(rt: RuntimeConfig): 'mock' | 'real' {
+  if (rt.agent === 'real') return 'real';
+  if (rt.agent === 'mock') return 'mock';
+  return rt.apiKey ? 'real' : 'mock';
+}
+
+/** 连接级运行状态初值：以 CLI 参数为缺省，等待该连接的 initialize 覆盖。 */
+export function createConnectionRuntime(opts: DaemonServerOptions): ConnectionRuntime {
+  return {
+    capabilities: { allowedTools: [], allowedDirs: [], maxConcurrency: 0 },
+    approvalTtlMs: DEFAULT_APPROVAL_TTL_MS,
+    runtime: {
+      apiKey: opts.apiKey ?? '',
+      preset: opts.preset,
+      baseURL: '',
+      model: '',
+      agent: opts.agent ?? 'auto',
+      provider: opts.provider ?? 'auto',
+    },
+  };
+}
+
 export async function startDaemonServer(opts: DaemonServerOptions): Promise<DaemonServerHandle> {
   const sessions = new SessionManager(opts.workspaceRoot);
   const trajectoryStore = new TrajectoryStore(path.join(opts.workspaceRoot, '.dsh', 'trajectory'));
@@ -76,36 +123,15 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
   // P3.5+ 命令沙箱：检测 OS 级后端（Linux bwrap），不可用则应用层兜底；降级原因经 warnings 披露
   const { sandbox, warnings } = detectSandbox(opts.workspaceRoot);
   if (warnings.length > 0) console.warn(`[dsh-daemon] 命令沙箱：${warnings.join('；')}`);
-  let capabilities: Required<AgentCapabilities> & { maxConcurrency: number } = {
-    allowedTools: [],
-    allowedDirs: [],
-    maxConcurrency: 0,
-  };
-  // 模型运行时配置（CLI 缺省 + 最后一次 initialize 覆盖）
-  const runtime = {
-    apiKey: opts.apiKey ?? '',
-    preset: opts.preset,
-    baseURL: '',
-    model: '',
-    agent: opts.agent ?? 'auto',
-    provider: opts.provider ?? 'auto',
-  };
 
-  /** 解析最终生效的 Agent 实现。 */
-  function resolveAgentMode(): 'mock' | 'real' {
-    if (runtime.agent === 'real') return 'real';
-    if (runtime.agent === 'mock') return 'mock';
-    return runtime.apiKey ? 'real' : 'mock';
-  }
-
-  /** 依据运行时配置创建真实模型（auto 切换 + 集成假模型）。 */
-  function createModel(): ChatModel {
+  /** 依据连接级运行时配置创建真实模型（auto 切换 + 集成假模型）。 */
+  function createModel(rt: RuntimeConfig): ChatModel {
     if (opts.fakeModel) return createKeywordFakeModel();
     return createProviderModel({
-      provider: runtime.provider,
-      baseURL: runtime.baseURL || undefined,
-      apiKey: runtime.apiKey,
-      model: runtime.model || undefined,
+      provider: rt.provider,
+      baseURL: rt.baseURL || undefined,
+      apiKey: rt.apiKey,
+      model: rt.model || undefined,
     });
   }
 
@@ -130,7 +156,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     },
   });
 
-  interface Connection {
+  interface Connection extends ConnectionRuntime {
     ws: WebSocket;
     /** 当前默认会话 id（session.send 未指定时使用） */
     currentSessionId: string;
@@ -141,6 +167,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
 
   wss.on('connection', (ws: WebSocket) => {
     const conn: Connection = {
+      ...createConnectionRuntime(opts),
       ws,
       currentSessionId: '',
       notify(method, params) {
@@ -173,12 +200,18 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     conn.currentSessionId = session.id;
   }
 
-  /** 校验目标路径位于工作区（canonical：解析符号链接/联结）且位于 allowedDirs 内。 */
-  function resolvePath(target: string): { resolved: string } | { error: string } {
+  /**
+   * 校验目标路径位于工作区（canonical：解析符号链接/联结）且位于**该连接**声明的 allowedDirs 内。
+   * capabilities 为连接级（P0-4），因此必须由调用方传入，不可读实例状态。
+   */
+  function resolvePath(
+    caps: Required<AgentCapabilities> & { maxConcurrency: number },
+    target: string
+  ): { resolved: string } | { error: string } {
     try {
       const resolved = assertPathInside(opts.workspaceRoot, target);
-      if (capabilities.allowedDirs.length > 0) {
-        const ok = capabilities.allowedDirs.some((d) => {
+      if (caps.allowedDirs.length > 0) {
+        const ok = caps.allowedDirs.some((d) => {
           try {
             assertPathInside(d, resolved);
             return true;
@@ -187,7 +220,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           }
         });
         if (!ok) {
-          return { error: `路径越界：${target} 不在 allowedDirs ${capabilities.allowedDirs.join(', ')} 内` };
+          return { error: `路径越界：${target} 不在 allowedDirs ${caps.allowedDirs.join(', ')} 内` };
         }
       }
       return { resolved };
@@ -216,20 +249,25 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             sendError(conn.ws, req.id, ERROR_CODES.InvalidParams, 'initialize 需要 workspaceRoot');
             return;
           }
-          // 能力分级：最后一次 initialize 生效（参考实现为实例级）
-          capabilities = {
+          // 能力分级：**本连接**声明、本连接执行（P0-4：不再污染其他窗口/连接）
+          conn.capabilities = {
             allowedTools: p.capabilities?.allowedTools ?? [],
             allowedDirs: p.capabilities?.allowedDirs ?? [],
             maxConcurrency: p.capabilities?.maxConcurrency ?? 0,
           };
+          // 挂起项超时（审批 / 补丁）：越界或非法值收敛到 [10s, 60min]
+          if (p.capabilities?.approvalTtlMs !== undefined) {
+            conn.approvalTtlMs = clampApprovalTtlMs(p.capabilities.approvalTtlMs);
+          }
           // 模型配置合并（CLI 缺省 < initialize 顶层 apiKey/preset < initialize.model）
-          if (p.apiKey) runtime.apiKey = p.apiKey;
-          if (p.preset) runtime.preset = p.preset;
-          if (p.model?.apiKey) runtime.apiKey = p.model.apiKey;
-          if (p.model?.baseURL) runtime.baseURL = p.model.baseURL;
-          if (p.model?.model) runtime.model = p.model.model;
-          if (p.model?.agent) runtime.agent = p.model.agent;
-          if (p.model?.provider) runtime.provider = p.model.provider;
+          const rt = conn.runtime;
+          if (p.apiKey) rt.apiKey = p.apiKey;
+          if (p.preset) rt.preset = p.preset;
+          if (p.model?.apiKey) rt.apiKey = p.model.apiKey;
+          if (p.model?.baseURL) rt.baseURL = p.model.baseURL;
+          if (p.model?.model) rt.model = p.model.model;
+          if (p.model?.agent) rt.agent = p.model.agent;
+          if (p.model?.provider) rt.provider = p.model.provider;
           const session = sessions.create();
           attach(conn, session);
           const result: InitializeResult = {
@@ -246,7 +284,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               fileRead: true,
             },
             sessionId: session.id,
-            agent: resolveAgentMode(),
+            agent: resolveAgentMode(rt),
           };
           sendResult(conn.ws, req.id, result);
           return;
@@ -272,13 +310,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             sendError(conn.ws, req.id, ERROR_CODES.Busy, `session ${session.id} 正在运行中，请先取消或等待完成`);
             return;
           }
-          if (capabilities.maxConcurrency > 0 && sessions.runningCount() >= capabilities.maxConcurrency) {
-            sendError(
-              conn.ws,
-              req.id,
-              ERROR_CODES.Busy,
-              `并发会话数已达上限 ${capabilities.maxConcurrency}`
-            );
+          const maxConcurrency = conn.capabilities.maxConcurrency;
+          if (maxConcurrency > 0 && sessions.runningCount() >= maxConcurrency) {
+            sendError(conn.ws, req.id, ERROR_CODES.Busy, `并发会话数已达上限 ${maxConcurrency}`);
             return;
           }
           session.begin();
@@ -288,8 +322,16 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           const ctx: AgentContext = {
             sessionId: session.id,
             workspaceRoot: opts.workspaceRoot,
-            capabilities,
+            capabilities: conn.capabilities,
             notify: (method, params) => {
+              // 挂起类事件由 daemon 统一盖章过期时间：TTL 只有一个来源（initialize 声明 / 缺省 60s），
+              // 避免 Agent 各自硬编码，同时让 UI 能显示真实倒计时。
+              if (method === EVENTS.ApprovalRequest || method === EVENTS.FilePatchPending) {
+                const p = params as { expiresAt?: number };
+                if (p && typeof p === 'object' && p.expiresAt === undefined) {
+                  p.expiresAt = Date.now() + conn.approvalTtlMs;
+                }
+              }
               session.emit(method, params);
               // 轨迹持久化（P3.4）：仅 trajectory.record 事件落盘
               if (method === EVENTS.Trajectory) {
@@ -298,15 +340,15 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             },
             waitForUser: (kind, snapshot) => {
               if (kind === 'approval') {
-                return session.registerApproval(snapshot as EventApprovalRequest);
+                return session.registerApproval(snapshot as EventApprovalRequest, conn.approvalTtlMs);
               }
-              return session.registerPatch(snapshot as EventFilePatchPending);
+              return session.registerPatch(snapshot as EventFilePatchPending, conn.approvalTtlMs);
             },
             isCanceled: () => session.isCanceled(),
             isTrusted: (command) => trustStore.matches(command),
             getPatchContent: (patchId) => session.getPatchContent(patchId),
             readFile: async (target, maxBytes) => {
-              const r = resolvePath(target);
+              const r = resolvePath(conn.capabilities, target);
               if ('error' in r) return undefined;
               try {
                 const content = fs.readFileSync(r.resolved, 'utf8');
@@ -318,9 +360,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             },
           };
           // P3.6：auto 切换 —— 有 apiKey（或显式 real）走真实模型，否则回退内置模拟
-          const agentMode = resolveAgentMode();
+          const agentMode = resolveAgentMode(conn.runtime);
           if (agentMode === 'real') {
-            const model = createModel();
+            const model = createModel(conn.runtime);
             const agentConfig: RealAgentConfig = { model, sandbox };
             void runRealAgent(ctx, p, agentConfig).finally(() => {
               session.end();
@@ -427,7 +469,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
         }
         case METHODS.FileRead: {
           const p = req.params as { path: string; maxBytes?: number };
-          const r = resolvePath(p?.path ?? '');
+          const r = resolvePath(conn.capabilities, p?.path ?? '');
           if ('error' in r) {
             sendError(conn.ws, req.id, ERROR_CODES.PathOutsideWorkspace, r.error);
             return;
