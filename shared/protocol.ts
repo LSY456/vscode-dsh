@@ -161,6 +161,15 @@ export interface InitializeResult {
   sessionId?: string;
   /** 本次生效的 Agent 实现（real = 真实模型 / mock = 内置模拟） */
   agent?: 'mock' | 'real';
+  /**
+   * `agent` 为 mock 时的成因，供 UI **显式提示**（可选，向后兼容）。
+   *
+   * 背景：旧行为在未配置模型 Key 时静默回退 mock 关键字循环，用户以为在跑真模型。
+   * 现在 daemon 把成因一并回报，UI 据此渲染"演示模式"横幅并给出配置入口。
+   *  - `no-api-key`：auto 模式且未提供 apiKey（最常见）
+   *  - `forced-mock`：显式指定 `agent=mock`（测试 / 离线演示）
+   */
+  agentReason?: 'no-api-key' | 'forced-mock';
 }
 
 // ---------------------------------------------------------------------------

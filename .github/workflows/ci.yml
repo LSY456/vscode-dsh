@@ -41,6 +41,11 @@ jobs:
           node-version: 20
           cache: npm
 
+      # 供「协议第二实现」冒烟使用（examples/python-daemon，仅标准库，无 pip 依赖）
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install dependencies
         run: npm ci
 
@@ -55,6 +60,11 @@ jobs:
 
       - name: End-to-end smoke test
         run: npm run smoke
+
+      # 协议「第二实现」冒烟：用 examples/python-daemon 的 Python daemon 驱动同一份协议，
+      # 证明"后端可换"不是文档承诺而是可验证事实（--require：缺 Python 判失败，不许静默跳过）
+      - name: Protocol second-implementation smoke（Python daemon）
+        run: npm run smoke:protocol -- --require
 
   integration:
     name: integration test（vscode extension host）

@@ -96,11 +96,27 @@ export interface ConnectionRuntime {
   runtime: RuntimeConfig;
 }
 
+/**
+ * Agent 实现决策：模式 + （mock 时）成因。
+ *
+ * 成因必须显式回报给前端，否则"没配 Key → 静默降级成 mock"用户无法察觉
+ * （他会以为关键字模拟循环的回复是真模型的回答）。见 `InitializeResult.agentReason`。
+ */
+export interface AgentDecision {
+  mode: 'mock' | 'real';
+  reason?: 'no-api-key' | 'forced-mock';
+}
+
 /** 解析最终生效的 Agent 实现：显式 real/mock 优先，auto 时以是否有 apiKey 决定。 */
+export function resolveAgentDecision(rt: RuntimeConfig): AgentDecision {
+  if (rt.agent === 'real') return { mode: 'real' };
+  if (rt.agent === 'mock') return { mode: 'mock', reason: 'forced-mock' };
+  return rt.apiKey ? { mode: 'real' } : { mode: 'mock', reason: 'no-api-key' };
+}
+
+/** 只需要模式时的便捷入口（与 resolveAgentDecision 同源，不会漂移）。 */
 export function resolveAgentMode(rt: RuntimeConfig): 'mock' | 'real' {
-  if (rt.agent === 'real') return 'real';
-  if (rt.agent === 'mock') return 'mock';
-  return rt.apiKey ? 'real' : 'mock';
+  return resolveAgentDecision(rt).mode;
 }
 
 /** 连接级运行状态初值：以 CLI 参数为缺省，等待该连接的 initialize 覆盖。 */
@@ -305,6 +321,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           if (p.model?.idleTimeoutMs !== undefined) rt.idleTimeoutMs = p.model.idleTimeoutMs;
           const session = sessions.create();
           attach(conn, session);
+          // 显式回报「为什么是 mock」，让前端能提示"演示模式"而不是静默降级
+          const decision = resolveAgentDecision(rt);
           const result: InitializeResult = {
             daemonVersion: VSD_DSH_VERSION,
             buildId: readBuildId(),
@@ -319,7 +337,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               fileRead: true,
             },
             sessionId: session.id,
-            agent: resolveAgentMode(rt),
+            agent: decision.mode,
+            agentReason: decision.reason,
           };
           sendResult(conn.ws, req.id, result);
           return;

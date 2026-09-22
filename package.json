@@ -258,6 +258,7 @@
     "test": "vitest run --pool=threads",
     "test:watch": "vitest",
     "smoke": "node esbuild.js && node scripts/smoke.js",
+    "smoke:protocol": "node scripts/smokeProtocol.js",
     "smoke:real": "node esbuild.js && node scripts/smokeReal.js",
     "test:integration": "node scripts/runIntegrationTests.js",
     "check": "npm run typecheck && npm run build && npm test && npm run smoke",

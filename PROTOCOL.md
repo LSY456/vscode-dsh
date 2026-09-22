@@ -39,7 +39,7 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 
 | method | params | result |
 | --- | --- | --- |
-| `initialize` | `{ workspaceRoot, apiKey?, preset?, model?, capabilities?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities, sessionId?, agent }` |
+| `initialize` | `{ workspaceRoot, apiKey?, preset?, model?, capabilities?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities, sessionId?, agent, agentReason? }` |
 | `session.create` | `{ id?, title? }` | `{ sessionId, title? }` |
 | `session.send` | `{ sessionId?, prompt, attachments? }` | `{ sessionId, accepted }` |
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
@@ -77,6 +77,14 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
   立即中断在途请求，与空闲超时相互独立。
 
 `initialize` 返回的 `agent` 字段标明本次实际生效的实现（`mock` | `real`）；扩展可据此在 UI 提示当前是否为真实模型。
+
+**`agentReason`（可选，`agent=mock` 时的成因）** —— 用于消除"静默降级"：
+
+- `no-api-key`：`auto` 模式但未提供 apiKey（最常见）
+- `forced-mock`：显式指定 `agent=mock`（测试 / 离线演示）
+
+为什么需要它：缺 Key 时若只是安静地回退到 mock 关键字循环，用户会把模拟回复当成真实模型的回答。
+把成因显式回报给前端，UI 才能给出"演示模式"提示与配置入口。老客户端忽略该字段即可（向后兼容）。
 
 ### `capabilities`（能力分级）
 
@@ -196,6 +204,28 @@ VSCode 侧将轨迹渲染为可折叠的"执行迹线"面板，并可据此实�
 ## 8. 扩展建议
 
 - 客户端通知（无 `id` 的请求）为协议预留位，可用于上报编辑器事件（如文件切换）以实现被动上下文注入。
-- 参考 daemon 已内置两种实现：`mock`（关键字驱动，演示/测试）与 `real`（通过 `OpenAICompatibleModel`
-  调用真实模型 + 真实只读/写入/命令工具）。Cordis 动态插件版 daemon 只须复用同一 AgentContext 契约
-  与事件时序即可无缝替换。
+- 参考 daemon 已内置两种 Agent 实现：`mock`（关键字驱动，演示/测试）与 `real`（通过 `OpenAICompatibleModel`
+  调用真实模型 + 真实只读/写入/命令工具）。
+
+## 9. 第二实现：可插拔不是承诺，是可验证事实
+
+"前端可换（VSCode / JetBrains / CLI）、后端可换"如果只有本仓库的 Node daemon 一个实现，
+就无从判断协议里有没有夹带实现细节。因此仓库里提供了一个**换语言的独立实现**：
+
+```
+examples/python-daemon/dsh_daemon.py     # Python 3 + 仅标准库（无 pip 依赖）
+```
+
+它刻意最小化：只实现 `initialize` / `session.create` / `session.send` / `session.cancel` /
+`ping` / `shutdown`，外加一个 `read_file` 工具（走通用的 `tool.started` / `tool.executed` 时序），
+**不实现**真实模型、补丁审查、审批挂起、断线续跑、轨迹持久化——这些都不影响"协议可插拔"的证明。
+连 WebSocket 服务端都是手写的 RFC 6455 子集（文本帧 + 掩码 + ping/pong/close），
+所以它对 Node 生态零依赖。
+
+```
+npm run smoke:protocol           # 拉起该 daemon 并按协议走完一轮；缺 Python 3 时优雅跳过
+npm run smoke:protocol -- --require   # 缺 Python 3 判失败（CI 用，禁止静默跳过）
+```
+
+该脚本同时是本协议的一份**可执行规格**：端口上报约定、握手鉴权（错 token / 带 `Origin` 均拒绝）、
+事件时序、路径护栏、错误码，全部有断言。任何新实现照着它跑通即为兼容。

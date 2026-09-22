@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createConnectionRuntime, resolveAgentMode, RuntimeConfig } from './server';
+import { createConnectionRuntime, resolveAgentDecision, resolveAgentMode, RuntimeConfig } from './server';
 import { DEFAULT_APPROVAL_TTL_MS } from './sessionManager';
 
 /**
@@ -106,5 +106,51 @@ describe('resolveAgentMode（auto 切换）', () => {
   it('auto + 无 apiKey -> mock', () => {
     expect(resolveAgentMode(mk({ agent: 'auto' }))).toBe('mock');
     expect(resolveAgentMode(mk({ agent: 'auto', apiKey: '' }))).toBe('mock');
+  });
+});
+
+/**
+ * 「静默降级成 mock」防护：模式之外还必须给出**成因**，UI 才能提示"演示模式"。
+ * 没有成因时，用户看到的关键字模拟回复会被误当成真实模型输出。
+ */
+describe('resolveAgentDecision（模式 + 成因）', () => {
+  const mk = (over: Partial<RuntimeConfig>): RuntimeConfig => ({
+    apiKey: '',
+    baseURL: '',
+    model: '',
+    agent: 'auto',
+    provider: 'auto',
+    ...over,
+  });
+
+  it('auto + 无 apiKey -> mock，并给出 no-api-key 成因', () => {
+    expect(resolveAgentDecision(mk({ agent: 'auto' }))).toEqual({
+      mode: 'mock',
+      reason: 'no-api-key',
+    });
+  });
+
+  it('显式 mock -> mock，并给出 forced-mock 成因（与"忘了配 Key"区分）', () => {
+    expect(resolveAgentDecision(mk({ agent: 'mock', apiKey: 'sk-x' }))).toEqual({
+      mode: 'mock',
+      reason: 'forced-mock',
+    });
+  });
+
+  it('走真实模型时不带成因（没有需要解释的降级）', () => {
+    expect(resolveAgentDecision(mk({ agent: 'auto', apiKey: 'sk-x' }))).toEqual({ mode: 'real' });
+    expect(resolveAgentDecision(mk({ agent: 'real' }))).toEqual({ mode: 'real' });
+  });
+
+  it('与 resolveAgentMode 同源：任何输入下模式的结论都一致', () => {
+    const cases: Partial<RuntimeConfig>[] = [
+      { agent: 'auto' },
+      { agent: 'auto', apiKey: 'sk-x' },
+      { agent: 'mock', apiKey: 'sk-x' },
+      { agent: 'real' },
+    ];
+    for (const c of cases) {
+      expect(resolveAgentMode(mk(c))).toBe(resolveAgentDecision(mk(c)).mode);
+    }
   });
 });
