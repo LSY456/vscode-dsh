@@ -38,6 +38,8 @@ export interface DaemonManagerOptions {
 /** 握手后 daemon 回报的运行信息（UI 用：当前是 mock 还是真实模型）。 */
 export interface AgentInfo {
   agent?: 'mock' | 'real';
+  /** agent=mock 的成因（UI 据此提示「演示模式」并给出配置入口） */
+  agentReason?: 'no-api-key' | 'forced-mock';
   model?: string;
   daemonVersion?: string;
 }
@@ -50,6 +52,7 @@ export class DaemonManager {
   private detail = '未启动';
   private statusListeners: ((info: StatusInfo) => void)[] = [];
   private resumeListeners: ((sessionId: string) => void)[] = [];
+  private agentInfoListeners: ((info: AgentInfo) => void)[] = [];
 
   private child: cp.ChildProcess | null = null;
   private token = '';
@@ -85,6 +88,16 @@ export class DaemonManager {
    */
   onBeforeResume(listener: (sessionId: string) => void): void {
     this.resumeListeners.push(listener);
+  }
+
+  /**
+   * 订阅「Agent 实现信息变化」（每次握手成功后）。
+   *
+   * 目的：用户配好 Key → 重启 daemon → 面板必须能**撤下**"演示模式"横幅。
+   * 只在 surface 就绪时推一次 init 是不够的（那时可能还没握手完成）。
+   */
+  onAgentInfo(listener: (info: AgentInfo) => void): void {
+    this.agentInfoListeners.push(listener);
   }
 
   getStatus(): StatusInfo {
@@ -221,9 +234,17 @@ export class DaemonManager {
       // UI 提示用：本次生效的 Agent 实现与模型名（mock / real）
       this.agentInfo = {
         agent: result.agent,
+        agentReason: result.agentReason,
         model: cfg.get<string>('model.model', '') || undefined,
         daemonVersion: result.daemonVersion,
       };
+      for (const l of this.agentInfoListeners) {
+        try {
+          l(this.agentInfo);
+        } catch (err) {
+          logger.warn(`agentInfo 监听器抛错: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
 
       // 陈旧 daemon 防护：升级装新版扩展后，工作区里可能还有旧构建的 daemon 进程存活，
       // auto 探测会直接复用（真实事故：修复后的逻辑因复用旧进程而不生效）。

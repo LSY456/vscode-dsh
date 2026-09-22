@@ -53,10 +53,15 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   const pendingBar = $('pending-bar');
   const pendingLabel = $('pending-label');
   const pendingActions = $('pending-actions');
+  const demoBanner = $('demo-banner');
+  const demoBannerText = $('demo-banner-text');
+  const btnDemoConfig = $('btn-demo-config');
 
   let running = false;
   let pinned = true;
   let trajCount = 0;
+  /** 当前生效的 Agent 实现（''=未知）：驱动演示模式横幅与 mock 专属建议项 */
+  let currentAgent = '';
 
   // 当前回合的可变容器（新回合重置）
   let answerEl = null;
@@ -144,19 +149,50 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     statusEl.title = detail || '';
   }
 
+  const AGENT_LABEL = { mock: '演示模式', real: '真实模型' };
+  const AGENT_TITLE = {
+    mock: '未接入真实模型：回复由内置模拟 Agent 生成（关键词语义，非模型输出）',
+    real: '当前使用真实模型 Agent',
+  };
+  /** 演示模式横幅文案：按 daemon 回报的成因区分措辞，缺失时给通用兜底 */
+  const DEMO_REASON_TEXT = {
+    'no-api-key': '未配置模型 Key，回复由内置模拟 Agent 生成，不是真实模型的输出。',
+    'forced-mock': 'daemon 被显式指定为 mock（agent=mock），回复不是真实模型的输出。',
+  };
+  const DEMO_FALLBACK_TEXT = '当前由内置模拟 Agent 生成回复，不是真实模型的输出。';
+
+  /**
+   * 同步 Agent 实现信息（init 快照 / 每次握手后的 agent.info）。
+   *
+   * 这是"消除静默降级成 mock"的落点：没配 Key 时要**显式告诉用户**现在不是真模型，
+   * 而不是让关键字模拟循环的回复冒充模型回答。
+   */
   function setAgentInfo(state) {
     const agent = state && state.agent;
     const model = state && state.model;
+    currentAgent = agent || '';
+    const isMock = agent === 'mock';
+
+    // mock 专属入口（关键字"咒语"演示）不混在真实模型的主路径里
+    for (const node of document.querySelectorAll('[data-demo-only]')) {
+      node.hidden = !isMock;
+    }
+
     if (!agent && !model) {
       agentModeEl.hidden = true;
+      demoBanner.hidden = true;
       return;
     }
     agentModeEl.hidden = false;
-    agentModeEl.textContent = [agent, model].filter(Boolean).join(' · ');
-    agentModeEl.title =
-      agent === 'mock'
-        ? '当前使用 mock Agent（未配置 API Key，仅演示协议流程）'
-        : '当前使用真实模型 Agent';
+    agentModeEl.className = 'meta-chip' + (isMock ? ' warn' : '');
+    agentModeEl.textContent = [AGENT_LABEL[agent] || agent, model].filter(Boolean).join(' · ');
+    agentModeEl.title = AGENT_TITLE[agent] || '';
+
+    demoBanner.hidden = !isMock;
+    if (isMock) {
+      const reason = (state && state.agentReason) || '';
+      demoBannerText.textContent = DEMO_REASON_TEXT[reason] || DEMO_FALLBACK_TEXT;
+    }
   }
 
   function setSession(id) {
@@ -999,6 +1035,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
       case 'history.loaded':
         renderHistoryMessages(params);
         break;
+      case 'agent.info':
+        // 扩展本地事件（非 daemon 协议）：每次握手后同步当前 Agent 实现
+        setAgentInfo(params);
+        break;
       case 'notice':
         addSystem(params.text);
         break;
@@ -1085,6 +1125,8 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     else closeSheets();
   });
   btnSettingsClose.addEventListener('click', closeSheets);
+  // 演示模式横幅 → 一键进入模型配置（配好 Key 并重启 daemon 后横幅自动撤下）
+  btnDemoConfig.addEventListener('click', () => openSheet('settings'));
   for (const backdrop of document.querySelectorAll('.sheet-backdrop')) {
     backdrop.addEventListener('click', () => {
       const sheet = backdrop.parentElement;
@@ -1142,7 +1184,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   // 空态建议：点击填入输入框（不直接发送，避免误触）
   for (const item of document.querySelectorAll('.suggest-item')) {
     item.addEventListener('click', () => {
-      inputEl.value = item.dataset.prompt || '';
+      // 演示模式下用关键字「咒语」版本（mock 靠它触发特定分支）；
+      // 真实模型下用干净的自然语言，避免把内部演示语法教给用户
+      const demo = currentAgent === 'mock' ? item.dataset.promptDemo : '';
+      inputEl.value = demo || item.dataset.prompt || '';
       autosizeInput();
       inputEl.focus();
     });

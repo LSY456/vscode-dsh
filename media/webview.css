@@ -39,6 +39,16 @@
   box-sizing: border-box;
 }
 
+/* 全局兜底：带 hidden 属性的元素一律不渲染。
+ *
+ * 为什么必须 !important：本文件里 `.sheet`（覆盖式面板）与 `.pending-bar` 等自带了
+ * `display: flex`，而**作者样式里的 display 会覆盖 UA 样式表的 `[hidden]{display:none}`**
+ * （同特异性下作者来源优先）——结果就是 hidden 失效，设置/历史面板与待办条会永久浮在
+ * 界面上。这里把 hidden 的语义恢复成"硬性不渲染"，新增元素不必再各自写 [hidden] 变体。 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -127,6 +137,46 @@ body {
 }
 .mono {
   font-family: var(--dsh-mono);
+}
+
+/* ---------- 演示模式横幅（未配置模型 Key 时的显式提示） ----------
+ * 设计意图：旧行为在没配 Key 时静默走 mock 关键字循环，用户会误以为在跟真模型对话。
+ * 该横幅常驻在元信息条下方，直到真正接入真实模型才消失，并提供一键配置入口。 */
+.demo-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--dsh-warn);
+  border-radius: var(--dsh-radius);
+  background: var(--vscode-inputValidation-warningBackground, rgba(204, 167, 0, 0.14));
+  font-size: 11px;
+  line-height: 1.45;
+}
+.demo-tag {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--dsh-warn);
+  color: var(--vscode-editor-background, #1f1f1f);
+  font-size: 10px;
+  font-weight: 600;
+}
+.demo-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+button.btn-sm {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+/* 演示模式下的模式 chip 用警示色，避免"看了一眼没注意" */
+.meta-chip.warn {
+  border-color: var(--dsh-warn);
+  color: var(--dsh-warn);
 }
 
 /* ---------- 会话流 ---------- */

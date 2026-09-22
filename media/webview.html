@@ -27,6 +27,13 @@
     <span id="session-id" class="meta-chip mono" hidden></span>
   </div>
 
+  <div id="demo-banner" class="demo-banner" role="alert" hidden>
+    <span class="demo-tag">演示模式</span>
+    <span id="demo-banner-text" class="demo-text"></span>
+    <span class="grow"></span>
+    <button id="btn-demo-config" class="btn-sm" type="button">配置模型</button>
+  </div>
+
   <main id="main">
     <div id="empty" class="empty">
       <div class="empty-title">dsh Agent</div>
@@ -38,11 +45,24 @@
         <button type="button" class="suggest-item" data-prompt="解释当前文件的关键逻辑，并指出潜在问题">
           <b>解释</b> 当前文件的关键逻辑
         </button>
-        <button type="button" class="suggest-item" data-prompt="请修改当前文件中的 TODO（write edit）">
+        <button
+          type="button"
+          class="suggest-item"
+          id="suggest-edit"
+          data-prompt="请修改当前文件中的 TODO"
+          data-prompt-demo="请修改当前文件中的 TODO（write edit）"
+        >
           <b>修改</b> 当前文件里的 TODO
         </button>
-        <button type="button" class="suggest-item" data-prompt="危险操作：请运行 bash rm -rf（danger）">
-          <b>演示</b> 高危工具审批流程
+        <!-- mock 专属：用关键字「咒语」演示审批链路，接入真实模型后不展示 -->
+        <button
+          type="button"
+          class="suggest-item"
+          data-demo-only
+          hidden
+          data-prompt="危险操作：请运行 bash rm -rf（danger）"
+        >
+          <b>演示</b> 高危工具审批流程（仅演示模式）
         </button>
       </div>
     </div>

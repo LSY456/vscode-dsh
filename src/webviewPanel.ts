@@ -11,6 +11,8 @@
  *     { kind: 'event', method, params }      // daemon 协议事件原样转发
  *       - method='user.message' 额外带 attachments：本次捕获到的上下文 chip 摘要（仅展示）
  *       - method='notice' 为扩展本地提示（非 daemon 事件），渲染为系统消息
+ *       - method='agent.info' 为扩展本地事件：当前 Agent 实现（mock/real + 成因），
+ *         驱动「演示模式」横幅与模式 chip（配好 Key 重启后据此撤下横幅）
  *     { kind: 'session.reset', sessionId }   // 清空视图（新建会话 / 切换会话 / 断线重放前）
  *     { kind: 'init', state }                // 某个 surface 就绪后的初始状态（含挂起项快照）
  *   webview -> extension:
@@ -67,6 +69,7 @@ interface ToWebview {
     connected: boolean;
     history?: SessionSummary[];
     agent?: 'mock' | 'real';
+    agentReason?: 'no-api-key' | 'forced-mock';
     model?: string;
     daemonVersion?: string;
     pending?: { approvals: PendingApproval[]; patches: PendingPatch[] };
@@ -150,6 +153,11 @@ export class WebviewPanelHost {
 
     this.daemon.onStatus((info) => {
       this.post({ kind: 'status', status: info.status, detail: info.detail });
+    });
+
+    // 每次握手成功后同步「当前 Agent 实现」：用户配好 Key 重启后要能撤下"演示模式"横幅
+    this.daemon.onAgentInfo((info) => {
+      this.post({ kind: 'event', method: 'agent.info', params: info });
     });
   }
 

@@ -70,7 +70,7 @@ describe('面板骨架', () => {
     });
     const agentEl = document.getElementById('agent-mode');
     expect(agentEl.hidden).toBe(false);
-    expect(agentEl.textContent).toBe('real · deepseek-chat');
+    expect(agentEl.textContent).toBe('真实模型 · deepseek-chat');
     expect(document.getElementById('session-id').textContent).toContain('sess_abcdef');
     expect(document.getElementById('conn-dot').className).toContain('connected');
   });
@@ -354,5 +354,61 @@ describe('surface 重建后的挂起项恢复', () => {
   it('补丁卡显示过期倒计时（daemon 盖戳 expiresAt）', () => {
     const card = document.querySelector('.card.patch');
     expect(card.textContent).toMatch(/剩余 \d+s/);
+  });
+});
+
+/**
+ * 演示模式：未配置模型 Key 时**必须显式告知**，不能静默降级。
+ *
+ * 背景：旧行为在没配 Key 时直接走 mock 关键字循环，既不报错也不提示，
+ * 用户会把模拟回复当成真实模型的回答。这里锁定三件事：
+ *  1. 横幅出现且说清成因（缺 Key / 显式 mock）；
+ *  2. 横幅能一键进设置面板；接入真实模型后自动撤下；
+ *  3. mock 专属的「咒语」入口不混在真实模型的主路径上。
+ */
+describe('演示模式（未配置模型 Key 的显式提示）', () => {
+  it('mock + 缺 Key：横幅可见、模式 chip 警示、文案点明成因', () => {
+    emitEvent('agent.info', { agent: 'mock', agentReason: 'no-api-key', model: 'deepseek-chat' });
+    const banner = document.getElementById('demo-banner');
+    expect(banner.hidden).toBe(false);
+    expect(banner.textContent).toContain('演示模式');
+    expect(banner.textContent).toContain('未配置模型 Key');
+    const chip = document.getElementById('agent-mode');
+    expect(chip.className).toContain('warn');
+    expect(chip.textContent).toContain('演示模式');
+  });
+
+  it('横幅「配置模型」直达设置面板', () => {
+    document.getElementById('btn-demo-config').click();
+    expect(document.getElementById('settings-panel').hidden).toBe(false);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+
+  it('演示模式下「修改 TODO」带 mock 咒语，mock 专属入口可见', () => {
+    expect(document.querySelector('[data-demo-only]').hidden).toBe(false);
+    document.getElementById('suggest-edit').click();
+    expect(document.getElementById('input').value).toBe('请修改当前文件中的 TODO（write edit）');
+  });
+
+  it('接入真实模型后：横幅撤下、咒语消失、mock 专属入口隐藏', () => {
+    emitEvent('agent.info', { agent: 'real', model: 'deepseek-chat' });
+    expect(document.getElementById('demo-banner').hidden).toBe(true);
+    expect(document.getElementById('agent-mode').className).not.toContain('warn');
+    expect(document.querySelector('[data-demo-only]').hidden).toBe(true);
+    document.getElementById('suggest-edit').click();
+    expect(document.getElementById('input').value).toBe('请修改当前文件中的 TODO');
+  });
+
+  it('显式 mock（forced-mock）用另一套文案，不误报成"忘了配 Key"', () => {
+    emitEvent('agent.info', { agent: 'mock', agentReason: 'forced-mock' });
+    const text = document.getElementById('demo-banner-text').textContent;
+    expect(text).toContain('agent=mock');
+    expect(text).not.toContain('未配置模型 Key');
+  });
+
+  it('agent 未知时不显示横幅（避免无依据的误报）', () => {
+    emitEvent('agent.info', {});
+    expect(document.getElementById('demo-banner').hidden).toBe(true);
+    expect(document.getElementById('agent-mode').hidden).toBe(true);
   });
 });
