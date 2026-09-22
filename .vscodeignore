@@ -8,10 +8,12 @@ media/**
 scripts/**
 daemon/**
 test/**
+out/test/**
 coverage/**
 dist/**
 .npm-cache/**
 .dsh/**
+.workbuddy/**
 .git/**
 node_modules/@types/**
 node_modules/esbuild/**
@@ -22,7 +24,9 @@ node_modules/@vitest/**
 esbuild.js
 vitest.config.ts
 tsconfig.json
-*.map
+**/*.map
 .gitignore
 PROTOCOL.md
 README.md
+docs/project-review.md
+docs/strategy-agent-kernel.md

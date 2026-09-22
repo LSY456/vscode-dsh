@@ -45,6 +45,13 @@
 
 ### 修复
 
+- **VSIX 混入本地会话记忆与内部文档（`.vscodeignore` 三条规则失效）**：打包清单里出现了
+  `.workbuddy/memory/*.md`（本地工作记录）、`out/test/**`（集成测试产物）、全部 `*.map`
+  以及 `docs/project-review.md`、`docs/strategy-agent-kernel.md` 两份内部文档——体积因此从
+  214 KB 虚涨到 573 KB。根因是 `*.map` 与 `test/**` 在 vsce 下不按递归语义匹配（前者只命中
+  根目录、后者打不到 `out/test/`），而 `.workbuddy/` 只进了 `.gitignore` 没进 `.vscodeignore`。
+  现改为 `**/*.map`、`out/test/**`、`.workbuddy/**`，并显式排除两份内部文档；产物收敛到
+  37 文件 / 214 KB，用户可见的 `docs/mock-agent.md` 与 `examples/python-daemon/` 照常保留。
 - **Agent 读到过期内容、并会覆盖用户未保存的编辑（脏文档不一致）**：daemon 是独立进程，
   看不到 VSCode 的内存文档，所有读取都落到磁盘——而用户正在编辑尚未保存时**磁盘内容是过期的**。
   于是上下文里的「当前文件全文」取自编辑器缓冲区（`doc.getText()`），Agent 随后 `read_file`
