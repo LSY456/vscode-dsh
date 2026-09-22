@@ -308,3 +308,95 @@ describe('原生 function calling：Anthropic tool_use', () => {
     ]);
   });
 });
+
+describe('模型请求空闲超时（P0-3）', () => {
+  /** 构造一个"静默流"：永不产出任何增量，直到 signal abort 才结束。 */
+  function silentUntilAbort(signal?: AbortSignal): AsyncIterable<Uint8Array> {
+    return {
+      async *[Symbol.asyncIterator]() {
+        if (!signal) {
+          await new Promise(() => {}); // 无 signal：真永久挂起
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve();
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    };
+  }
+
+  it('OpenAI：长时间无增量 -> TimeoutError（而非永久挂起）', async () => {
+    let captured: AbortSignal | undefined;
+    vi.stubGlobal('fetch', async (_url: string, init: { signal?: AbortSignal }) => {
+      captured = init.signal;
+      return { ok: true, body: silentUntilAbort(init.signal), text: async () => '' };
+    });
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    await expect(
+      model.chat([{ role: 'user', content: 'x' }], { idleTimeoutMs: 40 })
+    ).rejects.toThrow(/空闲超时/);
+    expect(captured?.aborted).toBe(true);
+  });
+
+  it('Anthropic：长时间无增量 -> TimeoutError', async () => {
+    vi.stubGlobal('fetch', async (_url: string, init: { signal?: AbortSignal }) => ({
+      ok: true,
+      body: silentUntilAbort(init.signal),
+      text: async () => '',
+    }));
+    const model = new AnthropicModel({ apiKey: 'k' });
+    await expect(
+      model.chat([{ role: 'user', content: 'x' }], { idleTimeoutMs: 40 })
+    ).rejects.toThrow(/空闲超时/);
+  });
+
+  it('有增量到达则重置空闲计时（不会误杀长回答）', async () => {
+    vi.stubGlobal('fetch', async (_url: string, init: { signal?: AbortSignal }) => ({
+      ok: true,
+      // 分 3 批、批间隔 30ms；总量远超 80ms，但每批都在 80ms 空闲阈值内
+      body: (async function* () {
+        const enc = new TextEncoder();
+        for (let i = 0; i < 3; i++) {
+          await new Promise((r) => setTimeout(r, 30));
+          if (init.signal?.aborted) return;
+          yield enc.encode(`data: {"choices":[{"delta":{"content":"c${i}"}}]}\n`);
+        }
+        yield enc.encode('data: [DONE]\n');
+      })(),
+      text: async () => '',
+    }));
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    const res = await model.chat([{ role: 'user', content: 'x' }], { idleTimeoutMs: 80 });
+    expect(res.content).toBe('c0c1c2');
+  });
+
+  it('idleTimeoutMs <= 0 关闭空闲超时（不因静默而中断）', async () => {
+    vi.stubGlobal('fetch', async (_url: string, init: { signal?: AbortSignal }) => ({
+      ok: true,
+      body: (async function* () {
+        await new Promise((r) => setTimeout(r, 50));
+        if (init.signal?.aborted) return;
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"late"}}]}\n');
+        yield new TextEncoder().encode('data: [DONE]\n');
+      })(),
+      text: async () => '',
+    }));
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    const res = await model.chat([{ role: 'user', content: 'x' }], { idleTimeoutMs: 0 });
+    expect(res.content).toBe('late');
+  });
+
+  it('调用方取消 -> AbortError（与超时区分）', async () => {
+    vi.stubGlobal('fetch', async (_url: string, init: { signal?: AbortSignal }) => ({
+      ok: true,
+      body: silentUntilAbort(init.signal),
+      text: async () => '',
+    }));
+    const ctrl = new AbortController();
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    const p = model.chat([{ role: 'user', content: 'x' }], { signal: ctrl.signal, idleTimeoutMs: 5000 });
+    setTimeout(() => ctrl.abort(), 20);
+    await expect(p).rejects.toThrow(/已取消/);
+  });
+});

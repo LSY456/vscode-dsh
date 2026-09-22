@@ -76,6 +76,8 @@ export interface RuntimeConfig {
   model: string;
   agent: 'mock' | 'real' | 'auto';
   provider: 'openai' | 'anthropic' | 'auto';
+  /** 模型请求空闲超时（ms，P0-3）；undefined = 用模型层缺省（60s）；<= 0 关闭 */
+  idleTimeoutMs?: number;
 }
 
 /**
@@ -268,6 +270,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           if (p.model?.model) rt.model = p.model.model;
           if (p.model?.agent) rt.agent = p.model.agent;
           if (p.model?.provider) rt.provider = p.model.provider;
+          if (p.model?.idleTimeoutMs !== undefined) rt.idleTimeoutMs = p.model.idleTimeoutMs;
           const session = sessions.create();
           attach(conn, session);
           const result: InitializeResult = {
@@ -345,6 +348,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               return session.registerPatch(snapshot as EventFilePatchPending, conn.approvalTtlMs);
             },
             isCanceled: () => session.isCanceled(),
+            // P0-3：把「会话被取消」同步转达给 Agent，使在途模型请求能被立即 abort，
+            // 而不是等下一个 onChunk 才察觉（模型静默时 onChunk 永不触发）。
+            onCancel: (fn) => session.onCancel(fn),
             isTrusted: (command) => trustStore.matches(command),
             getPatchContent: (patchId) => session.getPatchContent(patchId),
             readFile: async (target, maxBytes) => {
@@ -363,7 +369,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           const agentMode = resolveAgentMode(conn.runtime);
           if (agentMode === 'real') {
             const model = createModel(conn.runtime);
-            const agentConfig: RealAgentConfig = { model, sandbox };
+            const agentConfig: RealAgentConfig = { model, sandbox, idleTimeoutMs: conn.runtime.idleTimeoutMs };
             void runRealAgent(ctx, p, agentConfig).finally(() => {
               session.end();
               // 会话结束时立即落盘轨迹缓冲（审计完整性，不等定时器）

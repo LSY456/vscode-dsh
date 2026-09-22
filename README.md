@@ -95,7 +95,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test               # 单元测试（vitest，203 用例）
+npm test               # 单元测试（vitest，274 用例）
 npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 
 # 4. 配置真实模型（可选）：打开面板 → 设置，填写 API Key（SecretStorage 安全存储）与模型名；
@@ -107,8 +107,12 @@ npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并
 
 启动后：
 
-- 命令面板运行 **`dsh: 打开 Agent 面板`**，状态栏出现 `dsh` 图标（绿点=已连接）。
+- **点活动栏的 dsh 图标**即可打开 `Agent` 侧边栏面板（常驻入口）；也可用命令
+  **`dsh: 打开 Agent 面板`**，或点状态栏的 `dsh` 图标（绿点=已连接）。
+- 面板顶栏 **`新会话`** 开一段新对话；**`历史`** 里点任意会话即切回（可继续对话，daemon 重启过则只读回放）。
+- 需要大屏审阅时用 **`dsh: 在编辑器列打开 Agent`**，侧边栏与编辑器列两个视图共享同一会话状态。
 - 编辑器选中代码后右键 **`dsh: 将选中代码发送给 Agent`**。
+- 补丁 Diff 的**标题栏**带 `应用 / 编辑后应用 / 拒绝` 按钮，不必回面板点。
 - 在面板输入：
   - `请修改文件 xxx 中的 TODO（write edit）` → 自动打开原生 Diff 并排视图，可应用/拒绝；
   - `危险操作：请运行 bash rm -rf（danger）` → 弹出工具审批卡片；
@@ -127,11 +131,13 @@ npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并
 | `dsh.preset` | `default` | 握手时传给 daemon 的 Agent 预设 |
 | `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
 | `dsh.model.model` | `deepseek-chat` | 模型名（如 `deepseek-chat` / `deepseek-reasoner`） |
+| `dsh.model.idleTimeoutSeconds` | `60` | 模型请求空闲超时秒数（0–1800，0 = 关闭）；距上一个流式增量超时即中断，防会话永久挂起 |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
 | `dsh.context.maxFileBytes` | `200000` | 附件内联内容阈值；超出改为 `contentOmitted` 按需 `file.read` |
 | `dsh.diff.autoOpen` | `true` | 补丁到达时自动打开 Diff 视图 |
 | `dsh.capabilities.allowedTools` | `[]` | 工具白名单（空 = 全部允许），如 `["bash_execute"]` |
 | `dsh.capabilities.maxConcurrency` | `0` | daemon 全局并发会话上限（0 = 不限） |
+| `dsh.approval.ttlSeconds` | `60` | 审批 / 补丁挂起的超时秒数（10–3600，到点按拒绝处理；改后重启 daemon 生效） |
 
 ## 目录结构
 
@@ -166,6 +172,7 @@ vscode-dsh/
 │       ├── logFile.ts      # daemon 日志落盘（.dsh/logs/daemon.log，轮转 + 0600）
 │       └── trajectoryStore.ts # 轨迹持久化（.dsh/trajectory/*.jsonl）
 ├── media/                  # Webview 静态资源（HTML/CSS/JS）
+├── resources/              # 活动栏图标等随包资源（dsh-activity.svg）
 ├── scripts/smoke.js        # 端到端冒烟测试（无 VSCode 依赖）
 ├── *.test.ts               # vitest 单元测试（协议/路径/状态机/Agent/模型/工具/轨迹）
 ├── .github/workflows/ci.yml # CI：typecheck/build/unit/smoke + VSIX 构件
@@ -196,7 +203,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，203 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，274 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
   Webview Markdown 渲染与净化（XSS 安全）。
@@ -241,7 +248,12 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - [x] 协议契约 + 参考 daemon（安全握手/流式/审批/补丁/迹线/取消）
 - [x] Extension Host（进程管理/上下文捕获/Diff 提供器/Webview 桥）
 - [x] Webview UI（推理流/打字机/工具卡/审批卡/补丁卡/迹线面板）
-- [x] **P0 工程质量**：vitest 单元测试（203 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **D1-D3 面板重设计**：跟随当前主题的 VSCode 原生观感（`--vscode-*` 变量，浅/深/高对比自适应）、
+      工具调用折叠为「过程」时间线、挂起项（审批/补丁）常驻待办条 + 60s 倒计时、滚动锁定与
+      Esc/Enter 键盘操作、历史与设置改为覆盖式面板、回答一键复制
+- [x] **E1-E4 可用性补齐（P0）**：活动栏常驻视图入口、新建 / 切回历史会话（daemon 重放续聊）、
+      补丁 Diff 标题栏的应用 / 编辑后应用 / 拒绝按钮、挂起项超时可配（`dsh.approval.ttlSeconds`）
+- [x] **P0 工程质量**：vitest 单元测试（274 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
 - [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
