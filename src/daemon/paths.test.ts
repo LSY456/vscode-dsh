@@ -2,7 +2,30 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { assertPathInside, isPathInside } from './paths';
+import { assertPathInside, isPathInside, pathKey } from './paths';
+
+describe('pathKey（P0-1 覆盖层键归一）', () => {
+  const p = path.resolve('/workspace/project/src/a.ts');
+
+  it('绝对化：相对路径折叠为绝对路径', () => {
+    expect(pathKey('src/a.ts')).toBe(pathKey(path.resolve('src/a.ts')));
+  });
+
+  it('折叠 .. 与重复分隔符：不同写法得到同一键', () => {
+    expect(pathKey('/workspace/project/src/../src/a.ts')).toBe(pathKey(p));
+    expect(pathKey('/workspace/project//src///a.ts')).toBe(pathKey(p));
+  });
+
+  it('Windows 忽略大小写（同一文件的大小写差异不应漏配）', () => {
+    if (process.platform !== 'win32') return;
+    expect(pathKey('C:\\Work\\A.ts')).toBe(pathKey('c:\\work\\a.ts'));
+  });
+
+  it('Linux 大小写敏感（不误合并两个不同文件）', () => {
+    if (process.platform === 'win32') return;
+    expect(pathKey('/w/A.ts')).not.toBe(pathKey('/w/a.ts'));
+  });
+});
 
 describe('isPathInside 词法护栏', () => {
   const root = path.resolve('/workspace/project');

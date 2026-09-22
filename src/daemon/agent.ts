@@ -13,7 +13,6 @@
  *
  * 真实实现（Cordis 动态插件版 daemon）只需保持相同的事件时序与消息结构。
  */
-import * as fs from 'fs';
 import * as path from 'path';
 import {
   EVENTS,
@@ -23,7 +22,7 @@ import {
   SessionSendParams,
 } from '../../shared/protocol';
 import { assertPathInside } from './paths';
-import { checkPatchConflict } from './tools';
+import { applyPatchDecision, describePatchOutcome, PatchApplyEnv } from './patchApply';
 
 export interface AgentCapabilities {
   allowedTools?: string[];
@@ -53,8 +52,30 @@ export interface AgentContext {
   isTrusted?(command: string): boolean;
   /** P2 编辑后应用：读用户编辑后的补丁内容（无则 undefined，用原始 newContent） */
   getPatchContent?(patchId: string): string | undefined;
+  /**
+   * P0-1：目标文件当前是否为「编辑器未保存」状态（daemon 脏文档覆盖层命中）。
+   * 仅用于给用户/模型加标注；读取内容本身由 `readFile` 统一覆盖层优先。
+   */
+  isDirty?(target: string): boolean;
+  /** P0-1：本补丁是否已由客户端应用到编辑器缓冲区（为 true 时 agent 不得写盘） */
+  isPatchAppliedInEditor?(patchId: string): boolean;
   /** 按需读取文件（须在工作区内），失败返回 undefined */
   readFile(target: string, maxBytes?: number): Promise<string | undefined>;
+}
+
+/**
+ * 由 AgentContext 组装补丁落地环境（P0-1 / P0-2 / P2）。
+ * mock 与 real agent 共用，避免「脏文档判定」「乐观锁」等语义在两处漂移。
+ */
+export function makePatchEnv(ctx: AgentContext): PatchApplyEnv {
+  return {
+    workspaceRoot: ctx.workspaceRoot,
+    allowedDirs: ctx.capabilities?.allowedDirs ?? [],
+    isDirty: (target) => ctx.isDirty?.(target) ?? false,
+    isAppliedInEditor: (patchId) => ctx.isPatchAppliedInEditor?.(patchId) ?? false,
+    getEditedContent: (patchId) => ctx.getPatchContent?.(patchId),
+    notifyUser: (delta) => ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta }),
+  };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -128,12 +149,9 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
 
     const target = safeResolve(ctx, rawTarget);
     if (target) {
-      let oldContent: string | undefined;
-      try {
-        oldContent = fs.readFileSync(target, 'utf8');
-      } catch {
-        oldContent = undefined; // 文件不存在 => 新建
-      }
+      // P0-1：脏文档优先——命中编辑器未保存缓冲区则取缓冲区，未命中回落磁盘；
+      // 返回 undefined 即文件不存在（按「新建」处理）
+      const oldContent = (await ctx.readFile(target)) ?? undefined;
       const newContent = buildNewContent(oldContent ?? '');
 
       const patchId = `patch_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
@@ -151,32 +169,34 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
       const accepted = await ctx.waitForUser('patch', patchPayload);
       trajectory(ctx, 'patch', `file.patch.respond ${accepted ? 'accept' : 'reject'}`);
 
+      // P0-1 / P0-2 / P2 统一落地裁决（脏文档走编辑器、普通文件走乐观锁）
       let applied = false;
+      let appliedInEditor = false;
       let error: string | undefined;
+      let outcomeText = '';
       if (accepted) {
-        try {
-          // P0-2 乐观并发校验：审阅期间文件可能被外部改动，快照不一致即拒绝应用
-          const conflict = checkPatchConflict(ctx.workspaceRoot, [], target, oldContent);
-          if (!conflict.ok) {
-            error =
-              `文件已被外部修改，补丁未应用（乐观锁冲突）。` +
-              `请重新读取 ${path.basename(target)} 后再次发起修改。`;
-            ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: `\n\n[补丁] ${error}\n` });
-          } else {
-            // P2 编辑后应用：优先写用户编辑后的内容，否则写 agent 原始 newContent
-            const finalContent = ctx.getPatchContent?.(patchId) ?? newContent;
-            fs.mkdirSync(path.dirname(target), { recursive: true });
-            fs.writeFileSync(target, finalContent, 'utf8');
-            applied = true;
-          }
-        } catch (e) {
-          error = e instanceof Error ? e.message : String(e);
-        }
+        const result = applyPatchDecision(makePatchEnv(ctx), {
+          patchId,
+          resolvedPath: target,
+          oldContent,
+          newContent,
+        });
+        applied = result.applied;
+        appliedInEditor = result.appliedInEditor;
+        error = result.error;
+        outcomeText = describePatchOutcome(result, target);
       }
-      ctx.notify(EVENTS.FilePatchResult, { sessionId: ctx.sessionId, patchId, accepted, applied, error });
+      ctx.notify(EVENTS.FilePatchResult, {
+        sessionId: ctx.sessionId,
+        patchId,
+        accepted,
+        applied,
+        error,
+        appliedInEditor: appliedInEditor || undefined,
+      });
       ctx.notify(EVENTS.MessageDelta, {
         sessionId: ctx.sessionId,
-        delta: `\n\n[补丁] ${accepted ? (applied ? `已应用 ${target}` : `应用失败：${error}`) : '已拒绝'}。`,
+        delta: `\n\n[补丁] ${accepted ? outcomeText : '已拒绝'}。`,
       });
     }
   }

@@ -12,6 +12,7 @@ import { ConfigAccessor } from './configAccessor';
 import { captureContext } from './contextCapture';
 import { DaemonManager, DaemonStatus } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
+import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
 import { WebviewPanelHost } from './webviewPanel';
 
@@ -56,7 +57,11 @@ export function activate(context: vscode.ExtensionContext): DshApi {
   const daemon = new DaemonManager({ extensionPath: context.extensionPath, configAccessor });
   activeDaemon = daemon;
   const diff = new DshDiffManager(() => daemon.client);
-  const panel = new WebviewPanelHost(context, daemon, diff, configAccessor);
+  // P0-1：脏文档跟随——把编辑器里未保存的缓冲区内容同步给 daemon，
+  // 使 Agent 读到的是"用户此刻看到的内容"，而不是过期的磁盘版本
+  const dirty = new DirtyTracker({ getClient: () => daemon.client });
+  const panel = new WebviewPanelHost(context, daemon, diff, configAccessor, dirty);
+  context.subscriptions.push(dirty);
   // 侧边栏常驻入口（活动栏 dsh 图标 -> Agent 视图）
   panel.register(context);
 

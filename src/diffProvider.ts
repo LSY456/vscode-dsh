@@ -22,6 +22,22 @@ const SCHEME = 'dsh-patch';
 /** 已回执的补丁视图保留数量（可回看，不再可写） */
 const MAX_RESOLVED_RECORDS = 20;
 
+/** 路径比较（Windows 忽略大小写）。 */
+function sameFile(a: string, b: string): boolean {
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/**
+ * P0-1：把补丁内容写进**编辑器缓冲区**（整文件替换），磁盘不动。
+ * 改动保持未保存态，由用户复核后自行保存——这正是“不会静默覆盖未保存改动”的实现方式。
+ */
+async function applyToDocument(doc: vscode.TextDocument, content: string): Promise<boolean> {
+  const edit = new vscode.WorkspaceEdit();
+  const full = new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));
+  edit.replace(doc.uri, full, content);
+  return vscode.workspace.applyEdit(edit);
+}
+
 interface PatchRecord {
   patchId: string;
   sessionId: string;
@@ -135,15 +151,41 @@ export class DshDiffManager implements vscode.FileSystemProvider {
       void vscode.window.showErrorMessage('daemon 未连接，无法回传补丁决策');
       return;
     }
+
+    // P0-1 脏文档一致性：目标文件在编辑器里有未保存改动时，**不能让 daemon 写盘**——
+    // 磁盘与缓冲区会就此分叉，用户下一次 Ctrl+S 就会用旧缓冲区覆盖掉 Agent 的结果。
+    // 改走编辑器缓冲区：两边重新对齐，且改动保持"未保存"态，用户可自行复核后再保存。
+    let applyInEditor = false;
+    if (accept) {
+      const doc = vscode.workspace.textDocuments.find((d) => sameFile(d.uri.fsPath, record.filePath));
+      if (doc && doc.isDirty) {
+        const finalContent = content ?? record.newContent;
+        if (doc.getText() !== (record.oldContent ?? '')) {
+          // 客户端侧乐观锁：审阅期间缓冲区又被改过，不静默覆盖（P0-2 在脏文档通路上的对应物）。
+          // 仍照常回执：applyInEditor 为 false，daemon 会因"目标是脏文档"而拒绝落盘并给出原因，
+          // Agent 因此不会一直挂着等 TTL 超时。
+          void vscode.window.showWarningMessage(
+            `dsh: ${path.basename(record.filePath)} 在审阅期间已被修改，未自动应用，请重新发起修改。`
+          );
+        } else if (await applyToDocument(doc, finalContent)) {
+          applyInEditor = true;
+        } else {
+          void vscode.window.showErrorMessage(`dsh: 无法写入编辑器缓冲区 ${path.basename(record.filePath)}`);
+          return;
+        }
+      }
+    }
+
     try {
       await client.request(METHODS.FilePatchRespond, {
         sessionId: record.sessionId,
         patchId,
         accept,
         content,
+        applyInEditor,
       });
       void vscode.window.setStatusBarMessage(
-        `dsh: 已${accept ? '应用' : '拒绝'}补丁 ${path.basename(record.filePath)}`,
+        `dsh: 已${accept ? (applyInEditor ? '应用到编辑器（未保存）' : '应用') : '拒绝'}补丁 ${path.basename(record.filePath)}`,
         4000
       );
     } catch (err) {

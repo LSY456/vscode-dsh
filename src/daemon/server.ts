@@ -33,8 +33,10 @@ import {
   EventFilePatchPending,
   EventTrajectory,
   SessionSendParams,
+  WorkspaceSyncDirtyParams,
 } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
+import { DirtyOverlay } from './dirtyOverlay';
 import { ChatModel, createKeywordFakeModel, createModel as createProviderModel } from './model';
 import { assertPathInside } from './paths';
 import { RealAgentConfig, runRealAgent } from './realAgent';
@@ -162,6 +164,12 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     ws: WebSocket;
     /** 当前默认会话 id（session.send 未指定时使用） */
     currentSessionId: string;
+    /**
+     * P0-1 脏文档覆盖层：客户端推来的「编辑器未保存缓冲区」快照。
+     * 连接级（与 capabilities 同理）：daemon 可能被多个窗口复用，各窗口打开的文档集合不同，
+     * 覆盖层必须随连接隔离，否则 A 窗口的未保存内容会污染 B 窗口的读取结果。
+     */
+    dirty: DirtyOverlay;
     notify(method: string, params: unknown): void;
   }
 
@@ -172,12 +180,14 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
       ...createConnectionRuntime(opts),
       ws,
       currentSessionId: '',
+      dirty: new DirtyOverlay(),
       notify(method, params) {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }));
         }
       },
     };
+
     connections.add(conn);
 
     ws.on('message', (data: RawData) => {
@@ -228,6 +238,28 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
       return { resolved };
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /**
+   * P0-1：读取「用户实际看到的内容」——脏文档覆盖层优先，未命中回落磁盘。
+   *
+   * `resolved` 必须是 canonical 路径（resolvePath / resolveTarget 的产物），否则覆盖层查不到：
+   * 覆盖层的键与护栏产出的 canonical 路径同源（都过 `pathKey`）。
+   *
+   * `dirty` 的含义严格限定为「**内容取自覆盖层**」；超大文件只上报脏状态、不上报内容，
+   * 此时回落磁盘且 dirty 为 false（写入安全由 `conn.dirty.has()` 单独保证，与其无关）。
+   */
+  function readEffective(
+    conn: Connection,
+    resolved: string
+  ): { content: string; dirty: boolean } | undefined {
+    const overlay = conn.dirty.get(resolved);
+    if (overlay !== undefined) return { content: overlay, dirty: true };
+    try {
+      return { content: fs.readFileSync(resolved, 'utf8'), dirty: false };
+    } catch {
+      return undefined;
     }
   }
 
@@ -356,14 +388,18 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             readFile: async (target, maxBytes) => {
               const r = resolvePath(conn.capabilities, target);
               if ('error' in r) return undefined;
-              try {
-                const content = fs.readFileSync(r.resolved, 'utf8');
-                const cap = maxBytes ?? MAX_READ_BYTES;
-                return content.length > cap ? content.slice(0, cap) + '\n…[truncated]' : content;
-              } catch {
-                return undefined;
-              }
+              const eff = readEffective(conn, r.resolved);
+              if (!eff) return undefined;
+              const cap = maxBytes ?? MAX_READ_BYTES;
+              return eff.content.length > cap ? eff.content.slice(0, cap) + '\n…[truncated]' : eff.content;
             },
+            // P0-1：目标是否处于「编辑器未保存」状态（供 agent 给输出加标注）
+            isDirty: (target) => {
+              const r = resolvePath(conn.capabilities, target);
+              return 'error' in r ? false : conn.dirty.has(r.resolved);
+            },
+            // P0-1：本补丁是否已由客户端应用到编辑器缓冲区（为 true 时 agent 不写盘）
+            isPatchAppliedInEditor: (patchId) => session.getPatchApplyInEditor(patchId),
           };
           // P3.6：auto 切换 —— 有 apiKey（或显式 real）走真实模型，否则回退内置模拟
           const agentMode = resolveAgentMode(conn.runtime);
@@ -455,13 +491,20 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           return;
         }
         case METHODS.FilePatchRespond: {
-          const p = req.params as { sessionId?: string; patchId: string; accept: boolean; content?: string };
+          const p = req.params as {
+            sessionId?: string;
+            patchId: string;
+            accept: boolean;
+            content?: string;
+            applyInEditor?: boolean;
+          };
           const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
           if (!session) {
             sendError(conn.ws, req.id, ERROR_CODES.NotFound, 'session 不存在');
             return;
           }
-          const r = session.respondPatch(p?.patchId ?? '', !!p?.accept, p?.content);
+          // P0-1：applyInEditor = 客户端已把改动写进编辑器缓冲区，agent 侧据此跳过落盘
+          const r = session.respondPatch(p?.patchId ?? '', !!p?.accept, p?.content, !!p?.applyInEditor);
           if (r === 'not_found') {
             sendError(conn.ws, req.id, ERROR_CODES.NotFound, `补丁不存在或已处理: ${p?.patchId}`);
             return;
@@ -481,17 +524,27 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             return;
           }
           try {
-            const content = fs.readFileSync(r.resolved, 'utf8');
+            // P0-1：脏文档优先——用户未保存时的磁盘内容已过期，读到旧版本会让 Agent 误判
+            const eff = readEffective(conn, r.resolved);
+            if (!eff) throw new Error('文件不存在或不可读');
             const cap = p.maxBytes ?? MAX_READ_BYTES;
-            const truncated = content.length > cap;
+            const truncated = eff.content.length > cap;
             sendResult(conn.ws, req.id, {
-              content: truncated ? content.slice(0, cap) : content,
+              content: truncated ? eff.content.slice(0, cap) : eff.content,
               truncated,
-              size: Buffer.byteLength(content, 'utf8'),
+              size: Buffer.byteLength(eff.content, 'utf8'),
+              dirty: eff.dirty,
             });
           } catch (e) {
             sendError(conn.ws, req.id, ERROR_CODES.InternalError, `读取失败: ${e instanceof Error ? e.message : String(e)}`);
           }
+          return;
+        }
+        case METHODS.WorkspaceSyncDirty: {
+          // P0-1：客户端推来「当前全部脏文档」全量快照，整体替换本连接的覆盖层
+          const p = req.params as WorkspaceSyncDirtyParams | undefined;
+          const count = conn.dirty.replace(p?.files ?? []);
+          sendResult(conn.ws, req.id, { ok: true, count });
           return;
         }
         case METHODS.Ping:

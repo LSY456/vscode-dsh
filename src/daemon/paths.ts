@@ -27,6 +27,17 @@ function normalize(p: string): string {
   return resolved;
 }
 
+/**
+ * 归一化为**可用作 Map 键**的路径（绝对化 + Windows 忽略大小写）。
+ *
+ * P0-1 脏文档覆盖层需要把「客户端给的 fsPath」与「护栏解析出的 canonical 路径」对上，
+ * 两边大小写/分隔符写法可能不同；统一过此函数后比较才不会漏配。
+ * 注意：只对**已 canonical 化**的路径使用，本函数不再解析符号链接。
+ */
+export function pathKey(p: string): string {
+  return normalize(p);
+}
+
 /** 词法判断 target 是否位于 root 内（含 root 自身）。仅作廉价预检，不防符号链接。 */
 export function isPathInside(root: string, target: string): boolean {
   const r = normalize(root);

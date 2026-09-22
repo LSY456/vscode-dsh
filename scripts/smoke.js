@@ -14,6 +14,8 @@
  *  - 取消流程：slow 中 session.cancel -> session.ended(canceled)
  *  - 断线续跑：断开后 session.resume 重放事件并返回状态
  *  - file.read：工作区内可读 / 越界返回 -32012
+ *  - 脏文档一致性（P0-1）：未保存缓冲区优先读取（dirty=true）、覆盖层按连接隔离、
+ *    补丁落盘改走编辑器（applyInEditor）/ 脏文档未走编辑器时拒绝落盘
  *  - ping / shutdown
  *
  * 运行：node scripts/smoke.js（需先 npm run build）
@@ -428,6 +430,96 @@ async function main() {
     readRejected = err.code === -32012;
   }
   assert(readRejected, 'file.read 越界返回 -32012');
+
+  // ---- 9b. 脏文档一致性（P0-1）：未保存缓冲区优先 + 写盘改走编辑器
+  // 注意：主连接 ws 已在第 8 节模拟断线时关闭，本节一律用 conn2。
+  console.log('[smoke] 脏文档一致性（P0-1）…');
+  const diskBefore = fs.readFileSync(samplePath, 'utf8');
+  const bufferContent = 'BUFFER-ONLY（未保存的编辑器内容）\n';
+
+  // 覆盖层按连接隔离（与 P0-4 的能力声明同理）：另一个窗口推的内容不影响本连接读取
+  const conn3 = await openSession(port, {
+    workspaceRoot: tmpDir,
+    client: { name: 'smoke-3', version: '0.0.0' },
+  });
+  await conn3.rpc.request('workspace.syncDirty', {
+    files: [{ path: samplePath, content: 'OTHER-WINDOW\n' }],
+  });
+  const otherRead = await conn3.rpc.request('file.read', { path: samplePath });
+  assert(otherRead.content === 'OTHER-WINDOW\n' && otherRead.dirty === true, 'P0-1：覆盖层对该连接自身生效');
+  const isolatedRead = await conn2.rpc.request('file.read', { path: samplePath });
+  assert(
+    isolatedRead.content === diskBefore && isolatedRead.dirty !== true,
+    'P0-1：覆盖层按连接隔离，不跨连接串味'
+  );
+  conn3.ws.close();
+
+  // 本连接推入未保存内容 -> file.read 必须读到缓冲区版本，而不是过期磁盘版本
+  await conn2.rpc.request('workspace.syncDirty', {
+    files: [{ path: samplePath, content: bufferContent }],
+  });
+  const dirtyRead = await conn2.rpc.request('file.read', { path: samplePath });
+  assert(dirtyRead.content === bufferContent, 'P0-1：file.read 读到编辑器未保存内容');
+  assert(dirtyRead.dirty === true, 'P0-1：file.read 标记 dirty=true 供 UI/模型辨识');
+  assert(fs.readFileSync(samplePath, 'utf8') === diskBefore, 'P0-1：读取覆盖层不会碰磁盘');
+
+  const sendDirtyPrompt = () =>
+    conn2.rpc.request('session.send', {
+      sessionId,
+      prompt: '请修改文件内容，把 TODO 替换为 DONE（write edit）',
+      attachments: [
+        {
+          kind: 'file',
+          uri: 'file://' + samplePath.replace(/\\/g, '/'),
+          path: samplePath,
+          language: 'plaintext',
+          name: 'sample.txt',
+          content: bufferContent,
+        },
+      ],
+    });
+
+  // accept + applyInEditor：客户端已写入编辑器缓冲区，daemon 不得再落盘
+  conn2.rpc.resetEvents();
+  await sendDirtyPrompt();
+  const p2 = await conn2.rpc.waitFor((m) => m.method === 'file.patch.pending', 'file.patch.pending（脏文档）');
+  assert(p2.params.oldContent === bufferContent, 'P0-1：补丁 old 侧取自缓冲区（与用户所见一致，而非磁盘）');
+  await conn2.rpc.request('file.patch.respond', {
+    sessionId,
+    patchId: p2.params.patchId,
+    accept: true,
+    applyInEditor: true,
+  });
+  const r2 = await conn2.rpc.waitFor(
+    (m) => m.method === 'file.patch.result' && m.params.patchId === p2.params.patchId,
+    'file.patch.result（脏文档）'
+  );
+  assert(r2.params.accepted && r2.params.appliedInEditor === true, 'P0-1：改动交由编辑器落地');
+  assert(r2.params.applied === false, 'P0-1：daemon 未写盘（避免与缓冲区内容分叉）');
+  assert(fs.readFileSync(samplePath, 'utf8') === diskBefore, 'P0-1：磁盘内容保持原样');
+  await conn2.rpc.waitFor((m) => m.method === 'session.ended', '脏文档流程结束', 10000);
+
+  // accept 但未走编辑器：安全默认是拒绝落盘并给出原因，而不是静默覆盖未保存改动
+  conn2.rpc.resetEvents();
+  await sendDirtyPrompt();
+  const p3 = await conn2.rpc.waitFor(
+    (m) => m.method === 'file.patch.pending',
+    'file.patch.pending（脏文档未走编辑器）'
+  );
+  await conn2.rpc.request('file.patch.respond', { sessionId, patchId: p3.params.patchId, accept: true });
+  const r3 = await conn2.rpc.waitFor(
+    (m) => m.method === 'file.patch.result' && m.params.patchId === p3.params.patchId,
+    'file.patch.result（脏文档未走编辑器）'
+  );
+  assert(r3.params.applied === false, 'P0-1：脏文档未走编辑器时拒绝落盘');
+  assert(typeof r3.params.error === 'string' && r3.params.error.includes('未保存'), 'P0-1：拒绝时给出可读原因');
+  assert(fs.readFileSync(samplePath, 'utf8') === diskBefore, 'P0-1：未保存改动没有被覆盖');
+  await conn2.rpc.waitFor((m) => m.method === 'session.ended', '脏文档拒绝流程结束', 10000);
+
+  // 清空覆盖层（用户保存后）-> 读取回落磁盘，普通落盘通路恢复
+  await conn2.rpc.request('workspace.syncDirty', { files: [] });
+  const cleanRead = await conn2.rpc.request('file.read', { path: samplePath });
+  assert(cleanRead.content === diskBefore && cleanRead.dirty !== true, 'P0-1：清空覆盖层后回落磁盘');
 
   // ---- 10. 真实 Agent 流水线（--agent real --fake-model，不起网络）
   console.log('[smoke] 真实 Agent（假模型）…');

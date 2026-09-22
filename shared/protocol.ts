@@ -50,6 +50,7 @@ export const METHODS = {
   ApprovalRespond: 'approval.respond',
   FilePatchRespond: 'file.patch.respond',
   FileRead: 'file.read',
+  WorkspaceSyncDirty: 'workspace.syncDirty',
   TrustList: 'trust.list',
   TrustClear: 'trust.clear',
   TrajectoryList: 'trajectory.list',
@@ -271,6 +272,38 @@ export interface FileReadResult {
   content: string;
   truncated: boolean;
   size: number;
+  /**
+   * P0-1 脏文档一致性：内容来自编辑器**未保存**的缓冲区（而非磁盘）。
+   * 供 UI 标注「未保存」，避免用户误以为读到的是落盘版本。
+   */
+  dirty?: boolean;
+}
+
+/**
+ * 脏文档同步（P0-1，客户端 -> 服务端通知）。
+ *
+ * daemon 是独立进程，看不到 VSCode 的内存文档，只能读磁盘——而用户正在编辑的文件
+ * 磁盘内容往往是**过期**的。若不校正，Agent 会基于旧内容推理并产出补丁，覆盖用户
+ * 尚未保存的改动。故客户端把「当前全部脏文档」的缓冲区内容推给 daemon，daemon 侧
+ * 以连接为单位维护覆盖层（overlay），读取时**优先取覆盖层**。
+ *
+ * 语义为**全量快照**：每次调用都代表"此刻工作区的全部脏文档"，daemon 整体替换，
+ * 不做增量合并（省去删除/重命名的对账，避免残留幽灵内容）。
+ */
+export interface DirtyFileEntry {
+  /** 绝对路径（VSCode 的 uri.fsPath） */
+  path: string;
+  /**
+   * 编辑器缓冲区当前全文（含未保存改动）。
+   * **可缺省**：超大文件不值得每次按键都把全文推过 WebSocket，此时只上报「该文件是脏的」——
+   * daemon 侧读取回落磁盘，但**写入路径一律避开磁盘**（转交编辑器），照样不会覆盖未保存改动。
+   */
+  content?: string;
+}
+
+export interface WorkspaceSyncDirtyParams {
+  /** 当前全部脏文档；空数组表示"没有脏文档"，覆盖层应清空 */
+  files: DirtyFileEntry[];
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +346,15 @@ export interface FilePatchRespondParams {
   accept: boolean;
   /** P2 编辑后应用：accept 时携带用户编辑后的完整内容（缺省则用 agent 原始 newContent） */
   content?: string;
+  /**
+   * P0-1 脏文档一致性：**客户端已把改动应用到编辑器缓冲区**，daemon 不要再写磁盘。
+   *
+   * 目标文件在编辑器里有未保存改动时，写盘会与缓冲区「分叉」：用户下一次 Ctrl+S 就会
+   * 用旧缓冲区覆盖掉 Agent 的落盘结果（或反之）。因此脏文档一律改走编辑器
+   * WorkspaceEdit——缓冲区与磁盘重新对齐，且用户是「先审后又改」，改动仍保持未保存态
+   * 可自行复核。客户端在应用成功后才带此标记回调，daemon 侧以「已交由编辑器」收尾。
+   */
+  applyInEditor?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +428,11 @@ export interface EventFilePatchResult {
   accepted: boolean;
   applied: boolean;
   error?: string;
+  /**
+   * P0-1：改动已由客户端应用到编辑器缓冲区（目标文件存在未保存改动，故未写磁盘）。
+   * `applied` 保持 false（daemon 未落盘），UI 应提示「已应用到编辑器，保存后生效」。
+   */
+  appliedInEditor?: boolean;
 }
 
 /**

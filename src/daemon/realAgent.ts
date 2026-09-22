@@ -25,12 +25,10 @@ import {
   GrepResult,
   grepFiles,
   listDirectory,
-  readTextFile,
   resolveTarget,
-  checkPatchConflict,
-  tryReadFile,
-  writeTextFile,
 } from './tools';
+import { applyPatchDecision, describePatchOutcome } from './patchApply';
+import { makePatchEnv } from './agent';
 import { CommandSandbox } from './sandbox';
 
 export interface RealAgentConfig {
@@ -302,8 +300,13 @@ async function dispatchTool(
           ? res.files.join('\n') + (res.truncated ? '\n…（结果过多已截断）' : '')
           : '(无匹配文件)';
       } else {
-        const data = readTextFile(ctx.workspaceRoot, allowedDirs, String(input.path ?? ''), config.maxReadBytes ?? 64 * 1024);
-        output = data.content;
+        // P0-1：脏文档优先——命中编辑器未保存缓冲区就返回缓冲区内容，未命中回落磁盘。
+        // 若这里读磁盘而模型上下文里是缓冲区，模型会基于"它以为的最新内容"推理、却拿到旧内容。
+        const target = String(input.path ?? '');
+        const content = await ctx.readFile(target, config.maxReadBytes ?? 64 * 1024);
+        if (content === undefined) throw new Error('无法读取：路径越界或文件不存在');
+        output = content;
+        if (ctx.isDirty?.(target)) output += '\n\n（注：以上为该文件在编辑器中的未保存内容）';
       }
       ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: true, output, durationMs: Date.now() - start });
       trajectory('tool', `${tool} 完成`);
@@ -323,7 +326,9 @@ async function dispatchTool(
     let newContent: string;
     try {
       const resolved = resolveTarget(ctx.workspaceRoot, allowedDirs, target);
-      const oldContent = tryReadFile(ctx.workspaceRoot, allowedDirs, target);
+      // P0-1：基准内容取「编辑器未保存缓冲区优先」——与模型在上下文里看到的内容同源，
+      // 否则 diff 的 old 侧会是过期磁盘内容，用户看到的对比就是错的。
+      const oldContent = await ctx.readFile(resolved);
       if (tool === 'write_file') {
         newContent = String(input.content ?? '');
       } else {
@@ -349,34 +354,19 @@ async function dispatchTool(
       const accepted = await ctx.waitForUser('patch', patchPayload);
       trajectory('patch', `file.patch.respond ${accepted ? 'accept' : 'reject'}`);
 
-      let applied = false;
-      let error: string | undefined;
-      if (accepted) {
-        try {
-          // P0-2 乐观并发校验：用户在审阅期间可能从外部改动了该文件（编辑器保存 / 另一会话），
-          // 快照与当前磁盘不一致即拒绝应用，避免静默覆盖并发修改。
-          const conflict = checkPatchConflict(ctx.workspaceRoot, allowedDirs, resolved, oldContent);
-          if (!conflict.ok) {
-            error =
-              `文件已被外部修改，补丁未应用（乐观锁冲突）。` +
-              `请重新读取 ${path.basename(resolved)} 后再次发起修改。`;
-            ctx.notify(EVENTS.MessageDelta, { sessionId, delta: `\n\n[补丁] ${error}\n` });
-          } else {
-            // P2 编辑后应用：优先写用户编辑后的内容，否则写 agent 计算出的 newContent
-            const finalContent = ctx.getPatchContent?.(patchId) ?? newContent;
-            writeTextFile(ctx.workspaceRoot, allowedDirs, resolved, finalContent);
-            applied = true;
-          }
-        } catch (e) {
-          error = e instanceof Error ? e.message : String(e);
-        }
-      }
-      ctx.notify(EVENTS.FilePatchResult, { sessionId, patchId, accepted, applied, error });
-      return accepted
-        ? applied
-          ? `已写入 ${resolved}`
-          : `写入失败：${error}`
-        : `用户拒绝了修改 ${resolved}`;
+      // P0-1 / P0-2 / P2 统一落地裁决（脏文档走编辑器、普通文件走乐观锁）
+      const result = accepted
+        ? applyPatchDecision(makePatchEnv(ctx), { patchId, resolvedPath: resolved, oldContent, newContent })
+        : { applied: false, appliedInEditor: false };
+      ctx.notify(EVENTS.FilePatchResult, {
+        sessionId,
+        patchId,
+        accepted,
+        applied: result.applied,
+        error: result.error,
+        appliedInEditor: result.appliedInEditor || undefined,
+      });
+      return accepted ? describePatchOutcome(result, resolved) : `用户拒绝了修改 ${resolved}`;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       ctx.notify(EVENTS.Error, { sessionId, code: (e as { code?: number }).code, message: msg });
