@@ -13,6 +13,7 @@ import {
   readFileRange,
   readTextFile,
   resolveTarget,
+  sliceLines,
   tryReadFile,
   writeTextFile,
 } from './tools';
@@ -88,6 +89,45 @@ describe('只读/写入工具', () => {
   it('越界写入/读取抛 PathError', () => {
     expect(() => writeTextFile(root, [], path.join(root, '..', 'x'), 'y')).toThrow();
     expect(() => readTextFile(root, [], path.join(root, '..', 'x'))).toThrow();
+  });
+});
+
+describe('行号范围精读（sliceLines / readFileRange）', () => {
+  const lines = ['L1', 'L2', 'L3', 'L4', 'L5'];
+
+  it('sliceLines：缺省返回全文，行号前缀为 1-based', () => {
+    const r = sliceLines(lines);
+    expect(r.startLine).toBe(1);
+    expect(r.endLine).toBe(5);
+    expect(r.totalLines).toBe(5);
+    expect(r.content).toBe('1| L1\n2| L2\n3| L3\n4| L4\n5| L5');
+  });
+
+  it('sliceLines：startLine/endLine 为 1-based 且含端点', () => {
+    const r = sliceLines(lines, { startLine: 2, endLine: 4 });
+    expect(r.startLine).toBe(2);
+    expect(r.endLine).toBe(4);
+    expect(r.totalLines).toBe(5);
+    expect(r.content).toBe('2| L2\n3| L3\n4| L4');
+  });
+
+  it('sliceLines：非法/越界行号被钳制，单次行数受 maxLines 限制', () => {
+    expect(sliceLines(lines, { startLine: 0 }).startLine).toBe(1);
+    const beyond = sliceLines(lines, { startLine: 4, endLine: 999 });
+    expect([beyond.startLine, beyond.endLine]).toEqual([4, 5]);
+    expect(sliceLines(lines, { maxLines: 2 }).endLine).toBe(2);
+    // 区间倒置时退化为只返回 start 所在的一行，而不是空串
+    const inverted = sliceLines(lines, { startLine: 5, endLine: 2 });
+    expect([inverted.startLine, inverted.endLine]).toEqual([5, 5]);
+    expect(inverted.content).toBe('5| L5');
+  });
+
+  it('readFileRange：磁盘直读与对同一文本 sliceLines 等价', () => {
+    const target = path.join(root, 'range.txt');
+    fs.writeFileSync(target, lines.join('\n'), 'utf8');
+    expect(readFileRange(root, [], target, { startLine: 2, endLine: 3 })).toEqual(
+      sliceLines(lines, { startLine: 2, endLine: 3 })
+    );
   });
 });
 

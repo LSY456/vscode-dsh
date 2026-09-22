@@ -91,18 +91,16 @@ function clampLine(n: number, totalLines: number): number {
 }
 
 /**
- * 读取文件的指定行号范围（1-based 含），返回带行号的内容，供 grep 定位后精读。
- * 单次最多 maxLines 行（缺省 200）；二进制 / 超大 / 越界走 readLines 与 resolveTarget 护栏。
+ * 对**已拆好的行数组**做行号范围切片（1-based 含），返回带行号的内容。
+ *
+ * 范围读取的唯一实现：`readFileRange`（磁盘直读）与 realAgent 的「脏文档优先」通路
+ * （拿到的是编辑器缓冲区内容，可能尚未落盘）共用同一套钳制 / 截断语义，
+ * 避免两条通路对 startLine / endLine 的解释发生漂移。
  */
-export function readFileRange(
-  root: string,
-  allowedDirs: string[],
-  filePath: string,
+export function sliceLines(
+  lines: string[],
   opts: { startLine?: number; endLine?: number; maxLines?: number } = {}
 ): FileRangeResult {
-  const resolved = resolveTarget(root, allowedDirs, filePath);
-  const lines = readLines(resolved, MAX_RANGE_FILE_BYTES);
-  if (lines === null) throw new Error('无法读取文件内容（二进制或超大）');
   const totalLines = lines.length;
   const max = opts.maxLines ?? DEFAULT_RANGE_LINES;
   const start = clampLine(opts.startLine ?? 1, totalLines);
@@ -115,6 +113,25 @@ export function readFileRange(
     .map((text, i) => `${start + i}| ${text}`)
     .join('\n');
   return { content, startLine: start, endLine: end, totalLines };
+}
+
+/**
+ * 读取文件的指定行号范围（1-based 含），返回带行号的内容，供 grep 定位后精读。
+ * 单次最多 maxLines 行（缺省 200）；二进制 / 超大 / 越界走 readLines 与 resolveTarget 护栏。
+ *
+ * 注意：本函数**只读磁盘**。目标文件在编辑器中有未保存改动时应改用
+ * `ctx.readFile(...)` 取有效内容后再交给 `sliceLines`，否则会读到过期内容（P0-1）。
+ */
+export function readFileRange(
+  root: string,
+  allowedDirs: string[],
+  filePath: string,
+  opts: { startLine?: number; endLine?: number; maxLines?: number } = {}
+): FileRangeResult {
+  const resolved = resolveTarget(root, allowedDirs, filePath);
+  const lines = readLines(resolved, MAX_RANGE_FILE_BYTES);
+  if (lines === null) throw new Error('无法读取文件内容（二进制或超大）');
+  return sliceLines(lines, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,8 +162,12 @@ const MAX_GREP_RESULTS = 200;
 const MAX_GLOB_RESULTS = 200;
 const MAX_GREP_LINE_LEN = 200;
 const MAX_GREP_FILE_BYTES = 1024 * 1024;
-/** 行号范围读取的独立大小上限（grep 之外，允许精读更大的单个文件）。 */
-const MAX_RANGE_FILE_BYTES = 16 * 1024 * 1024;
+/**
+ * 行号范围读取的独立大小上限（grep 之外，允许精读更大的单个文件）。
+ * 也用作 realAgent 在「脏文档优先」通路下取内容时的字节上限，
+ * 避免被常规 64KB 上限截断而取不到目标行。
+ */
+export const MAX_RANGE_FILE_BYTES = 16 * 1024 * 1024;
 
 /** `*` 通配 → 正则（匹配 basename：`*` 匹配任意字符序列，其余字符转义）。 */
 function globToRegex(pattern: string): RegExp {

@@ -166,6 +166,24 @@ describe('realAgent：P0-1 脏文档一致性', () => {
     expect(te.params.output).not.toContain('未保存');
   });
 
+  it('read_file 行号精读建立在有效内容上：脏文档下按缓冲区切片，不读磁盘旧内容', async () => {
+    const ctx = makeCtx();
+    ctx.overlay.set(file, 'B1\nB2\nB3\nB4\n');
+    const model = scripted([
+      { toolcall: { tool: 'read_file', input: { path: file, startLine: 2, endLine: 3 } } },
+      { content: 'ok' },
+    ]);
+    await runRealAgent(ctx, baseParams, { model });
+
+    const te = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
+    expect(te.params.ok).toBe(true);
+    expect(te.params.output).toContain('2| B2');
+    expect(te.params.output).toContain('3| B3');
+    expect(te.params.output).not.toContain('B1'); // 请求范围之外
+    expect(te.params.output).not.toContain('TODO'); // 磁盘里的过期内容不该出现
+    expect(te.params.output).toContain('未保存');
+  });
+
   it('apply_patch 基准取自缓冲区：diff 的 old 侧与用户所见一致', async () => {
     const ctx = makeCtx();
     ctx.overlay.set(file, 'TODO-from-buffer\n');

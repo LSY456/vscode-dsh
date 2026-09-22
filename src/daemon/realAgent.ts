@@ -26,7 +26,9 @@ import {
   GrepResult,
   grepFiles,
   listDirectory,
+  MAX_RANGE_FILE_BYTES,
   resolveTarget,
+  sliceLines,
 } from './tools';
 import { applyPatchDecision, describePatchOutcome } from './patchApply';
 import { makePatchEnv } from './agent';
@@ -306,24 +308,26 @@ async function dispatchTool(
           ? res.files.join('\n') + (res.truncated ? '\n…（结果过多已截断）' : '')
           : '(无匹配文件)';
       } else if (tool === 'read_file') {
-        const pathArg = String(input.path ?? '');
-        const startLine = typeof input.startLine === 'number' ? input.startLine : undefined;
-        const endLine = typeof input.endLine === 'number' ? input.endLine : undefined;
-        if (startLine !== undefined || endLine !== undefined) {
-          const r = readFileRange(ctx.workspaceRoot, allowedDirs, pathArg, { startLine, endLine });
-          output = formatFileRange(pathArg, r);
-        } else {
-          const data = readTextFile(ctx.workspaceRoot, allowedDirs, pathArg, config.maxReadBytes ?? 64 * 1024);
-          output = data.content;
-        }
-      } else {
         // P0-1：脏文档优先——命中编辑器未保存缓冲区就返回缓冲区内容，未命中回落磁盘。
         // 若这里读磁盘而模型上下文里是缓冲区，模型会基于"它以为的最新内容"推理、却拿到旧内容。
+        // 行号精读（startLine/endLine）同样建立在「有效内容」之上：先取覆盖层优先的文本再切片，
+        // 否则 dirty 时 grep 定位到的行号会指向磁盘上的过期内容。
         const target = String(input.path ?? '');
-        const content = await ctx.readFile(target, config.maxReadBytes ?? 64 * 1024);
+        const startLine = typeof input.startLine === 'number' ? input.startLine : undefined;
+        const endLine = typeof input.endLine === 'number' ? input.endLine : undefined;
+        const wantRange = startLine !== undefined || endLine !== undefined;
+        const content = await ctx.readFile(
+          target,
+          wantRange ? MAX_RANGE_FILE_BYTES : config.maxReadBytes ?? 64 * 1024
+        );
         if (content === undefined) throw new Error('无法读取：路径越界或文件不存在');
-        output = content;
+        output = wantRange
+          ? formatFileRange(target, sliceLines(content.split('\n'), { startLine, endLine }))
+          : content;
         if (ctx.isDirty?.(target)) output += '\n\n（注：以上为该文件在编辑器中的未保存内容）';
+      } else {
+        // 外层条件已限定为四种只读工具之一，正常不可达；保留以满足穷尽性检查。
+        throw new Error(`未知只读工具：${tool}`);
       }
       ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: true, output, durationMs: Date.now() - start });
       trajectory('tool', `${tool} 完成`);
