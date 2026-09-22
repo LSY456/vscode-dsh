@@ -42,6 +42,7 @@ import { captureContext } from './contextCapture';
 import { ConfigAccessor } from './configAccessor';
 import { DaemonManager } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
+import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
 import { FileMemento, SessionHistoryStore, SessionSummary } from './sessionHistory';
 
@@ -117,7 +118,9 @@ export class WebviewPanelHost {
     private readonly context: vscode.ExtensionContext,
     private readonly daemon: DaemonManager,
     private readonly diff: DshDiffManager,
-    private readonly configAccessor: ConfigAccessor
+    private readonly configAccessor: ConfigAccessor,
+    /** P0-1：发消息前冲刷脏文档快照，确保 daemon 看到的是此刻的缓冲区 */
+    private readonly dirty?: DirtyTracker
   ) {
     this.history = new SessionHistoryStore(new FileMemento(this.resolveHistoryFile()));
 
@@ -495,6 +498,9 @@ export class WebviewPanelHost {
       });
       const sessionId = this.daemon.getSessionId();
       if (sessionId) this.history.appendUser(sessionId, prompt);
+      // P0-1：把"此刻的未保存缓冲区"推给 daemon，再发消息——否则 Agent 读到的磁盘内容
+      // 可能落后于用户刚刚敲下的改动（去抖窗口内尚未同步）。
+      await this.dirty?.syncNow();
       await this.daemon.client.request(METHODS.SessionSend, { sessionId, prompt, attachments });
     } catch (err) {
       void vscode.window.showErrorMessage(

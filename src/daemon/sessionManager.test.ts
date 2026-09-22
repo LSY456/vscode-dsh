@@ -199,6 +199,39 @@ describe('审批强校验（P1.1）', () => {
     s.respondPatch('pt3', false, '拒绝时忽略的内容');
     expect(s.getPatchContent('pt3')).toBeUndefined();
   });
+
+  it('P0-1 应用到编辑器：accept 带 applyInEditor 才置位（agent 据此跳过写盘）', () => {
+    const s = new Session('s1', '/ws');
+
+    // 默认（未带标记）：daemon 仍需自行落盘
+    s.registerPatch(makePatchParams('p1'));
+    s.respondPatch('p1', true);
+    expect(s.getPatchApplyInEditor('p1')).toBe(false);
+
+    // 带标记：落地通路交给编辑器
+    s.end();
+    s.registerPatch(makePatchParams('p2'));
+    s.respondPatch('p2', true, undefined, true);
+    expect(s.getPatchApplyInEditor('p2')).toBe(true);
+
+    // 拒绝时标记无意义，不应置位
+    s.end();
+    s.registerPatch(makePatchParams('p3'));
+    s.respondPatch('p3', false, undefined, true);
+    expect(s.getPatchApplyInEditor('p3')).toBe(false);
+
+    // 未知 patchId 不置位
+    expect(s.getPatchApplyInEditor('nope')).toBe(false);
+  });
+
+  it('P0-1 end() 清空"应用到编辑器"标记，不泄漏到下一轮', () => {
+    const s = new Session('s1', '/ws');
+    s.registerPatch(makePatchParams('p1'));
+    s.respondPatch('p1', true, undefined, true);
+    expect(s.getPatchApplyInEditor('p1')).toBe(true);
+    s.end();
+    expect(s.getPatchApplyInEditor('p1')).toBe(false);
+  });
 });
 
 describe('事件缓冲与续跑（P1.2）', () => {

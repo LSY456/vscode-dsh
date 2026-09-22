@@ -74,6 +74,8 @@ export class Session {
   private patchSnapshot: PatchSnapshot | null = null;
   /** P2 编辑后应用：patchId -> 用户编辑后的完整内容（accept 时带回，写盘覆盖 newContent） */
   private patchContent = new Map<string, string>();
+  /** P0-1：已由客户端应用到编辑器缓冲区的 patchId（agent 侧须跳过写盘） */
+  private patchApplyInEditor = new Set<string>();
   /** P0-3 取消订阅者：Agent 注册的在途请求中断回调（如 abort 在途 fetch） */
   private cancelHooks = new Set<() => void>();
 
@@ -183,6 +185,7 @@ export class Session {
     this.approvalSnapshot = null;
     this.patchSnapshot = null;
     this.patchContent.clear();
+    this.patchApplyInEditor.clear();
     this.rejectAllPending();
     // 会话收尾：清空取消订阅，避免上一轮的钩子泄漏到下一轮
     this.cancelHooks.clear();
@@ -234,7 +237,12 @@ export class Session {
     return this.approvalSnapshot ? { ...this.approvalSnapshot.input } : null;
   }
 
-  respondPatch(patchId: string, accept: boolean, content?: string): 'ok' | 'expired' | 'not_found' {
+  respondPatch(
+    patchId: string,
+    accept: boolean,
+    content?: string,
+    applyInEditor?: boolean
+  ): 'ok' | 'expired' | 'not_found' {
     const r = this.respondPending('patch', patchId, accept);
     if (r === 'ok') {
       // P2 编辑后应用：accept 时暂存用户编辑后内容，供 agent 写盘读取
@@ -242,6 +250,12 @@ export class Session {
         this.patchContent.set(patchId, content);
       } else {
         this.patchContent.delete(patchId);
+      }
+      // P0-1：客户端已把改动应用到编辑器缓冲区，agent 侧据此跳过写盘
+      if (accept && applyInEditor) {
+        this.patchApplyInEditor.add(patchId);
+      } else {
+        this.patchApplyInEditor.delete(patchId);
       }
       this.patchSnapshot = null;
       this.state = 'running';
@@ -252,6 +266,14 @@ export class Session {
   /** P2 编辑后应用：agent 写盘前读取用户编辑后的内容（无则返回 undefined，用原始 newContent）。 */
   getPatchContent(patchId: string): string | undefined {
     return this.patchContent.get(patchId);
+  }
+
+  /**
+   * P0-1：本补丁是否已由客户端应用到编辑器缓冲区（accept 时带 `applyInEditor`）。
+   * 为 true 时 agent 不得再写磁盘——写盘会与缓冲区内容分叉。
+   */
+  getPatchApplyInEditor(patchId: string): boolean {
+    return this.patchApplyInEditor.has(patchId);
   }
 
   // ------------------------------------------------------------------ 内部

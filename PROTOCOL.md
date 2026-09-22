@@ -45,10 +45,23 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
 | `session.resume` | `{ sessionId }` | `{ sessionId, state, pendingApproval?, pendingPatch? }` |
 | `approval.respond` | `{ sessionId, approvalId, approved, note? }` | `{ ok }` |
-| `file.patch.respond` | `{ sessionId, patchId, accept }` | `{ ok }` |
-| `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size }` |
+| `file.patch.respond` | `{ sessionId, patchId, accept, content?, applyInEditor? }` | `{ ok }` |
+| `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size, dirty? }` |
+| `workspace.syncDirty` | `{ files: [{ path, content? }] }` | `{ ok, count }` |
 | `ping` | `{}` | `{ pong }` |
 | `shutdown` | `{}` | `{ bye }` |
+
+### 脏文档同步（`workspace.syncDirty`，P0-1）
+
+daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁盘；用户正在编辑未保存时**磁盘内容是过期的**。
+客户端把「当前全部脏文档」推给 daemon，daemon 以**连接**为单位维护覆盖层，读取一律覆盖层优先。
+
+- 语义是**全量快照**：每次调用代表"此刻的全部脏文档"，daemon 整体替换，不做增量合并（省去删除/重命名的对账）。
+- `content` **可缺省**：超大文件只上报「该文件是脏的」。此时读取回落磁盘，但写入路径仍一律避开磁盘。
+- 覆盖层**按连接隔离**：多个窗口复用同一 daemon 时互不污染（与 `capabilities` 同理）。
+- 生效范围：`file.read` 返回 `dirty: true`；Agent 的 `read_file` 与 `apply_patch` 基准（diff 的 old 侧）同源。
+- 落地影响：目标是脏文档时补丁**不写磁盘**——客户端改走编辑器缓冲区并回执 `applyInEditor: true`；
+  未带该标记则 daemon 拒绝落盘（安全默认），`file.patch.result` 返回 `applied: false` + 原因。
 
 ### `model`（真实模型接入）
 

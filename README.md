@@ -95,7 +95,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test               # 单元测试（vitest，274 用例）
+npm test               # 单元测试（vitest，302 用例）
 npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 
 # 4. 配置真实模型（可选）：打开面板 → 设置，填写 API Key（SecretStorage 安全存储）与模型名；
@@ -203,7 +203,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，274 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，302 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
   Webview Markdown 渲染与净化（XSS 安全）。
@@ -253,7 +253,10 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
       Esc/Enter 键盘操作、历史与设置改为覆盖式面板、回答一键复制
 - [x] **E1-E4 可用性补齐（P0）**：活动栏常驻视图入口、新建 / 切回历史会话（daemon 重放续聊）、
       补丁 Diff 标题栏的应用 / 编辑后应用 / 拒绝按钮、挂起项超时可配（`dsh.approval.ttlSeconds`）
-- [x] **P0 工程质量**：vitest 单元测试（274 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **P0 一致性加固**：脏文档一致性（未保存缓冲区优先读取 + 补丁改走编辑器，避免覆盖用户编辑）、
+      补丁乐观并发校验（防静默覆盖并发修改）、取消可中断在途模型请求 + 模型请求空闲超时、
+      能力/运行时配置与脏文档覆盖层下沉到**连接**作用域（多窗口复用 daemon 互不污染）
+- [x] **P0 工程质量**：vitest 单元测试（302 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
 - [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
