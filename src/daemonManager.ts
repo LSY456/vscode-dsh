@@ -35,6 +35,13 @@ export interface DaemonManagerOptions {
   configAccessor?: ConfigAccessor;
 }
 
+/** 握手后 daemon 回报的运行信息（UI 用：当前是 mock 还是真实模型）。 */
+export interface AgentInfo {
+  agent?: 'mock' | 'real';
+  model?: string;
+  daemonVersion?: string;
+}
+
 const PORT_FILE_REL = path.join('.dsh', 'daemon.json');
 
 export class DaemonManager {
@@ -42,6 +49,7 @@ export class DaemonManager {
   private status: DaemonStatus = 'stopped';
   private detail = '未启动';
   private statusListeners: ((info: StatusInfo) => void)[] = [];
+  private resumeListeners: ((sessionId: string) => void)[] = [];
 
   private child: cp.ChildProcess | null = null;
   private token = '';
@@ -51,6 +59,7 @@ export class DaemonManager {
   private readonly opts: DaemonManagerOptions;
 
   private sessionId = '';
+  private agentInfo: AgentInfo = {};
 
   constructor(opts: DaemonManagerOptions) {
     this.opts = opts;
@@ -70,12 +79,25 @@ export class DaemonManager {
     this.statusListeners.push(listener);
   }
 
+  /**
+   * 订阅「即将重放会话事件」时机（断线重连时）。
+   * 重放会把该会话的历史事件重新投递一遍，UI 需先清空、历史存储需抑制重复落库。
+   */
+  onBeforeResume(listener: (sessionId: string) => void): void {
+    this.resumeListeners.push(listener);
+  }
+
   getStatus(): StatusInfo {
     return { status: this.status, detail: this.detail };
   }
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /** 当前 daemon 的 Agent 实现信息（未握手成功时为空对象）。 */
+  getAgentInfo(): AgentInfo {
+    return this.agentInfo;
   }
 
   setSessionId(id: string): void {
@@ -155,10 +177,14 @@ export class DaemonManager {
           apiKey,
           agent: 'auto',
           provider: cfg.get<string>('model.provider', 'auto') as 'openai' | 'anthropic' | 'auto',
+          // P0-3 空闲超时：秒 -> 毫秒；0 透传为"关闭"，daemon 侧据此不再兜底中断
+          idleTimeoutMs: Math.round(cfg.get<number>('model.idleTimeoutSeconds', 60) * 1000),
         },
         capabilities: {
           allowedTools: cfg.get<string[]>('capabilities.allowedTools', []),
           maxConcurrency: cfg.get<number>('capabilities.maxConcurrency', 0),
+          // 挂起项（审批 / 补丁）超时：秒 -> 毫秒；daemon 端再做区间钳制
+          approvalTtlMs: Math.round(cfg.get<number>('approval.ttlSeconds', 60) * 1000),
         },
         client: {
           name: 'vscode-dsh',
@@ -170,6 +196,7 @@ export class DaemonManager {
       const prevSessionId = this.sessionId;
       if (prevSessionId) {
         try {
+          for (const l of this.resumeListeners) l(prevSessionId);
           const resumed = await this.client.request<SessionResumeResult>(METHODS.SessionResume, {
             sessionId: prevSessionId,
           });
@@ -190,6 +217,13 @@ export class DaemonManager {
       }
 
       this.reconnectAttempt = 0;
+
+      // UI 提示用：本次生效的 Agent 实现与模型名（mock / real）
+      this.agentInfo = {
+        agent: result.agent,
+        model: cfg.get<string>('model.model', '') || undefined,
+        daemonVersion: result.daemonVersion,
+      };
 
       // 陈旧 daemon 防护：升级装新版扩展后，工作区里可能还有旧构建的 daemon 进程存活，
       // auto 探测会直接复用（真实事故：修复后的逻辑因复用旧进程而不生效）。
