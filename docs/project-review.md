@@ -4,6 +4,14 @@
 > 评估时间：2026-09-21
 > 评估方法：全量源码阅读（`shared/` `src/` `media/` `scripts/` `.github/` 共 40+ 文件）+ 本地实跑 `npm run typecheck` 与 `npm test`
 > 结论口径：所有"事实"均给出文件与行号；带【判断】标记的为分析性推论，建议复核后再决策。
+>
+> **❗ 阅读前必看（2026-09-22 追记）**：本报告的 **战略判断 1「真实 Agent 内核仍缺席」已被复核推翻**。
+> 仓库里其实有完整内核 `src/daemon/realAgent.ts`（原生 function calling、工具沙箱、审批门控、
+> Diff 审查、token 预算、可中断请求），`resolveAgentMode()` 在 `auto` 下**配好 Key 就走它**；
+> 真正缺的是**仓库外的 Cordis 版 daemon**。该结论与据此的取舍见
+> [docs/strategy-agent-kernel.md](strategy-agent-kernel.md)（已采纳方案 B+）。
+> 本报告中的**实测数字**（用例数、耗时）是评估当日的快照，未随代码演进更新；
+> 涉及定位/路线的结论请以 strategy 文档为准，涉及具体缺口的结论仍然有效。
 
 ---
 
@@ -121,7 +129,7 @@ Webview ──postMessage──> WebviewPanelHost ──JSON-RPC/WS──> Daemo
 
 ```
 npm run typecheck  → 通过，零错误
-npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 27.57s
+npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 27.57s（2026-09-21 快照；截至 2026-09-22 为 21 文件 / 317 用例）
 ```
 
 - daemon 侧关键模块**全部可单测**（`paths/tools/model/toolcall/sessionManager/trust/sandbox/trajectoryStore/realAgent`），且 `vitest run --pool=threads` 并行。
@@ -290,7 +298,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | 项目 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型检查 | `npm run typecheck` | 通过，零错误 |
-| 单元测试 | `npm test` | 18 文件 / **244 用例** 全部通过，27.57s |
+| 单元测试 | `npm test` | 18 文件 / **244 用例** 全部通过，27.57s（评估日快照；现为 21 文件 / 317 用例） |
 | 最慢用例组 | `src/daemon/agent.test.ts` | 13 用例 / **14.3s**（依赖真实 sleep） |
 | 运行时 | node v22.22.2 / npm 10.9.7 | `engines.vscode ^1.85.0`，CI 用 node 20，CONTRIBUTING 写 >=18 —— 本地 22 未测 |
 | 构建产物 | `out/extension.js`、`out/daemon/index.js` | 均已存在且新鲜 |
@@ -300,7 +308,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 
 ## 8. 结语
 
-这个项目的**架构品味明显高于它的产品完成度**。它把"Agent 与编辑器解耦"、"改动必须人审"、"上下文自动捕获"这三件正确的事做成了骨架，并且安全与工程纪律（canonical 护栏、默认拒绝、SecretStorage、buildId 防陈旧、244 个用例）都达到了可交付水平。
+这个项目的**架构品味明显高于它的产品完成度**。它把"Agent 与编辑器解耦"、"改动必须人审"、"上下文自动捕获"这三件正确的事做成了骨架，并且安全与工程纪律（canonical 护栏、默认拒绝、SecretStorage、buildId 防陈旧，评估当日 244 个用例、现已增至 317）都达到了可交付水平。
 
 真正的短板不在代码质量，而在两处：**一是"真实 Agent 内核"仍缺席，用户拿到的实际是模拟 Agent；二是有几条会把用户的代码改坏的正确性通路（脏文档、无乐观锁）没被堵住。**
 

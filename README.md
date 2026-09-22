@@ -1,16 +1,20 @@
-# vscode-dsh — 把 DeepSeek Harness 变成你的 VSCode 本地 Agent 引擎
+# vscode-dsh — 开箱可用的 VSCode 本地 Agent（自带内核，协议可插拔）
 
-**vscode-dsh** 是一个将 **DeepSeek Harness（dsh）** 接入 VSCode 的插件：dsh 作为底层的
-**Agent Daemon 运行时**（基于 Cordis 元框架），VSCode 插件作为**上下文捕获器与用户交互面板**，
-二者通过双向事件流（WebSocket / JSON-RPC）解耦通信。
+**vscode-dsh** 是一个**自带 Agent 内核、装上就能用**的 VSCode 编程助手。模型路由、工具沙箱、
+会话状态全部跑在一个独立的本地 **daemon 进程**里，编辑器侧只负责"上下文捕获 + 交互面板"，
+两者通过 **JSON-RPC 2.0 over WebSocket** 解耦通信。
 
-本仓库是一个**完整可运行**的插件工程，daemon 内置两种 Agent 实现：
+它同时存在于三个层次，从"直接用"到"自己接内核"：
 
-- **mock**：关键字驱动的模拟循环，无需真实模型即可端到端演示全部流程（协议/审批/补丁/续跑）。
-- **real**：配置 `dsh.apiKey` 后自动启用，经 OpenAI 兼容端点（DeepSeek 等）调用真实模型，
-  配合只读/写入/高危命令三类真实工具与轨迹持久化。
+| 层次 | 是什么 | 谁需要 |
+| --- | --- | --- |
+| **1 · 开箱可用的本地 Agent** | 仓库内置**完整 Agent 内核**（`src/daemon/realAgent.ts`）：原生 function calling + fenced 兜底解析、工具沙箱、审批门控、原生 Diff 审查、上下文 token 预算、可中断请求 + 空闲超时、脏文档一致性。**配好模型 Key 即用**，不依赖任何外部组件 | 想直接拿来写代码 |
+| **2 · 开放协议 + 参考实现** | 协议契约（[PROTOCOL.md](PROTOCOL.md)）+ **两个可运行实现**：本仓库的 Node daemon，以及一个换语言的 [Python 参考 daemon](examples/python-daemon/dsh_daemon.py)（仅标准库、手写 WebSocket）。第三方内核实现同一协议即可接入（`dsh.daemon.mode=external` + `dsh.daemon.command`） | 想换内核 / 接自研 Agent |
+| **3 · mock agent** | 关键字驱动的模拟循环，**仅用于测试与离线演示**：不接真实模型也能端到端跑通协议、审批、补丁、续跑全流程 | 读代码 / 跑测试 / 断网演示 |
 
-真实 daemon（Cordis 动态插件版）只需实现同一协议即可无缝替换。
+`auto`（缺省）决定走哪条：**配了模型 Key 就走层次 1 的真实内核**，否则回落到层次 3 的 mock。
+回落不是静默的——未配 Key 时面板顶部会出现醒目的**「演示模式」横幅**并给出配置入口，
+不会让你把模拟回复当成真实模型的回答。关键字语义见 [docs/mock-agent.md](docs/mock-agent.md)。
 
 > 📚 相关文档：[协议规范](PROTOCOL.md) · [变更日志](CHANGELOG.md) · [贡献指南](CONTRIBUTING.md)
 
@@ -20,11 +24,11 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 🧠 **Agent 独立成 daemon** | 模型路由、工具调度、会话状态全部下沉到独立进程，与编辑器解耦；长任务不再拖垮编辑器，会话可跨窗口存活，同一 Agent 内核可复用于 CLI / Web / 其他 IDE |
+| 🧠 **Agent 独立成 daemon** | 模型路由、工具调度、会话状态全部下沉到独立进程，与编辑器解耦；长任务不再拖垮编辑器，同一 Agent 内核可复用于 CLI / Web / 其他 IDE。注意：daemon 由扩展宿主 `spawn`、并在 `deactivate()` 时被回收，**它不跨窗口存活**；但同一工作区的多个窗口可复用同一个 daemon（能力/脏文档覆盖层按连接隔离，互不污染） |
 | 📎 **上下文不失真** | 发送 Prompt 时自动打包活动文件全文、高亮选区（带行号）、编译诊断、git status 为结构化附件，不再需要手动复制粘贴、不再丢失编辑现场 |
 | 🛡️ **改动可控** | 高危工具调用必须过**审批卡**（Human-in-the-Loop）；文件修改必须先看**原生 Diff 并排视图**再决定落盘——把"AI 盲改"变成"AI 提议、人拍板" |
 | 🔒 **安全边界干净** | 工具在独立 daemon 进程执行，仅监听 127.0.0.1 随机端口，WS 握手必须带一次性 Bearer token、拒绝带浏览器 Origin 的连接 |
-| 🔌 **协议化可插拔** | 一份明确 JSON-RPC 契约（方法/事件见 [PROTOCOL.md](PROTOCOL.md)），前端可换（VSCode / JetBrains / CLI），后端可换（参考 daemon / 真实模型 daemon / Cordis 插件），只依赖协议、不依赖实现 |
+| 🔌 **协议化可插拔** | 一份明确 JSON-RPC 契约（方法/事件见 [PROTOCOL.md](PROTOCOL.md)），前端可换（VSCode / JetBrains / CLI），后端可换（内置内核 / 第三方 daemon / 自研 Agent）——而且**有两个可运行的实现**（Node + [Python](examples/python-daemon/dsh_daemon.py)）来证明它，不是纸面承诺 |
 | 📜 **全程可追溯** | daemon 内部轨迹以 `trajectory.record` 事件流投影到 UI 的"执行迹线"面板，步骤级审计、回放与失败定位 |
 
 ## 它解决什么痛点
@@ -56,7 +60,7 @@
                └─────────────┬─────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────┐
-│          dsh Agent Daemon (Cordis / 参考实现)           │
+│          dsh Agent Daemon（内置内核 / 第三方实现）       │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
 │  │ Model Adapter│  │ Tool Sandbox │  │ Trajectory   │   │
 │  └──────────────┘  └──────────────┘  └──────────────┘   │
@@ -95,8 +99,10 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test               # 单元测试（vitest，302 用例）
-npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
+npm test                    # 单元测试（vitest，317 用例）
+npm run smoke               # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
+npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemon 跑通同一份协议
+                            #（缺 Python 3 时优雅跳过；`npm run smoke:protocol -- --require` 则判失败）
 
 # 4. 配置真实模型（可选）：打开面板 → 设置，填写 API Key（SecretStorage 安全存储）与模型名；
 #    或直接配置 dsh.model.model / dsh.model.baseURL（旧 dsh.apiKey 明文配置会自动回迁到
@@ -113,10 +119,9 @@ npm run smoke          # 端到端冒烟：安全握手/补丁/审批/取消/并
 - 需要大屏审阅时用 **`dsh: 在编辑器列打开 Agent`**，侧边栏与编辑器列两个视图共享同一会话状态。
 - 编辑器选中代码后右键 **`dsh: 将选中代码发送给 Agent`**。
 - 补丁 Diff 的**标题栏**带 `应用 / 编辑后应用 / 拒绝` 按钮，不必回面板点。
-- 在面板输入：
-  - `请修改文件 xxx 中的 TODO（write edit）` → 自动打开原生 Diff 并排视图，可应用/拒绝；
-  - `危险操作：请运行 bash rm -rf（danger）` → 弹出工具审批卡片；
-  - `slow 输出测试（slow）` → 可点"取消"验证流式中断。
+- 在面板输入自然语言即可，例如 `解释当前文件的关键逻辑` / `请修改当前文件中的 TODO`。
+  配了模型 Key 时由真实内核处理；**未配 Key 时面板顶部会出现「演示模式」横幅**，
+  此时落到 mock agent，靠关键字触发特定分支（关键字表见 [docs/mock-agent.md](docs/mock-agent.md)）。
 - 命令 `dsh: 重启 Daemon` / `dsh: 查看 Daemon 状态` / `dsh: 调试 - 打印捕获的上下文`。
 
 ## 配置项（settings.json）
@@ -173,9 +178,15 @@ vscode-dsh/
 │       └── trajectoryStore.ts # 轨迹持久化（.dsh/trajectory/*.jsonl）
 ├── media/                  # Webview 静态资源（HTML/CSS/JS）
 ├── resources/              # 活动栏图标等随包资源（dsh-activity.svg）
-├── scripts/smoke.js        # 端到端冒烟测试（无 VSCode 依赖）
+├── examples/
+│   └── python-daemon/      # ★ 协议第二实现：Python 3 + 仅标准库，手写 WebSocket 服务端
+├── scripts/
+│   ├── smoke.js            # 端到端冒烟测试（无 VSCode 依赖）
+│   ├── smokeProtocol.js    # 协议「第二实现」冒烟：驱动上面的 Python daemon
+│   ├── smokeReal.js        # 真实 endpoint 连通冒烟（可选，需 apiKey，不参与 CI）
+│   └── runIntegrationTests.js  # @vscode/test-electron 集成测试入口
 ├── *.test.ts               # vitest 单元测试（协议/路径/状态机/Agent/模型/工具/轨迹）
-├── .github/workflows/ci.yml # CI：typecheck/build/unit/smoke + VSIX 构件
+├── .github/workflows/ci.yml # CI：typecheck/build/unit/smoke/协议第二实现 + VSIX 构件
 ├── PROTOCOL.md             # 协议规范
 ├── CHANGELOG.md            # 变更日志
 ├── CONTRIBUTING.md         # 贡献指南
@@ -203,20 +214,24 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，302 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，317 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
-  Webview Markdown 渲染与净化（XSS 安全）。
+  Webview Markdown 渲染与净化（XSS 安全）、以及面板 DOM 契约（jsdom 载入真实 `media/webview.html`）。
 - **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
   `file.read` 越界拒绝、真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘），
   以及真实 `bash_execute`（审批 → spawn 执行 → cwd 约束校验）。
 - **集成测试**：`npm run test:integration` 用 `@vscode/test-electron` 启动真实 VSCode Extension Host，
   覆盖扩展宿主层 ↔ daemon 的完整闭环（T1 激活连接 / T2 补丁 / T3 审批 / T4 路径护栏 / T5 编辑后应用）。
+- **协议第二实现冒烟**：`npm run smoke:protocol` 拉起 `examples/python-daemon`（Python 3 + 仅标准库、
+  手写 WebSocket）并按协议走完 `initialize → session.create → session.send（含 read_file 工具）→ shutdown`，
+  同时断言错 token / 带 `Origin` 的握手被拒、路径护栏生效、错误码正确。它是"后端可换"的**可执行证据**，
+  也是任何第三方实现照着跑通即算兼容的**规格样本**（CI 用 `--require` 跑，缺 Python 判失败）。
 - **真实连通冒烟**：`npm run smoke:real`（可选，需真实 apiKey，不参与 CI）用真实 endpoint 的 SSE 流
   验证 OpenAI 兼容与 Anthropic 两条适配链解析出非空正文且流式增量触发；缺 key 诚实跳过（退出 0）。
 - **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 security（npm audit + osv-scanner）、
-  typecheck → build → unit → smoke（win/ubuntu）、integration（vscode extension host，ubuntu）；
-  main 分支额外产出 VSIX 构件。
+  typecheck → build → unit → smoke → 协议第二实现（win/ubuntu，显式 setup-python）、
+  integration（vscode extension host，ubuntu）；main 分支额外产出 VSIX 构件。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
 - **打包**：`npm run package` 产出约 389KB 的 VSIX（`dist/`，35 文件）。
 
@@ -226,21 +241,24 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
 `step / kind(reasoning|message|tool|patch|approval|system) / detail / ts`；UI 渲染为可折叠的
 "执行迹线"面板，用于审计、回放与失败定位。详见 [PROTOCOL.md §6](PROTOCOL.md#6-迹线trajectory数据映射)。
 
-## 接入真实 dsh daemon
+## 接入自己的 Agent 内核
 
-daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
+扩展侧只依赖 [PROTOCOL.md](PROTOCOL.md) 里的契约，不依赖任何实现。三种姿势，按侵入程度递增：
 
-1. **mock**（缺省，无 apiKey）：关键字驱动的模拟循环，用于演示协议与冒烟测试。
-2. **real**（配置 `dsh.apiKey` 后自动启用）：经 `OpenAICompatibleModel`（DeepSeek/OpenAI 兼容）
-   调用真实模型，配合只读（`read_file`/`list_dir`）、写入（`write_file`/`apply_patch`，走 Diff 审查）
-   与高危命令（`bash_execute`，走审批 + 命令策略门控）三类真实工具。
+1. **什么都不做** —— 用内置内核：配好模型 Key 走 `realAgent`（层次 1），没配则落到 mock 并在面板
+   顶部显示「演示模式」横幅（层次 3）。
+2. **换一个 daemon 进程** —— 启动你自己的 daemon，实现 `DSH_DAEMON_PORT=<port>` 端口上报与同一协议，
+   然后二选一：
+   - `dsh.daemon.mode = external` + `dsh.daemon.port` / `dsh.daemon.token`
+   - `dsh.daemon.command`（模板，支持 `{portFile}` `{workspace}` `{token}` 占位符；auto 模式优先使用它）
 
-更进一步的接入方式：
+   最小可跑样例就是 [examples/python-daemon/dsh_daemon.py](examples/python-daemon/dsh_daemon.py)：
+   仅用标准库、WebSocket 服务端手写，`npm run smoke:protocol` 可以看到它被完整驱动一轮。
+3. **换一套前端栈** —— 协议与传输（JSON-RPC 2.0 over WebSocket）不绑定编辑器，同一个后端可给
+   CLI / 其他 IDE 复用。
 
-1. **外部进程**：启动真实 daemon 并实现 `DSH_DAEMON_PORT=` 输出与同一协议，配置
-   `dsh.daemon.command` 或 `dsh.daemon.mode = external` + `port/token`。
-2. **Cordis 动态插件**：在 dsh 宿主中以 Cordis 插件注册同名方法/事件（模型适配、工具沙箱、
-   轨迹存储），监听随机端口；扩展侧无需改动。协议细节以 `shared/protocol.ts` 与 `PROTOCOL.md` 为准。
+协议细节以 `shared/protocol.ts`（两端共享的类型与守卫）与 [PROTOCOL.md](PROTOCOL.md) 为准。
+第二实现能跑通，说明契约里没有夹带 Node 侧的实现细节。
 
 ## 路线图
 
@@ -256,7 +274,7 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - [x] **P0 一致性加固**：脏文档一致性（未保存缓冲区优先读取 + 补丁改走编辑器，避免覆盖用户编辑）、
       补丁乐观并发校验（防静默覆盖并发修改）、取消可中断在途模型请求 + 模型请求空闲超时、
       能力/运行时配置与脏文档覆盖层下沉到**连接**作用域（多窗口复用 daemon 互不污染）
-- [x] **P0 工程质量**：vitest 单元测试（302 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **P0 工程质量**：vitest 单元测试（317 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
 - [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
@@ -282,6 +300,12 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - [x] **P3.5+ 生产化**：命令执行沙箱（可插拔后端：Linux 检测到 bubblewrap 即启用命名空间隔离，
       其余平台应用层兜底 cwd 约束 + 环境最小化 + 超时进程树终止，降级原因显式告警）、模型多点位
       （OpenAI 兼容全家桶 + Anthropic Messages 适配，经 `dsh.model.provider` 选择）
+- [x] **B+ 定位收敛**：README 改为「三层定位」（自带内核开箱可用 / 开放协议 + 参考实现 / mock 仅测试夹具）；
+      消除未配 Key 时的**静默降级**（daemon 回报 `agentReason`，面板显示「演示模式」横幅 + 模式 chip + 一键配置）；
+      新增协议**第二实现** `examples/python-daemon`（Python 3 + 仅标准库）与 `npm run smoke:protocol`，
+      把"后端可换"从文档承诺变成可执行断言；mock 关键字教学移出主路径（见 [docs/mock-agent.md](docs/mock-agent.md)）
+- [x] **UI 缺陷修复**：`[hidden]` 属性被 `.sheet` / `.pending-bar` 自带的 `display: flex` 覆盖
+      （作者样式优先级高于 UA 样式表），导致覆盖式面板与待办条可能常显；补全局 `[hidden]` 兜底规则
 
 ### 待办
 - [ ] P4a：Remote-SSH / WSL / Containers 场景实测（核心链路已由 CI Linux 拓扑覆盖，待真实环境确认 drvfs 路径 / remote server 环境 / 容器网络等边界）
@@ -295,6 +319,10 @@ daemon 内置两种 Agent 实现，按 `dsh.apiKey` 自动切换：
 - 断线续跑（`resume` 继续进行中的对话）仍限同一 daemon 进程内；daemon 重启后已在进行的会话无法续跑，需新建会话（历史记录不受影响）。
 - Remote-SSH / WSL / Containers 场景尚未在真实环境实测；daemon 仍仅监听 127.0.0.1，跨主机访问需先做 TLS + 鉴权升级。
 - 会话历史外置到工作区 `.dsh/history.json`（跨 daemon 重启持久、换机随工作区迁移），仍按工作区分文件隔离。
+- **daemon 生命周期与窗口绑定**：daemon 由扩展宿主 `spawn`，在扩展 `deactivate()`（关闭该窗口的扩展宿主 /
+  退出 VSCode）时被回收，**不会跨窗口长期存活**。同一工作区的多个窗口可复用同一个 daemon（谁先拉起谁负责回收），
+  所有者退出后其他窗口会在下次需要时按 `auto` 重新拉起自己的 daemon；因此"关掉窗口再打开，未完成的会话"
+  不会自动续上（daemon 进程已重启），历史记录不受影响。
 
 ---
 

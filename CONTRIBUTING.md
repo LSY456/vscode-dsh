@@ -25,9 +25,11 @@ npm run check        # typecheck + build + 单元测试 + 端到端冒烟
 npm run package      # VSIX 打包验证（产物见 dist/）
 ```
 
-- 单元测试：`npm test`（vitest，302 用例）。
+- 单元测试：`npm test`（vitest；用例数会持续增长，**不在此处硬编码**，以实际输出为准）。
 - 集成测试：`npm run test:integration`（@vscode/test-electron，本机有 VSCode 时复用，否则下载 stable）。
 - 冒烟测试：`npm run smoke`（无 VSCode 依赖的真实协议闭环，win / linux 均可跑）。
+- 协议第二实现：`npm run smoke:protocol`（用 `examples/python-daemon` 驱动同一份协议，需 Python 3；
+  加了第三方依赖或改了协议字段时**必须**跑，它是"后端可换"的唯一证据）。
 
 CI（`.github/workflows/ci.yml`）会在 push / PR 时自动执行同一套门禁。
 

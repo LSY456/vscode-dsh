@@ -30,6 +30,18 @@
 - **E4 挂起项超时可配**：新增 `dsh.approval.ttlSeconds`（缺省 60，范围 10–3600），经
   `initialize.capabilities.approvalTtlMs` 下达；daemon 统一盖戳 `expiresAt`，审批与补丁卡都带倒计时，
   过期即按拒绝处理。Agent 侧不再硬编码 60s。
+- **协议第二实现（可插拔的可执行证据）**：新增 `examples/python-daemon/dsh_daemon.py`——
+  Python 3 + **仅标准库**（WebSocket 服务端手写，RFC 6455 子集），实现
+  `initialize` / `session.create` / `session.send` / `session.cancel` / `ping` / `shutdown`
+  与一个 `read_file` 工具。配套 `npm run smoke:protocol` 拉起它并按协议走完整轮对话
+  （18 项断言：端口上报、握手鉴权、事件时序、路径护栏、错误码、shutdown），
+  把"后端可换"从文档承诺变成 CI 可验的事实；CI 双平台以 `--require` 运行，**禁止静默跳过**。
+- **演示模式显式提示（消除静默降级）**：未配置模型 Key 时不再悄悄回落到 mock 关键字循环——
+  `initialize` 新增可选字段 `agentReason`（`no-api-key` / `forced-mock`），扩展侧经
+  `DaemonManager.onAgentInfo()` 在**每次握手成功后**推给面板；面板顶栏新增常驻**「演示模式」横幅**
+  （警示色 + 成因文案 + 「配置模型」直通设置面板），模式 chip 改中文并在 mock 时着警示色。
+  配好 Key 重启 daemon 后横幅自动撤下。同时把 mock 专属的关键字「咒语」入口从主路径移走
+  （真实模型下隐藏，关键字表见 `docs/mock-agent.md`）。
 
 ### 修复
 
@@ -81,6 +93,10 @@
   `WorkspaceEdit` 生效。现改为可写的 `FileSystemProvider`，Diff 右侧可正常编辑并应用。
 - **断线重连续跑与切回历史会重复落库 / 重复渲染**：daemon 重放事件缓冲时，扩展会再次把回答写进
   `.dsh/history.json` 并叠加渲染到面板；现在重放前先重置视图，且重放期间不回写历史。
+- **`[hidden]` 属性在覆盖式面板与待办条上失效**：`.sheet`（设置 / 历史面板）与 `.pending-bar`
+  自带 `display: flex`，而**作者样式里的 `display` 会覆盖 UA 样式表的 `[hidden]{display:none}`**
+  （同特异性下作者来源优先），导致这些元素即使带 `hidden` 也可能照常显示。已在样式表顶部补
+  全局兜底 `[hidden] { display: none !important; }` 并注明原因（新增元素不必再各自写 `[hidden]` 变体）。
 
 ## [0.4.0] - 2026-09-02
 
