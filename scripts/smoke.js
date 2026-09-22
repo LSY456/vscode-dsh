@@ -7,12 +7,15 @@
  *  - 安全握手：无 token / 带浏览器 Origin 均被拒绝
  *  - initialize 返回 sessionId 与能力声明（resume/fileRead）
  *  - 能力分级：allowedTools 为空时高危工具直接禁用（不发审批）
+ *  - 连接级能力隔离（P0-4）：同 daemon 两连接各自声明 allowedTools，互不污染
  *  - 补丁流程：file.patch.pending -> 接受 -> file.patch.result -> 磁盘已变更
  *  - 审批流程：approval.request -> 批准 -> tool.executed
  *  - 多会话并发：同一连接两个会话并行（不再 -32009）
  *  - 取消流程：slow 中 session.cancel -> session.ended(canceled)
  *  - 断线续跑：断开后 session.resume 重放事件并返回状态
  *  - file.read：工作区内可读 / 越界返回 -32012
+ *  - 脏文档一致性（P0-1）：未保存缓冲区优先读取（dirty=true）、覆盖层按连接隔离、
+ *    补丁落盘改走编辑器（applyInEditor）/ 脏文档未走编辑器时拒绝落盘
  *  - ping / shutdown
  *
  * 运行：node scripts/smoke.js（需先 npm run build）
@@ -230,6 +233,58 @@ async function main() {
   await connDisabled.rpc.waitFor((m) => m.method === 'session.ended', '禁用流程结束');
   connDisabled.ws.close();
 
+  // ---- 3b. 连接级能力隔离（P0-4 回归）：同一 daemon 上两个连接声明不同 allowedTools，
+  // 必须各按各的语义执行——旧实现里 capabilities 是服务实例级，后 initialize 的连接会
+  // 把先者的白名单整体冲掉，这里正是那处污染的可执行反例。
+  console.log('[smoke] 连接级能力隔离（P0-4）…');
+  const connStrict = await openSession(port, {
+    workspaceRoot: tmpDir,
+    capabilities: { allowedTools: ['read_file'] }, // 白名单：不含 bash_execute
+    client: { name: 'smoke-strict', version: '0.0.0' },
+  });
+  const connLoose = await openSession(port, {
+    workspaceRoot: tmpDir,
+    capabilities: { allowedTools: [] }, // 空数组 = 全部允许
+    client: { name: 'smoke-loose', version: '0.0.0' },
+  });
+
+  // 宽松连接**后**握手，若能力是实例级，此时严格连接的白名单已被置空
+  connStrict.rpc.resetEvents();
+  await connStrict.rpc.request('session.send', {
+    sessionId: connStrict.init.sessionId,
+    prompt: '危险操作：bash rm -rf build（danger）',
+  });
+  const strictTool = await connStrict.rpc.waitFor(
+    (m) => m.method === 'tool.executed' && m.params.tool === 'bash_execute',
+    '严格连接 tool.executed'
+  );
+  assert(strictTool.params.ok === false, 'P0-4：严格连接仍被禁用（未被宽松连接冲掉白名单）');
+  assert(
+    !connStrict.rpc.events.some((m) => m.method === 'approval.request'),
+    'P0-4：严格连接不发起审批'
+  );
+  await connStrict.rpc.waitFor((m) => m.method === 'session.ended', '严格连接流程结束');
+
+  // 同一时刻，宽松连接的同类请求应正常进入审批（证明两者互不影响、各自生效）
+  connLoose.rpc.resetEvents();
+  await connLoose.rpc.request('session.send', {
+    sessionId: connLoose.init.sessionId,
+    prompt: '危险操作：bash rm -rf build（danger）',
+  });
+  const looseApproval = await connLoose.rpc.waitFor(
+    (m) => m.method === 'approval.request',
+    '宽松连接 approval.request'
+  );
+  assert(looseApproval.params.tool === 'bash_execute', 'P0-4：宽松连接按全允许语义发起审批');
+  await connLoose.rpc.request('approval.respond', {
+    sessionId: connLoose.init.sessionId,
+    approvalId: looseApproval.params.approvalId,
+    approved: false,
+  });
+  await connLoose.rpc.waitFor((m) => m.method === 'session.ended', '宽松连接流程结束');
+  connStrict.ws.close();
+  connLoose.ws.close();
+
   // ---- 4. 主连接：默认能力
   console.log('[smoke] 握手…');
   const { rpc, ws, init } = await openSession(port, {
@@ -282,6 +337,9 @@ async function main() {
   const approval = await rpc.waitFor((m) => m.method === 'approval.request', 'approval.request');
   assert(approval.params.tool === 'bash_execute', '审批对象为 bash_execute');
   assert(approval.params.risk === 'high', '风险级别 high');
+  // 挂起项超时由 daemon 统一盖戳（TTL 可经 initialize.capabilities.approvalTtlMs 配置）
+  const ttl = approval.params.expiresAt - Date.now();
+  assert(ttl > 0 && ttl <= 61_000, `approval.request 应带 expiresAt（缺省 60s，实际 ${ttl}ms）`);
 
   await rpc.request('approval.respond', {
     sessionId,
@@ -372,6 +430,96 @@ async function main() {
     readRejected = err.code === -32012;
   }
   assert(readRejected, 'file.read 越界返回 -32012');
+
+  // ---- 9b. 脏文档一致性（P0-1）：未保存缓冲区优先 + 写盘改走编辑器
+  // 注意：主连接 ws 已在第 8 节模拟断线时关闭，本节一律用 conn2。
+  console.log('[smoke] 脏文档一致性（P0-1）…');
+  const diskBefore = fs.readFileSync(samplePath, 'utf8');
+  const bufferContent = 'BUFFER-ONLY（未保存的编辑器内容）\n';
+
+  // 覆盖层按连接隔离（与 P0-4 的能力声明同理）：另一个窗口推的内容不影响本连接读取
+  const conn3 = await openSession(port, {
+    workspaceRoot: tmpDir,
+    client: { name: 'smoke-3', version: '0.0.0' },
+  });
+  await conn3.rpc.request('workspace.syncDirty', {
+    files: [{ path: samplePath, content: 'OTHER-WINDOW\n' }],
+  });
+  const otherRead = await conn3.rpc.request('file.read', { path: samplePath });
+  assert(otherRead.content === 'OTHER-WINDOW\n' && otherRead.dirty === true, 'P0-1：覆盖层对该连接自身生效');
+  const isolatedRead = await conn2.rpc.request('file.read', { path: samplePath });
+  assert(
+    isolatedRead.content === diskBefore && isolatedRead.dirty !== true,
+    'P0-1：覆盖层按连接隔离，不跨连接串味'
+  );
+  conn3.ws.close();
+
+  // 本连接推入未保存内容 -> file.read 必须读到缓冲区版本，而不是过期磁盘版本
+  await conn2.rpc.request('workspace.syncDirty', {
+    files: [{ path: samplePath, content: bufferContent }],
+  });
+  const dirtyRead = await conn2.rpc.request('file.read', { path: samplePath });
+  assert(dirtyRead.content === bufferContent, 'P0-1：file.read 读到编辑器未保存内容');
+  assert(dirtyRead.dirty === true, 'P0-1：file.read 标记 dirty=true 供 UI/模型辨识');
+  assert(fs.readFileSync(samplePath, 'utf8') === diskBefore, 'P0-1：读取覆盖层不会碰磁盘');
+
+  const sendDirtyPrompt = () =>
+    conn2.rpc.request('session.send', {
+      sessionId,
+      prompt: '请修改文件内容，把 TODO 替换为 DONE（write edit）',
+      attachments: [
+        {
+          kind: 'file',
+          uri: 'file://' + samplePath.replace(/\\/g, '/'),
+          path: samplePath,
+          language: 'plaintext',
+          name: 'sample.txt',
+          content: bufferContent,
+        },
+      ],
+    });
+
+  // accept + applyInEditor：客户端已写入编辑器缓冲区，daemon 不得再落盘
+  conn2.rpc.resetEvents();
+  await sendDirtyPrompt();
+  const p2 = await conn2.rpc.waitFor((m) => m.method === 'file.patch.pending', 'file.patch.pending（脏文档）');
+  assert(p2.params.oldContent === bufferContent, 'P0-1：补丁 old 侧取自缓冲区（与用户所见一致，而非磁盘）');
+  await conn2.rpc.request('file.patch.respond', {
+    sessionId,
+    patchId: p2.params.patchId,
+    accept: true,
+    applyInEditor: true,
+  });
+  const r2 = await conn2.rpc.waitFor(
+    (m) => m.method === 'file.patch.result' && m.params.patchId === p2.params.patchId,
+    'file.patch.result（脏文档）'
+  );
+  assert(r2.params.accepted && r2.params.appliedInEditor === true, 'P0-1：改动交由编辑器落地');
+  assert(r2.params.applied === false, 'P0-1：daemon 未写盘（避免与缓冲区内容分叉）');
+  assert(fs.readFileSync(samplePath, 'utf8') === diskBefore, 'P0-1：磁盘内容保持原样');
+  await conn2.rpc.waitFor((m) => m.method === 'session.ended', '脏文档流程结束', 10000);
+
+  // accept 但未走编辑器：安全默认是拒绝落盘并给出原因，而不是静默覆盖未保存改动
+  conn2.rpc.resetEvents();
+  await sendDirtyPrompt();
+  const p3 = await conn2.rpc.waitFor(
+    (m) => m.method === 'file.patch.pending',
+    'file.patch.pending（脏文档未走编辑器）'
+  );
+  await conn2.rpc.request('file.patch.respond', { sessionId, patchId: p3.params.patchId, accept: true });
+  const r3 = await conn2.rpc.waitFor(
+    (m) => m.method === 'file.patch.result' && m.params.patchId === p3.params.patchId,
+    'file.patch.result（脏文档未走编辑器）'
+  );
+  assert(r3.params.applied === false, 'P0-1：脏文档未走编辑器时拒绝落盘');
+  assert(typeof r3.params.error === 'string' && r3.params.error.includes('未保存'), 'P0-1：拒绝时给出可读原因');
+  assert(fs.readFileSync(samplePath, 'utf8') === diskBefore, 'P0-1：未保存改动没有被覆盖');
+  await conn2.rpc.waitFor((m) => m.method === 'session.ended', '脏文档拒绝流程结束', 10000);
+
+  // 清空覆盖层（用户保存后）-> 读取回落磁盘，普通落盘通路恢复
+  await conn2.rpc.request('workspace.syncDirty', { files: [] });
+  const cleanRead = await conn2.rpc.request('file.read', { path: samplePath });
+  assert(cleanRead.content === diskBefore && cleanRead.dirty !== true, 'P0-1：清空覆盖层后回落磁盘');
 
   // ---- 10. 真实 Agent 流水线（--agent real --fake-model，不起网络）
   console.log('[smoke] 真实 Agent（假模型）…');

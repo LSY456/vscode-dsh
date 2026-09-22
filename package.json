@@ -17,7 +17,10 @@
     "Machine Learning"
   ],
   "activationEvents": [
+    "onView:dsh.agentView",
     "onCommand:dsh.openPanel",
+    "onCommand:dsh.openEditor",
+    "onCommand:dsh.newSession",
     "onCommand:dsh.sendSelection",
     "onCommand:dsh.daemon.restart",
     "onCommand:dsh.daemon.status",
@@ -25,6 +28,25 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dsh",
+          "title": "dsh Agent",
+          "icon": "resources/dsh-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "dsh": [
+        {
+          "id": "dsh.agentView",
+          "name": "Agent",
+          "type": "webview",
+          "contextualTitle": "dsh Agent"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "dsh.openPanel",
@@ -53,8 +75,23 @@
         "icon": "$(x)"
       },
       {
+        "command": "dsh.diff.applyEdited",
+        "title": "dsh: 应用 Diff 中的编辑（编辑后应用）",
+        "icon": "$(edit)"
+      },
+      {
         "command": "dsh.debug.captureContext",
         "title": "dsh: 调试 - 打印捕获的上下文"
+      },
+      {
+        "command": "dsh.newSession",
+        "title": "dsh: 新建会话",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dsh.openEditor",
+        "title": "dsh: 在编辑器列打开 Agent",
+        "icon": "$(open-preview)"
       }
     ],
     "menus": {
@@ -63,6 +100,35 @@
           "command": "dsh.sendSelection",
           "when": "editorHasSelection",
           "group": "navigation@100"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "dsh.newSession",
+          "when": "view == dsh.agentView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dsh.openEditor",
+          "when": "view == dsh.agentView",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "dsh.diff.accept",
+          "when": "resourceScheme == dsh-patch",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dsh.diff.applyEdited",
+          "when": "resourceScheme == dsh-patch",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dsh.diff.reject",
+          "when": "resourceScheme == dsh-patch",
+          "group": "navigation@3"
         }
       ]
     },
@@ -129,6 +195,13 @@
           "default": "auto",
           "description": "模型 provider：auto/openai（OpenAI 兼容，含 DeepSeek/通义/本地推理等）、anthropic（Claude Messages）。"
         },
+        "dsh.model.idleTimeoutSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 0,
+          "maximum": 1800,
+          "description": "模型请求空闲超时（秒）：距上一个流式增量超过该时长即中断本次请求，避免模型端静默时会话永久挂起；0 表示关闭。"
+        },
         "dsh.context.gitStatus": {
           "type": "boolean",
           "default": true,
@@ -166,6 +239,13 @@
           "default": 0,
           "minimum": 0,
           "description": "daemon 全局并发会话上限；0 = 不限制。"
+        },
+        "dsh.approval.ttlSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "maximum": 3600,
+          "description": "工具审批 / 文件补丁挂起的超时秒数：超过该时间未响应按拒绝处理。修改后需重启 daemon 生效。"
         }
       }
     }

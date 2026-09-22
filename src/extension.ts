@@ -12,6 +12,7 @@ import { ConfigAccessor } from './configAccessor';
 import { captureContext } from './contextCapture';
 import { DaemonManager, DaemonStatus } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
+import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
 import { WebviewPanelHost } from './webviewPanel';
 
@@ -30,6 +31,7 @@ let activeDaemon: DaemonManager | undefined;
 export interface DshApi {
   daemon: DaemonManager;
   diff: DshDiffManager;
+  panel: WebviewPanelHost;
 }
 
 export function activate(context: vscode.ExtensionContext): DshApi {
@@ -55,11 +57,17 @@ export function activate(context: vscode.ExtensionContext): DshApi {
   const daemon = new DaemonManager({ extensionPath: context.extensionPath, configAccessor });
   activeDaemon = daemon;
   const diff = new DshDiffManager(() => daemon.client);
-  const panel = new WebviewPanelHost(context, daemon, diff, configAccessor);
+  // P0-1：脏文档跟随——把编辑器里未保存的缓冲区内容同步给 daemon，
+  // 使 Agent 读到的是"用户此刻看到的内容"，而不是过期的磁盘版本
+  const dirty = new DirtyTracker({ getClient: () => daemon.client });
+  const panel = new WebviewPanelHost(context, daemon, diff, configAccessor, dirty);
+  context.subscriptions.push(dirty);
+  // 侧边栏常驻入口（活动栏 dsh 图标 -> Agent 视图）
+  panel.register(context);
 
   // ---- 状态栏
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  statusBar.command = 'dsh.daemon.status';
+  statusBar.command = 'dsh.openPanel';
   statusBar.text = '$(hubot) dsh: 启动中';
   daemon.onStatus((info) => {
     statusBar.text = `${STATUS_ICONS[info.status] ?? '$(circle-outline)'} dsh: ${info.status}`;
@@ -70,7 +78,19 @@ export function activate(context: vscode.ExtensionContext): DshApi {
   // ---- 命令
   context.subscriptions.push(
     vscode.commands.registerCommand('dsh.openPanel', () => {
-      panel.createOrShow();
+      void panel.reveal();
+    }),
+    vscode.commands.registerCommand('dsh.openEditor', () => {
+      panel.createOrShowEditorPanel();
+    }),
+    vscode.commands.registerCommand('dsh.newSession', async () => {
+      try {
+        await panel.newSession();
+      } catch (err) {
+        void vscode.window.showErrorMessage(
+          `新建会话失败: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
     }),
     vscode.commands.registerCommand('dsh.sendSelection', async () => {
       const editor = vscode.window.activeTextEditor;
@@ -125,7 +145,7 @@ export function activate(context: vscode.ExtensionContext): DshApi {
   void daemon.start();
 
   // 集成测试钩子：暴露运行时实例（经 vscode.extensions.getExtension(...).exports 读取）
-  return { daemon, diff };
+  return { daemon, diff, panel };
 }
 
 export function deactivate(): void {

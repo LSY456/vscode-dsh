@@ -1,6 +1,29 @@
 import { describe, expect, it } from 'vitest';
-import { Session, SessionManager } from './sessionManager';
+import {
+  clampApprovalTtlMs,
+  DEFAULT_APPROVAL_TTL_MS,
+  MAX_APPROVAL_TTL_MS,
+  MIN_APPROVAL_TTL_MS,
+  Session,
+  SessionManager,
+} from './sessionManager';
 import { sleep } from './test-utils';
+
+describe('clampApprovalTtlMs（挂起项超时可配，越界收敛）', () => {
+  it('缺省：非法值回落到 60s', () => {
+    expect(clampApprovalTtlMs(undefined)).toBe(DEFAULT_APPROVAL_TTL_MS);
+    expect(clampApprovalTtlMs(0)).toBe(DEFAULT_APPROVAL_TTL_MS);
+    expect(clampApprovalTtlMs(-5)).toBe(DEFAULT_APPROVAL_TTL_MS);
+    expect(clampApprovalTtlMs('abc')).toBe(DEFAULT_APPROVAL_TTL_MS);
+    expect(clampApprovalTtlMs(NaN)).toBe(DEFAULT_APPROVAL_TTL_MS);
+  });
+
+  it('区间内原样保留，越界钳制（太短会来不及看，太长等于让 Agent 干等）', () => {
+    expect(clampApprovalTtlMs(300_000)).toBe(300_000);
+    expect(clampApprovalTtlMs(1_000)).toBe(MIN_APPROVAL_TTL_MS);
+    expect(clampApprovalTtlMs(99 * 3600_000)).toBe(MAX_APPROVAL_TTL_MS);
+  });
+});
 
 function makeApprovalParams(id: string) {
   return {
@@ -51,6 +74,61 @@ describe('Session 生命周期与并发保护', () => {
     expect(s.isCanceled()).toBe(true);
     expect(await approvalPromise).toBe(false);
     expect(s.state).toBe('running'); // cancel 将挂起态解为 running，由 Agent 收尾
+  });
+});
+
+describe('Session 取消订阅（P0-3 中断在途请求）', () => {
+  it('cancel 同步触发已注册回调（供 Agent abort 在途 fetch）', () => {
+    const s = new Session('s1', '/ws');
+    s.begin();
+    let fired = 0;
+    s.onCancel(() => fired++);
+    expect(fired).toBe(0);
+    s.cancel();
+    expect(fired).toBe(1);
+  });
+
+  it('取消订阅后不再触发', () => {
+    const s = new Session('s1', '/ws');
+    s.begin();
+    let fired = 0;
+    const off = s.onCancel(() => fired++);
+    off();
+    s.cancel();
+    expect(fired).toBe(0);
+  });
+
+  it('多个订阅者都被触发（且互不阻断）', () => {
+    const s = new Session('s1', '/ws');
+    s.begin();
+    const order: string[] = [];
+    s.onCancel(() => order.push('a'));
+    s.onCancel(() => {
+      throw new Error('boom'); // 一个回调抛错不应阻断其它
+    });
+    s.onCancel(() => order.push('c'));
+    s.cancel();
+    expect(order).toEqual(['a', 'c']);
+  });
+
+  it('已取消后再注册 -> 立即同步触发（消除先取消后注册的竞态）', () => {
+    const s = new Session('s1', '/ws');
+    s.begin();
+    s.cancel();
+    let fired = 0;
+    s.onCancel(() => fired++);
+    expect(fired).toBe(1);
+  });
+
+  it('end() 清空订阅，避免钩子泄漏到下一轮', () => {
+    const s = new Session('s1', '/ws');
+    s.begin();
+    let fired = 0;
+    s.onCancel(() => fired++);
+    s.end();
+    s.begin();
+    s.cancel();
+    expect(fired).toBe(0);
   });
 });
 
@@ -120,6 +198,39 @@ describe('审批强校验（P1.1）', () => {
     s.registerPatch(makePatchParams('pt3'));
     s.respondPatch('pt3', false, '拒绝时忽略的内容');
     expect(s.getPatchContent('pt3')).toBeUndefined();
+  });
+
+  it('P0-1 应用到编辑器：accept 带 applyInEditor 才置位（agent 据此跳过写盘）', () => {
+    const s = new Session('s1', '/ws');
+
+    // 默认（未带标记）：daemon 仍需自行落盘
+    s.registerPatch(makePatchParams('p1'));
+    s.respondPatch('p1', true);
+    expect(s.getPatchApplyInEditor('p1')).toBe(false);
+
+    // 带标记：落地通路交给编辑器
+    s.end();
+    s.registerPatch(makePatchParams('p2'));
+    s.respondPatch('p2', true, undefined, true);
+    expect(s.getPatchApplyInEditor('p2')).toBe(true);
+
+    // 拒绝时标记无意义，不应置位
+    s.end();
+    s.registerPatch(makePatchParams('p3'));
+    s.respondPatch('p3', false, undefined, true);
+    expect(s.getPatchApplyInEditor('p3')).toBe(false);
+
+    // 未知 patchId 不置位
+    expect(s.getPatchApplyInEditor('nope')).toBe(false);
+  });
+
+  it('P0-1 end() 清空"应用到编辑器"标记，不泄漏到下一轮', () => {
+    const s = new Session('s1', '/ws');
+    s.registerPatch(makePatchParams('p1'));
+    s.respondPatch('p1', true, undefined, true);
+    expect(s.getPatchApplyInEditor('p1')).toBe(true);
+    s.end();
+    expect(s.getPatchApplyInEditor('p1')).toBe(false);
   });
 });
 

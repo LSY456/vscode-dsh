@@ -33,12 +33,14 @@ import {
   EventFilePatchPending,
   EventTrajectory,
   SessionSendParams,
+  WorkspaceSyncDirtyParams,
 } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
+import { DirtyOverlay } from './dirtyOverlay';
 import { ChatModel, createKeywordFakeModel, createModel as createProviderModel } from './model';
 import { assertPathInside } from './paths';
 import { RealAgentConfig, runRealAgent } from './realAgent';
-import { Session, SessionManager } from './sessionManager';
+import { DEFAULT_APPROVAL_TTL_MS, clampApprovalTtlMs, Session, SessionManager } from './sessionManager';
 import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';
 import { readBuildId } from '../../shared/buildId';
@@ -68,6 +70,55 @@ export interface DaemonServerHandle {
 
 const MAX_READ_BYTES = 1024 * 1024; // file.read 单文件上限 1MB
 
+/** 模型运行时配置（CLI 缺省 + initialize 覆盖；P0-4 后为连接级）。 */
+export interface RuntimeConfig {
+  apiKey: string;
+  preset?: string;
+  baseURL: string;
+  model: string;
+  agent: 'mock' | 'real' | 'auto';
+  provider: 'openai' | 'anthropic' | 'auto';
+  /** 模型请求空闲超时（ms，P0-3）；undefined = 用模型层缺省（60s）；<= 0 关闭 */
+  idleTimeoutMs?: number;
+}
+
+/**
+ * 连接级运行状态（P0-4 下沉）。
+ *
+ * capabilities / approvalTtlMs / 模型配置原先定义在**服务实例**作用域，而 daemon 可被同一
+ * 工作区的多个 VSCode 窗口复用（auto 探测复用 .dsh/daemon.json）——最后一个 initialize 会
+ * 整体覆盖所有人，导致 A 窗口声明的 allowedTools 白名单被 B 窗口的空配置冲掉，安全语义被
+ * 跨窗口静默污染。现改为每个 WebSocket 连接各持一份，互不影响。
+ */
+export interface ConnectionRuntime {
+  capabilities: Required<AgentCapabilities> & { maxConcurrency: number };
+  approvalTtlMs: number;
+  runtime: RuntimeConfig;
+}
+
+/** 解析最终生效的 Agent 实现：显式 real/mock 优先，auto 时以是否有 apiKey 决定。 */
+export function resolveAgentMode(rt: RuntimeConfig): 'mock' | 'real' {
+  if (rt.agent === 'real') return 'real';
+  if (rt.agent === 'mock') return 'mock';
+  return rt.apiKey ? 'real' : 'mock';
+}
+
+/** 连接级运行状态初值：以 CLI 参数为缺省，等待该连接的 initialize 覆盖。 */
+export function createConnectionRuntime(opts: DaemonServerOptions): ConnectionRuntime {
+  return {
+    capabilities: { allowedTools: [], allowedDirs: [], maxConcurrency: 0 },
+    approvalTtlMs: DEFAULT_APPROVAL_TTL_MS,
+    runtime: {
+      apiKey: opts.apiKey ?? '',
+      preset: opts.preset,
+      baseURL: '',
+      model: '',
+      agent: opts.agent ?? 'auto',
+      provider: opts.provider ?? 'auto',
+    },
+  };
+}
+
 export async function startDaemonServer(opts: DaemonServerOptions): Promise<DaemonServerHandle> {
   const sessions = new SessionManager(opts.workspaceRoot);
   const trajectoryStore = new TrajectoryStore(path.join(opts.workspaceRoot, '.dsh', 'trajectory'));
@@ -76,36 +127,15 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
   // P3.5+ 命令沙箱：检测 OS 级后端（Linux bwrap），不可用则应用层兜底；降级原因经 warnings 披露
   const { sandbox, warnings } = detectSandbox(opts.workspaceRoot);
   if (warnings.length > 0) console.warn(`[dsh-daemon] 命令沙箱：${warnings.join('；')}`);
-  let capabilities: Required<AgentCapabilities> & { maxConcurrency: number } = {
-    allowedTools: [],
-    allowedDirs: [],
-    maxConcurrency: 0,
-  };
-  // 模型运行时配置（CLI 缺省 + 最后一次 initialize 覆盖）
-  const runtime = {
-    apiKey: opts.apiKey ?? '',
-    preset: opts.preset,
-    baseURL: '',
-    model: '',
-    agent: opts.agent ?? 'auto',
-    provider: opts.provider ?? 'auto',
-  };
 
-  /** 解析最终生效的 Agent 实现。 */
-  function resolveAgentMode(): 'mock' | 'real' {
-    if (runtime.agent === 'real') return 'real';
-    if (runtime.agent === 'mock') return 'mock';
-    return runtime.apiKey ? 'real' : 'mock';
-  }
-
-  /** 依据运行时配置创建真实模型（auto 切换 + 集成假模型）。 */
-  function createModel(): ChatModel {
+  /** 依据连接级运行时配置创建真实模型（auto 切换 + 集成假模型）。 */
+  function createModel(rt: RuntimeConfig): ChatModel {
     if (opts.fakeModel) return createKeywordFakeModel();
     return createProviderModel({
-      provider: runtime.provider,
-      baseURL: runtime.baseURL || undefined,
-      apiKey: runtime.apiKey,
-      model: runtime.model || undefined,
+      provider: rt.provider,
+      baseURL: rt.baseURL || undefined,
+      apiKey: rt.apiKey,
+      model: rt.model || undefined,
     });
   }
 
@@ -130,10 +160,16 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     },
   });
 
-  interface Connection {
+  interface Connection extends ConnectionRuntime {
     ws: WebSocket;
     /** 当前默认会话 id（session.send 未指定时使用） */
     currentSessionId: string;
+    /**
+     * P0-1 脏文档覆盖层：客户端推来的「编辑器未保存缓冲区」快照。
+     * 连接级（与 capabilities 同理）：daemon 可能被多个窗口复用，各窗口打开的文档集合不同，
+     * 覆盖层必须随连接隔离，否则 A 窗口的未保存内容会污染 B 窗口的读取结果。
+     */
+    dirty: DirtyOverlay;
     notify(method: string, params: unknown): void;
   }
 
@@ -141,14 +177,17 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
 
   wss.on('connection', (ws: WebSocket) => {
     const conn: Connection = {
+      ...createConnectionRuntime(opts),
       ws,
       currentSessionId: '',
+      dirty: new DirtyOverlay(),
       notify(method, params) {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }));
         }
       },
     };
+
     connections.add(conn);
 
     ws.on('message', (data: RawData) => {
@@ -173,12 +212,18 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     conn.currentSessionId = session.id;
   }
 
-  /** 校验目标路径位于工作区（canonical：解析符号链接/联结）且位于 allowedDirs 内。 */
-  function resolvePath(target: string): { resolved: string } | { error: string } {
+  /**
+   * 校验目标路径位于工作区（canonical：解析符号链接/联结）且位于**该连接**声明的 allowedDirs 内。
+   * capabilities 为连接级（P0-4），因此必须由调用方传入，不可读实例状态。
+   */
+  function resolvePath(
+    caps: Required<AgentCapabilities> & { maxConcurrency: number },
+    target: string
+  ): { resolved: string } | { error: string } {
     try {
       const resolved = assertPathInside(opts.workspaceRoot, target);
-      if (capabilities.allowedDirs.length > 0) {
-        const ok = capabilities.allowedDirs.some((d) => {
+      if (caps.allowedDirs.length > 0) {
+        const ok = caps.allowedDirs.some((d) => {
           try {
             assertPathInside(d, resolved);
             return true;
@@ -187,12 +232,34 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           }
         });
         if (!ok) {
-          return { error: `路径越界：${target} 不在 allowedDirs ${capabilities.allowedDirs.join(', ')} 内` };
+          return { error: `路径越界：${target} 不在 allowedDirs ${caps.allowedDirs.join(', ')} 内` };
         }
       }
       return { resolved };
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /**
+   * P0-1：读取「用户实际看到的内容」——脏文档覆盖层优先，未命中回落磁盘。
+   *
+   * `resolved` 必须是 canonical 路径（resolvePath / resolveTarget 的产物），否则覆盖层查不到：
+   * 覆盖层的键与护栏产出的 canonical 路径同源（都过 `pathKey`）。
+   *
+   * `dirty` 的含义严格限定为「**内容取自覆盖层**」；超大文件只上报脏状态、不上报内容，
+   * 此时回落磁盘且 dirty 为 false（写入安全由 `conn.dirty.has()` 单独保证，与其无关）。
+   */
+  function readEffective(
+    conn: Connection,
+    resolved: string
+  ): { content: string; dirty: boolean } | undefined {
+    const overlay = conn.dirty.get(resolved);
+    if (overlay !== undefined) return { content: overlay, dirty: true };
+    try {
+      return { content: fs.readFileSync(resolved, 'utf8'), dirty: false };
+    } catch {
+      return undefined;
     }
   }
 
@@ -216,20 +283,26 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             sendError(conn.ws, req.id, ERROR_CODES.InvalidParams, 'initialize 需要 workspaceRoot');
             return;
           }
-          // 能力分级：最后一次 initialize 生效（参考实现为实例级）
-          capabilities = {
+          // 能力分级：**本连接**声明、本连接执行（P0-4：不再污染其他窗口/连接）
+          conn.capabilities = {
             allowedTools: p.capabilities?.allowedTools ?? [],
             allowedDirs: p.capabilities?.allowedDirs ?? [],
             maxConcurrency: p.capabilities?.maxConcurrency ?? 0,
           };
+          // 挂起项超时（审批 / 补丁）：越界或非法值收敛到 [10s, 60min]
+          if (p.capabilities?.approvalTtlMs !== undefined) {
+            conn.approvalTtlMs = clampApprovalTtlMs(p.capabilities.approvalTtlMs);
+          }
           // 模型配置合并（CLI 缺省 < initialize 顶层 apiKey/preset < initialize.model）
-          if (p.apiKey) runtime.apiKey = p.apiKey;
-          if (p.preset) runtime.preset = p.preset;
-          if (p.model?.apiKey) runtime.apiKey = p.model.apiKey;
-          if (p.model?.baseURL) runtime.baseURL = p.model.baseURL;
-          if (p.model?.model) runtime.model = p.model.model;
-          if (p.model?.agent) runtime.agent = p.model.agent;
-          if (p.model?.provider) runtime.provider = p.model.provider;
+          const rt = conn.runtime;
+          if (p.apiKey) rt.apiKey = p.apiKey;
+          if (p.preset) rt.preset = p.preset;
+          if (p.model?.apiKey) rt.apiKey = p.model.apiKey;
+          if (p.model?.baseURL) rt.baseURL = p.model.baseURL;
+          if (p.model?.model) rt.model = p.model.model;
+          if (p.model?.agent) rt.agent = p.model.agent;
+          if (p.model?.provider) rt.provider = p.model.provider;
+          if (p.model?.idleTimeoutMs !== undefined) rt.idleTimeoutMs = p.model.idleTimeoutMs;
           const session = sessions.create();
           attach(conn, session);
           const result: InitializeResult = {
@@ -246,7 +319,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               fileRead: true,
             },
             sessionId: session.id,
-            agent: resolveAgentMode(),
+            agent: resolveAgentMode(rt),
           };
           sendResult(conn.ws, req.id, result);
           return;
@@ -272,13 +345,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             sendError(conn.ws, req.id, ERROR_CODES.Busy, `session ${session.id} 正在运行中，请先取消或等待完成`);
             return;
           }
-          if (capabilities.maxConcurrency > 0 && sessions.runningCount() >= capabilities.maxConcurrency) {
-            sendError(
-              conn.ws,
-              req.id,
-              ERROR_CODES.Busy,
-              `并发会话数已达上限 ${capabilities.maxConcurrency}`
-            );
+          const maxConcurrency = conn.capabilities.maxConcurrency;
+          if (maxConcurrency > 0 && sessions.runningCount() >= maxConcurrency) {
+            sendError(conn.ws, req.id, ERROR_CODES.Busy, `并发会话数已达上限 ${maxConcurrency}`);
             return;
           }
           session.begin();
@@ -288,8 +357,16 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           const ctx: AgentContext = {
             sessionId: session.id,
             workspaceRoot: opts.workspaceRoot,
-            capabilities,
+            capabilities: conn.capabilities,
             notify: (method, params) => {
+              // 挂起类事件由 daemon 统一盖章过期时间：TTL 只有一个来源（initialize 声明 / 缺省 60s），
+              // 避免 Agent 各自硬编码，同时让 UI 能显示真实倒计时。
+              if (method === EVENTS.ApprovalRequest || method === EVENTS.FilePatchPending) {
+                const p = params as { expiresAt?: number };
+                if (p && typeof p === 'object' && p.expiresAt === undefined) {
+                  p.expiresAt = Date.now() + conn.approvalTtlMs;
+                }
+              }
               session.emit(method, params);
               // 轨迹持久化（P3.4）：仅 trajectory.record 事件落盘
               if (method === EVENTS.Trajectory) {
@@ -298,30 +375,37 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             },
             waitForUser: (kind, snapshot) => {
               if (kind === 'approval') {
-                return session.registerApproval(snapshot as EventApprovalRequest);
+                return session.registerApproval(snapshot as EventApprovalRequest, conn.approvalTtlMs);
               }
-              return session.registerPatch(snapshot as EventFilePatchPending);
+              return session.registerPatch(snapshot as EventFilePatchPending, conn.approvalTtlMs);
             },
             isCanceled: () => session.isCanceled(),
+            // P0-3：把「会话被取消」同步转达给 Agent，使在途模型请求能被立即 abort，
+            // 而不是等下一个 onChunk 才察觉（模型静默时 onChunk 永不触发）。
+            onCancel: (fn) => session.onCancel(fn),
             isTrusted: (command) => trustStore.matches(command),
             getPatchContent: (patchId) => session.getPatchContent(patchId),
             readFile: async (target, maxBytes) => {
-              const r = resolvePath(target);
+              const r = resolvePath(conn.capabilities, target);
               if ('error' in r) return undefined;
-              try {
-                const content = fs.readFileSync(r.resolved, 'utf8');
-                const cap = maxBytes ?? MAX_READ_BYTES;
-                return content.length > cap ? content.slice(0, cap) + '\n…[truncated]' : content;
-              } catch {
-                return undefined;
-              }
+              const eff = readEffective(conn, r.resolved);
+              if (!eff) return undefined;
+              const cap = maxBytes ?? MAX_READ_BYTES;
+              return eff.content.length > cap ? eff.content.slice(0, cap) + '\n…[truncated]' : eff.content;
             },
+            // P0-1：目标是否处于「编辑器未保存」状态（供 agent 给输出加标注）
+            isDirty: (target) => {
+              const r = resolvePath(conn.capabilities, target);
+              return 'error' in r ? false : conn.dirty.has(r.resolved);
+            },
+            // P0-1：本补丁是否已由客户端应用到编辑器缓冲区（为 true 时 agent 不写盘）
+            isPatchAppliedInEditor: (patchId) => session.getPatchApplyInEditor(patchId),
           };
           // P3.6：auto 切换 —— 有 apiKey（或显式 real）走真实模型，否则回退内置模拟
-          const agentMode = resolveAgentMode();
+          const agentMode = resolveAgentMode(conn.runtime);
           if (agentMode === 'real') {
-            const model = createModel();
-            const agentConfig: RealAgentConfig = { model, sandbox };
+            const model = createModel(conn.runtime);
+            const agentConfig: RealAgentConfig = { model, sandbox, idleTimeoutMs: conn.runtime.idleTimeoutMs };
             void runRealAgent(ctx, p, agentConfig).finally(() => {
               session.end();
               // 会话结束时立即落盘轨迹缓冲（审计完整性，不等定时器）
@@ -407,13 +491,20 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           return;
         }
         case METHODS.FilePatchRespond: {
-          const p = req.params as { sessionId?: string; patchId: string; accept: boolean; content?: string };
+          const p = req.params as {
+            sessionId?: string;
+            patchId: string;
+            accept: boolean;
+            content?: string;
+            applyInEditor?: boolean;
+          };
           const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
           if (!session) {
             sendError(conn.ws, req.id, ERROR_CODES.NotFound, 'session 不存在');
             return;
           }
-          const r = session.respondPatch(p?.patchId ?? '', !!p?.accept, p?.content);
+          // P0-1：applyInEditor = 客户端已把改动写进编辑器缓冲区，agent 侧据此跳过落盘
+          const r = session.respondPatch(p?.patchId ?? '', !!p?.accept, p?.content, !!p?.applyInEditor);
           if (r === 'not_found') {
             sendError(conn.ws, req.id, ERROR_CODES.NotFound, `补丁不存在或已处理: ${p?.patchId}`);
             return;
@@ -427,23 +518,33 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
         }
         case METHODS.FileRead: {
           const p = req.params as { path: string; maxBytes?: number };
-          const r = resolvePath(p?.path ?? '');
+          const r = resolvePath(conn.capabilities, p?.path ?? '');
           if ('error' in r) {
             sendError(conn.ws, req.id, ERROR_CODES.PathOutsideWorkspace, r.error);
             return;
           }
           try {
-            const content = fs.readFileSync(r.resolved, 'utf8');
+            // P0-1：脏文档优先——用户未保存时的磁盘内容已过期，读到旧版本会让 Agent 误判
+            const eff = readEffective(conn, r.resolved);
+            if (!eff) throw new Error('文件不存在或不可读');
             const cap = p.maxBytes ?? MAX_READ_BYTES;
-            const truncated = content.length > cap;
+            const truncated = eff.content.length > cap;
             sendResult(conn.ws, req.id, {
-              content: truncated ? content.slice(0, cap) : content,
+              content: truncated ? eff.content.slice(0, cap) : eff.content,
               truncated,
-              size: Buffer.byteLength(content, 'utf8'),
+              size: Buffer.byteLength(eff.content, 'utf8'),
+              dirty: eff.dirty,
             });
           } catch (e) {
             sendError(conn.ws, req.id, ERROR_CODES.InternalError, `读取失败: ${e instanceof Error ? e.message : String(e)}`);
           }
+          return;
+        }
+        case METHODS.WorkspaceSyncDirty: {
+          // P0-1：客户端推来「当前全部脏文档」全量快照，整体替换本连接的覆盖层
+          const p = req.params as WorkspaceSyncDirtyParams | undefined;
+          const count = conn.dirty.replace(p?.files ?? []);
+          sendResult(conn.ws, req.id, { ok: true, count });
           return;
         }
         case METHODS.Ping:

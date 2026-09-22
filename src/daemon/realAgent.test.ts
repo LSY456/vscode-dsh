@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatMessage, ChatModel, FakeChatModel, FakeTurn } from './model';
+import { ChatCompletionResult, ChatMessage, ChatModel, ChatStreamOptions, FakeChatModel, FakeTurn } from './model';
 import { applyTokenBudget, estimateTokens, generateTitle, RealAgentConfig, runRealAgent, TITLE_SYSTEM_PROMPT } from './realAgent';
 
 let root = '';
@@ -26,12 +26,27 @@ interface MockCtx extends AgentContext {
   events: Array<{ method: string; params: any }>;
   waiters: Array<{ kind: 'approval' | 'patch'; resolve: (v: boolean) => void }>;
   setCanceled(): void;
+  /** P0-1：模拟 daemon 脏文档覆盖层（canonical 路径 -> 缓冲区内容；null = 脏但未上报内容） */
+  overlay: Map<string, string | null>;
+  /** P0-1：模拟"客户端已把改动应用到编辑器缓冲区"的 patchId 集合 */
+  appliedInEditor: Set<string>;
 }
 
 function makeCtx(caps?: AgentCapabilities): MockCtx {
   const events: Array<{ method: string; params: any }> = [];
   const waiters: Array<{ kind: 'approval' | 'patch'; resolve: (v: boolean) => void }> = [];
   let canceled = false;
+  // P0-3：模拟 server 的取消订阅语义（cancel 时同步触发，供 Agent abort 在途请求）
+  const cancelHooks = new Set<() => void>();
+  const fireCancel = () => {
+    for (const fn of [...cancelHooks]) {
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
   const ctx: MockCtx = {
     sessionId: 's1',
     workspaceRoot: root,
@@ -40,12 +55,28 @@ function makeCtx(caps?: AgentCapabilities): MockCtx {
     waitForUser: (kind) =>
       new Promise<boolean>((resolve) => waiters.push({ kind, resolve })),
     isCanceled: () => canceled,
-    readFile: async (target) =>
-      fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : undefined,
+    onCancel: (fn) => {
+      if (canceled) {
+        fn();
+        return () => {};
+      }
+      cancelHooks.add(fn);
+      return () => cancelHooks.delete(fn);
+    },
+    readFile: async (target) => {
+      // P0-1：与 server 一致——覆盖层优先，未命中回落磁盘
+      if (ctx.overlay.has(target)) return ctx.overlay.get(target) ?? undefined;
+      return fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : undefined;
+    },
+    isDirty: (target) => ctx.overlay.has(target),
+    isPatchAppliedInEditor: (patchId) => ctx.appliedInEditor.has(patchId),
     events,
     waiters,
+    overlay: new Map<string, string | null>(),
+    appliedInEditor: new Set<string>(),
     setCanceled: () => {
       canceled = true;
+      fireCancel(); // 与 server 一致：置位后同步触发取消订阅
     },
   };
   return ctx;
@@ -106,6 +137,102 @@ describe('realAgent：只读工具', () => {
   });
 });
 
+describe('realAgent：P0-1 脏文档一致性', () => {
+  it('read_file 脏文档优先：读到编辑器缓冲区内容而非过期磁盘内容，并明确标注', async () => {
+    const ctx = makeCtx();
+    ctx.overlay.set(file, 'BUFFER-ONLY（未保存改动）\n');
+    const model = scripted([
+      { toolcall: { tool: 'read_file', input: { path: file } } },
+      { content: 'ok' },
+    ]);
+    await runRealAgent(ctx, baseParams, { model });
+
+    const te = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
+    expect(te.params.ok).toBe(true);
+    expect(te.params.output).toContain('BUFFER-ONLY');
+    expect(te.params.output).not.toContain('TODO'); // 磁盘里的旧内容不该出现
+    expect(te.params.output).toContain('未保存');
+  });
+
+  it('read_file 非脏文档：不出现"未保存"标注（不误导模型）', async () => {
+    const ctx = makeCtx();
+    const model = scripted([
+      { toolcall: { tool: 'read_file', input: { path: file } } },
+      { content: 'ok' },
+    ]);
+    await runRealAgent(ctx, baseParams, { model });
+    const te = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
+    expect(te.params.output).toContain('TODO');
+    expect(te.params.output).not.toContain('未保存');
+  });
+
+  it('apply_patch 基准取自缓冲区：diff 的 old 侧与用户所见一致', async () => {
+    const ctx = makeCtx();
+    ctx.overlay.set(file, 'TODO-from-buffer\n');
+    const model = scripted([
+      {
+        toolcall: {
+          tool: 'apply_patch',
+          input: { path: file, search: 'TODO-from-buffer', replace: 'DONE' },
+        },
+      },
+      { content: 'ok' },
+    ]);
+    const run = runRealAgent(ctx, baseParams, { model });
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    const pending = ctx.events.find((e) => e.method === EVENTS.FilePatchPending)!;
+    expect(pending.params.oldContent).toBe('TODO-from-buffer\n');
+    expect(pending.params.newContent).toBe('DONE\n');
+    ctx.waiters[0].resolve(false);
+    await run;
+  });
+
+  it('accept 且客户端已应用到编辑器 -> daemon 不落盘，结果标记 appliedInEditor', async () => {
+    const ctx = makeCtx();
+    const before = fs.readFileSync(file, 'utf8');
+    ctx.overlay.set(file, before);
+    const model = scripted([
+      { toolcall: { tool: 'write_file', input: { path: file, content: 'FROM-EDITOR\n' } } },
+      { content: 'ok' },
+    ]);
+    const run = runRealAgent(ctx, baseParams, { model });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    const patchId = ctx.events.find((e) => e.method === EVENTS.FilePatchPending)!.params.patchId;
+    ctx.appliedInEditor.add(patchId); // 模拟 diffProvider 已把改动写进缓冲区
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(before); // 磁盘未被改动
+    const pr = ctx.events.find((e) => e.method === EVENTS.FilePatchResult)!;
+    expect(pr.params.accepted).toBe(true);
+    expect(pr.params.applied).toBe(false);
+    expect(pr.params.appliedInEditor).toBe(true);
+    expect(pr.params.error).toBeUndefined();
+  });
+
+  it('accept 但目标脏且未走编辑器 -> 拒绝落盘（安全默认），磁盘保持原样', async () => {
+    const ctx = makeCtx();
+    const before = fs.readFileSync(file, 'utf8');
+    ctx.overlay.set(file, before);
+    const model = scripted([
+      { toolcall: { tool: 'write_file', input: { path: file, content: 'CLOBBER\n' } } },
+      { content: 'ok' },
+    ]);
+    const run = runRealAgent(ctx, baseParams, { model });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(before); // 未保存改动没有被覆盖
+    const pr = ctx.events.find((e) => e.method === EVENTS.FilePatchResult)!;
+    expect(pr.params.applied).toBe(false);
+    expect(pr.params.appliedInEditor).toBeFalsy();
+    expect(pr.params.error).toContain('未保存');
+  });
+});
+
 describe('realAgent：写入（补丁审批）', () => {
   it('write_file 接受 -> 落盘 + patch.result applied', async () => {
     const ctx = makeCtx();
@@ -153,6 +280,75 @@ describe('realAgent：写入（补丁审批）', () => {
     ctx.waiters[0].resolve(true);
     await run;
     expect(fs.readFileSync(p, 'utf8')).toBe('AAA-XXX-CCC');
+  });
+
+  it('P0-2 乐观锁：审阅期间文件被外部修改 -> 拒绝应用且不覆盖并发修改', async () => {
+    const ctx = makeCtx();
+    const p = path.join(root, 'conflict.txt');
+    fs.writeFileSync(p, 'ORIGINAL\n', 'utf8');
+    const model = scripted([
+      { toolcall: { tool: 'write_file', input: { path: p, content: 'AGENT-CONTENT\n' } } },
+      { content: 'done' },
+    ]);
+    const run = runRealAgent(ctx, { prompt: 'x', attachments: [{ kind: 'file', path: p }] }, { model });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    // 模拟用户在审阅 Diff 期间从外部改动该文件（编辑器保存 / 另一会话的补丁）
+    fs.writeFileSync(p, 'USER-EDIT-DURING-REVIEW\n', 'utf8');
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    // 关键断言：并发修改未被静默覆盖
+    expect(fs.readFileSync(p, 'utf8')).toBe('USER-EDIT-DURING-REVIEW\n');
+    const pr = ctx.events.find((e) => e.method === EVENTS.FilePatchResult)!;
+    expect(pr.params.accepted).toBe(true);
+    expect(pr.params.applied).toBe(false);
+    expect(pr.params.error).toContain('乐观锁冲突');
+    // 冲突须显式告知用户，不得静默
+    expect(
+      ctx.events.some(
+        (e) => e.method === EVENTS.MessageDelta && String(e.params.delta).includes('乐观锁冲突')
+      )
+    ).toBe(true);
+  });
+
+  it('P0-2 乐观锁：审阅期间文件未被改动 -> 正常应用（无误伤）', async () => {
+    const ctx = makeCtx();
+    const p = path.join(root, 'noconflict.txt');
+    fs.writeFileSync(p, 'ORIGINAL\n', 'utf8');
+    const model = scripted([
+      { toolcall: { tool: 'write_file', input: { path: p, content: 'AGENT-CONTENT\n' } } },
+      { content: 'done' },
+    ]);
+    const run = runRealAgent(ctx, { prompt: 'x', attachments: [{ kind: 'file', path: p }] }, { model });
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    expect(fs.readFileSync(p, 'utf8')).toBe('AGENT-CONTENT\n');
+    const pr = ctx.events.find((e) => e.method === EVENTS.FilePatchResult)!;
+    expect(pr.params.applied).toBe(true);
+    expect(pr.params.error).toBeUndefined();
+  });
+
+  it('P0-2 乐观锁：文件在审阅期间被外部创建 -> 快照 undefined 与磁盘不一致亦判冲突', async () => {
+    const ctx = makeCtx();
+    const p = path.join(root, 'created-late.txt');
+    const model = scripted([
+      { toolcall: { tool: 'write_file', input: { path: p, content: 'AGENT-CONTENT\n' } } },
+      { content: 'done' },
+    ]);
+    const run = runRealAgent(ctx, { prompt: 'x', attachments: [{ kind: 'file', path: p }] }, { model });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    const pending = ctx.events.find((e) => e.method === EVENTS.FilePatchPending)!;
+    expect(pending.params.oldContent).toBeUndefined(); // 审阅时文件尚不存在
+    fs.writeFileSync(p, 'RACED-IN\n', 'utf8'); // 外部抢先创建
+    ctx.waiters[0].resolve(true);
+    await run;
+
+    expect(fs.readFileSync(p, 'utf8')).toBe('RACED-IN\n');
+    expect(ctx.events.find((e) => e.method === EVENTS.FilePatchResult)!.params.applied).toBe(false);
   });
 
   it('write_file 越界 -> Error(-32012)，不发起补丁', async () => {
@@ -257,6 +453,57 @@ describe('realAgent：取消', () => {
     expect(ended.params.reason).toBe('canceled');
     // 模型正文未被流式输出（仅取消提示）
     expect(ctx.events.some((e) => e.method === EVENTS.MessageDelta && e.params.delta.includes('不应输出'))).toBe(false);
+  });
+
+  it('P0-3 取消可中断在途请求：模型永不吐增量时取消能及时收尾（不等 onChunk）', async () => {
+    const ctx = makeCtx();
+    // 模拟"挂住的模型"：标题请求正常返回（否则会话起不来），正文请求不产生任何增量，
+    // 只在 signal abort 时才 reject —— 旧实现下 onChunk 永不触发，abort 永不被调用，
+    // 会话会永久卡在 running。
+    let aborted = false;
+    const hangingModel: ChatModel = {
+      chat: (messages: ChatMessage[], opts: ChatStreamOptions = {}) => {
+        if (isTitleRequest(messages)) return Promise.resolve<ChatCompletionResult>({ reasoning: '', content: '测试标题' });
+        return new Promise<never>((_resolve, reject) => {
+          const sig = opts.signal;
+          if (!sig) return; // 永不 resolve（无 signal 时就是永久挂起）
+          const fail = () => {
+            aborted = true;
+            const e = new Error('aborted');
+            e.name = 'AbortError';
+            reject(e);
+          };
+          if (sig.aborted) return fail();
+          sig.addEventListener('abort', fail, { once: true });
+        });
+      },
+    };
+    const run = runRealAgent(ctx, baseParams, {
+      model: hangingModel,
+      idleTimeoutMs: 0, // 关闭空闲超时，确保本用例只考察"取消"这条中断路径
+    });
+
+    await waitEvent(ctx, EVENTS.SessionStarted);
+    expect(aborted).toBe(false); // 请求确实在途
+    const t0 = Date.now();
+    ctx.setCanceled(); // 触发 cancel 订阅 -> abort 在途 fetch
+    await run;
+    const elapsed = Date.now() - t0;
+
+    expect(aborted).toBe(true); // 在途请求被真正中断
+    expect(elapsed).toBeLessThan(1000); // 及时收尾，而非挂死
+    const ended = ctx.events.find((e) => e.method === EVENTS.SessionEnded)!;
+    expect(ended.params.reason).toBe('canceled');
+  });
+
+  it('P0-3 会话收尾后取消订阅被清理（不泄漏到下一轮）', async () => {
+    const ctx = makeCtx();
+    const model = scripted([{ content: 'done' }]);
+    await runRealAgent(ctx, baseParams, { model });
+    // runRealAgent 已 subscribe/unsubscribe；此处再 cancel 不应抛错、不应产生重复事件
+    const before = ctx.events.length;
+    ctx.setCanceled();
+    expect(ctx.events.length).toBe(before);
   });
 });
 

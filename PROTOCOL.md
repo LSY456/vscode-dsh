@@ -45,10 +45,23 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
 | `session.resume` | `{ sessionId }` | `{ sessionId, state, pendingApproval?, pendingPatch? }` |
 | `approval.respond` | `{ sessionId, approvalId, approved, note? }` | `{ ok }` |
-| `file.patch.respond` | `{ sessionId, patchId, accept }` | `{ ok }` |
-| `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size }` |
+| `file.patch.respond` | `{ sessionId, patchId, accept, content?, applyInEditor? }` | `{ ok }` |
+| `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size, dirty? }` |
+| `workspace.syncDirty` | `{ files: [{ path, content? }] }` | `{ ok, count }` |
 | `ping` | `{}` | `{ pong }` |
 | `shutdown` | `{}` | `{ bye }` |
+
+### 脏文档同步（`workspace.syncDirty`，P0-1）
+
+daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁盘；用户正在编辑未保存时**磁盘内容是过期的**。
+客户端把「当前全部脏文档」推给 daemon，daemon 以**连接**为单位维护覆盖层，读取一律覆盖层优先。
+
+- 语义是**全量快照**：每次调用代表"此刻的全部脏文档"，daemon 整体替换，不做增量合并（省去删除/重命名的对账）。
+- `content` **可缺省**：超大文件只上报「该文件是脏的」。此时读取回落磁盘，但写入路径仍一律避开磁盘。
+- 覆盖层**按连接隔离**：多个窗口复用同一 daemon 时互不污染（与 `capabilities` 同理）。
+- 生效范围：`file.read` 返回 `dirty: true`；Agent 的 `read_file` 与 `apply_patch` 基准（diff 的 old 侧）同源。
+- 落地影响：目标是脏文档时补丁**不写磁盘**——客户端改走编辑器缓冲区并回执 `applyInEditor: true`；
+  未带该标记则 daemon 拒绝落盘（安全默认），`file.patch.result` 返回 `applied: false` + 原因。
 
 ### `model`（真实模型接入）
 
@@ -58,6 +71,10 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 - `model?: string` —— 模型名，缺省 `deepseek-chat`（DeepSeek Reasoner 会流式返回 `reasoning_content`，投影为 `reasoning.delta`）
 - `apiKey?: string` —— 优先于顶层 `initialize.apiKey`
 - `agent?: 'mock' | 'real' | 'auto'` —— 实现选择；缺省 `auto` = 有 apiKey 则 real，否则 mock
+- `idleTimeoutMs?: number` —— **模型请求空闲超时**（P0-3）：距上一个流式增量超过该时长即以
+  `TimeoutError` 中断本次请求，避免模型端静默（网关挂住 / 连接半开 / 服务端排队）时会话永久
+  卡在 `running`。缺省 60000；`<= 0` 关闭。会话取消（`session.cancel`）另走 `AbortController`
+  立即中断在途请求，与空闲超时相互独立。
 
 `initialize` 返回的 `agent` 字段标明本次实际生效的实现（`mock` | `real`）；扩展可据此在 UI 提示当前是否为真实模型。
 
@@ -68,6 +85,9 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 - `allowedTools?: string[]` —— 工具白名单；**缺省或空数组 = 全部允许**，非空 = 仅白名单内可用（越权工具直接以 `tool.executed { ok:false, output:'工具被禁用' }` 结束，不发起审批）。
 - `allowedDirs?: string[]` —— 目录白名单；缺省 = 仅工作区根。所有路径操作（patch / file.read / 附件读取）必须在工作区 ∩ allowedDirs 内，越界返回 `-32012`。
 - `maxConcurrency?: number` —— 全局并发会话上限；0 = 不限制。
+- `approvalTtlMs?: number` —— **挂起项超时**（`approval.request` / `file.patch.pending`）毫秒数；
+  缺省 60s，daemon 端钳制到 `[10s, 60min]`，到点未响应按"拒绝"解除挂起。daemon 会把生效值
+  盖戳到挂起事件上（`expiresAt`），客户端据此显示倒计时。
 
 > **路径护栏为 canonical 判定**：daemon 以 `realpath` 解析后的规范路径做包含判断，符号链接 /
 > 目录联结（Windows junction）指向工作区外、`..` 逃逸、NUL 与 Windows 备用数据流（ADS）一律返回 `-32012`。
@@ -92,7 +112,7 @@ VSCode 侧自动打包的结构化附件，`kind` 取值：
 | `message.done` | 回答流结束 |
 | `tool.started` / `tool.executed` | 工具执行开始/结束（含 ok/output/durationMs） |
 | `approval.request` | **挂起点**：高危工具待人工审批（tool/input/risk/reason/expiresAt） |
-| `file.patch.pending` | **挂起点**：文件修改待审查（path/oldContent/newContent/description） |
+| `file.patch.pending` | **挂起点**：文件修改待审查（path/oldContent/newContent/description/expiresAt） |
 | `file.patch.result` | 补丁决策结果（accepted/applied/error） |
 | `trajectory.record` | 迹线步骤（step/kind/detail/ts） |
 | `session.ended` | 会话结束（reason: completed/canceled/error） |
