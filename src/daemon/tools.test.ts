@@ -10,6 +10,7 @@ import {
   grepFiles,
   listDirectory,
   PathError,
+  readFileRange,
   readTextFile,
   resolveTarget,
   tryReadFile,

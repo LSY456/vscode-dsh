@@ -70,6 +70,53 @@ export function readTextFile(
   return { content: truncated ? raw.slice(0, maxBytes) : raw, truncated };
 }
 
+export interface FileRangeResult {
+  /** 带行号的行内容（`行号| 内容`） */
+  content: string;
+  /** 实际返回的起始行（1-based） */
+  startLine: number;
+  /** 实际返回的结束行（1-based 含） */
+  endLine: number;
+  /** 文件总行数 */
+  totalLines: number;
+}
+
+/** 单次范围读取的默认最大行数。 */
+const DEFAULT_RANGE_LINES = 200;
+
+/** 将 1-based 行号钳制到 [1, totalLines]；非有限值或小于 1 回退 1。 */
+function clampLine(n: number, totalLines: number): number {
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(Math.floor(n), totalLines);
+}
+
+/**
+ * 读取文件的指定行号范围（1-based 含），返回带行号的内容，供 grep 定位后精读。
+ * 单次最多 maxLines 行（缺省 200）；二进制 / 超大 / 越界走 readLines 与 resolveTarget 护栏。
+ */
+export function readFileRange(
+  root: string,
+  allowedDirs: string[],
+  filePath: string,
+  opts: { startLine?: number; endLine?: number; maxLines?: number } = {}
+): FileRangeResult {
+  const resolved = resolveTarget(root, allowedDirs, filePath);
+  const lines = readLines(resolved, MAX_RANGE_FILE_BYTES);
+  if (lines === null) throw new Error('无法读取文件内容（二进制或超大）');
+  const totalLines = lines.length;
+  const max = opts.maxLines ?? DEFAULT_RANGE_LINES;
+  const start = clampLine(opts.startLine ?? 1, totalLines);
+  const maxEnd = start + max - 1;
+  let end = opts.endLine != null ? clampLine(opts.endLine, totalLines) : totalLines;
+  end = Math.min(end, maxEnd);
+  if (end < start) end = start;
+  const content = lines
+    .slice(start - 1, end)
+    .map((text, i) => `${start + i}| ${text}`)
+    .join('\n');
+  return { content, startLine: start, endLine: end, totalLines };
+}
+
 // ---------------------------------------------------------------------------
 // 只读搜索：grep（跨文件关键字搜索）与 glob（文件名通配匹配）
 // ---------------------------------------------------------------------------
@@ -98,6 +145,8 @@ const MAX_GREP_RESULTS = 200;
 const MAX_GLOB_RESULTS = 200;
 const MAX_GREP_LINE_LEN = 200;
 const MAX_GREP_FILE_BYTES = 1024 * 1024;
+/** 行号范围读取的独立大小上限（grep 之外，允许精读更大的单个文件）。 */
+const MAX_RANGE_FILE_BYTES = 16 * 1024 * 1024;
 
 /** `*` 通配 → 正则（匹配 basename：`*` 匹配任意字符序列，其余字符转义）。 */
 function globToRegex(pattern: string): RegExp {
@@ -141,11 +190,11 @@ function isBinary(buf: Buffer): boolean {
   return false;
 }
 
-/** 读文件并拆行；二进制 / 超大 / 不可读返回 null。 */
-function readLines(file: string): string[] | null {
+/** 读文件并拆行；二进制 / 超出 maxBytes / 不可读返回 null。 */
+function readLines(file: string, maxBytes: number = MAX_GREP_FILE_BYTES): string[] | null {
   let raw: Buffer;
   try {
-    if (fs.statSync(file).size > MAX_GREP_FILE_BYTES) return null;
+    if (fs.statSync(file).size > maxBytes) return null;
     raw = fs.readFileSync(file);
   } catch {
     return null;
