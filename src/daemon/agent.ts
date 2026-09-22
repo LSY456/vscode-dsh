@@ -41,6 +41,14 @@ export interface AgentContext {
     snapshot: EventApprovalRequest | EventFilePatchPending
   ): Promise<boolean>;
   isCanceled(): boolean;
+  /**
+   * P0-3 取消订阅：注册一个「会话被取消」回调，由 server 在 `session.cancel()` 时同步触发。
+   *
+   * 仅轮询 `isCanceled()` 不足以中断**在途**的网络请求——若模型端不吐增量（首字节未到或
+   * 中途静默），`onChunk` 永不被调用，取消会长久无响应。此钩子让 Agent 能在取消瞬间
+   * `abort()` 掉在途 fetch。返回取消订阅函数（会话收尾时应调用，避免泄漏）。
+   */
+  onCancel?(fn: () => void): () => void;
   /** B1 信任记忆：命令是否命中免审批白名单（server 注入；测试缺省走审批） */
   isTrusted?(command: string): boolean;
   /** P2 编辑后应用：读用户编辑后的补丁内容（无则 undefined，用原始 newContent） */

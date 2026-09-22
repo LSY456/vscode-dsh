@@ -13,6 +13,16 @@
 
 import { ToolCall } from './toolcall';
 
+/**
+ * 模型请求空闲超时（P0-3）：首字节与增量之间允许的最大静默时长。
+ *
+ * 仅靠调用方的 `AbortSignal` 不够——若用户不取消，而模型端连着却长时间不吐字节
+ * （网关挂住 / 连接半开 / 服务端排队），会话会**永久挂起**在 `running` 态，UI 只能干等。
+ * 这里以「空闲计时」兜底：每收到一个增量就重置计时器，静默超过阈值即以
+ * `TimeoutError` 中断请求，由 Agent 循环按模型调用失败收尾（session.ended reason=error）。
+ */
+export const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
@@ -49,6 +59,8 @@ export interface ChatCompletionResult {
 export interface ChatStreamOptions {
   temperature?: number;
   signal?: AbortSignal;
+  /** 空闲超时（ms）：距上一个增量超过该时长即以 TimeoutError 中断；<= 0 关闭。缺省 60s。 */
+  idleTimeoutMs?: number;
   /** 每个增量到达时回调（reasoning 与 content 分别触发） */
   onChunk?: (chunk: StreamChunk) => void;
   /** 暴露给模型的工具清单（原生 function calling） */
@@ -76,6 +88,92 @@ const DEFAULT_MODEL = 'deepseek-chat';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 const DEFAULT_ANTHROPIC_MODEL = 'claude-3-5-sonnet-latest';
 
+/**
+ * 以「空闲超时」包裹一次流式请求（P0-3）。
+ *
+ * 内部复合一个 AbortController：调用方 signal 与超时都能中断同一个 fetch。
+ * 每收到一个 SSE 事件即重置计时器；静默超过 idleTimeoutMs 即 abort，
+ * 并把 `fetch`/解析层抛出的 abort 错误改写为可读的 TimeoutError。
+ *
+ * 返回 `{ signal, onActivity, dispose }`：
+ *  - `signal` 传给 `fetch`；
+ *  - `onActivity()` 由 SSE 解析器在每个事件到达时调用（重置空闲计时）；
+ *  - `dispose()` 在请求收尾时清理计时器与监听。
+ */
+function withIdleTimeout(
+  external: AbortSignal | undefined,
+  idleTimeoutMs: number
+): { signal: AbortSignal; onActivity: () => void; dispose: () => void; timedOut: () => boolean } {
+  const ctrl = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const onExternalAbort = () => ctrl.abort(external?.reason);
+  if (external) {
+    if (external.aborted) ctrl.abort(external.reason);
+    else external.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  const arm = () => {
+    if (timer) clearTimeout(timer);
+    if (idleTimeoutMs <= 0) return; // <= 0 关闭空闲超时（测试/禁用用）
+    timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort(new Error(`模型响应空闲超时（${idleTimeoutMs}ms 内无任何增量）`));
+    }, idleTimeoutMs);
+    // 不阻止进程退出（daemon 长驻，但计时器不应成为 keep-alive 来源）
+    (timer as unknown as { unref?: () => void }).unref?.();
+  };
+  arm();
+
+  return {
+    signal: ctrl.signal,
+    onActivity: arm,
+    timedOut: () => timedOut,
+    dispose: () => {
+      if (timer) clearTimeout(timer);
+      external?.removeEventListener('abort', onExternalAbort);
+    },
+  };
+}
+
+/** 统一的请求失败信息：区分「空闲超时」「调用方取消」「其它网络错误」。 */
+function describeFetchError(err: unknown, guard: { timedOut: () => boolean }): Error {
+  if (guard.timedOut()) {
+    const e = new Error('模型请求空闲超时：连接建立后长时间未收到任何增量，已中断。');
+    e.name = 'TimeoutError';
+    return e;
+  }
+  // 中断（取消）：平台可能抛 DOMException/AbortError，措辞为 "This operation was aborted"，
+  // 也可能由解析层的 abortReason() 抛出，统一归一化为可读文案。
+  if (isAbortLike(err)) {
+    const e = new Error('模型请求已取消。');
+    e.name = 'AbortError';
+    return e;
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+/** 判定是否为中断类错误（不同运行时措辞不一：AbortError / "operation was aborted"）。 */
+function isAbortLike(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'AbortError') return true;
+  if (err.name === 'TimeoutError') return false; // 空闲超时单独走 timedOut 分支
+  return /abort/i.test(err.message);
+}
+
+/**
+ * 中断后应抛出的错误：优先沿用 `signal.reason`（可携带具体原因，如空闲超时描述），
+ * 否则退回一个通用 AbortError。
+ */
+function abortReason(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error) return reason;
+  const e = new Error(reason === undefined ? '模型请求已取消。' : String(reason));
+  e.name = 'AbortError';
+  return e;
+}
+
 export class OpenAICompatibleModel implements ChatModel {
   private readonly baseURL: string;
   private readonly apiKey: string;
@@ -88,21 +186,44 @@ export class OpenAICompatibleModel implements ChatModel {
   }
 
   async chat(messages: ChatMessage[], opts: ChatStreamOptions = {}): Promise<ChatCompletionResult> {
-    const res = await fetch(`${this.baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify(toOpenAIBody(this.model, messages, opts)),
-      signal: opts.signal,
-    });
+    const idle = withIdleTimeout(opts.signal, opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
+    try {
+      let res: Response;
+      try {
+        res = await fetch(`${this.baseURL}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify(toOpenAIBody(this.model, messages, opts)),
+          signal: idle.signal,
+        });
+      } catch (err) {
+        throw describeFetchError(err, idle);
+      }
 
-    if (!res.ok || !res.body) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`模型请求失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+      if (!res.ok || !res.body) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`模型请求失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const userOnChunk = opts.onChunk ?? (() => {});
+      try {
+        return await parseSSE(
+          res.body as unknown as AsyncIterable<Uint8Array>,
+          (c) => {
+            idle.onActivity(); // 每个增量重置空闲计时
+            userOnChunk(c);
+          },
+          idle.signal
+        );
+      } catch (err) {
+        // 流读取/解析阶段也可能因中断而抛（平台原生 AbortError），统一归一化
+        throw describeFetchError(err, idle);
+      }
+    } finally {
+      idle.dispose();
     }
-    return parseSSE(res.body as unknown as AsyncIterable<Uint8Array>, opts.onChunk ?? (() => {}));
   }
 }
 
@@ -126,22 +247,44 @@ export class AnthropicModel implements ChatModel {
 
   async chat(messages: ChatMessage[], opts: ChatStreamOptions = {}): Promise<ChatCompletionResult> {
     const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
-    const res = await fetch(`${this.baseURL}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': this.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(toAnthropicBody(this.model, opts, system, anthropicMessages)),
-      signal: opts.signal,
-    });
+    const idle = withIdleTimeout(opts.signal, opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
+    try {
+      let res: Response;
+      try {
+        res = await fetch(`${this.baseURL}/v1/messages`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-api-key': this.apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify(toAnthropicBody(this.model, opts, system, anthropicMessages)),
+          signal: idle.signal,
+        });
+      } catch (err) {
+        throw describeFetchError(err, idle);
+      }
 
-    if (!res.ok || !res.body) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`模型请求失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+      if (!res.ok || !res.body) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`模型请求失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+      }
+      const userOnChunk = opts.onChunk ?? (() => {});
+      try {
+        return await parseAnthropicSSE(
+          res.body as unknown as AsyncIterable<Uint8Array>,
+          (c) => {
+            idle.onActivity();
+            userOnChunk(c);
+          },
+          idle.signal
+        );
+      } catch (err) {
+        throw describeFetchError(err, idle);
+      }
+    } finally {
+      idle.dispose();
     }
-    return parseAnthropicSSE(res.body as unknown as AsyncIterable<Uint8Array>, opts.onChunk ?? (() => {}));
   }
 }
 
@@ -194,7 +337,8 @@ function toAnthropicMessages(messages: ChatMessage[]): {
 /** 解析 Anthropic SSE 流，累积 thinking_delta（reasoning）、text_delta（content）与 tool_use 块并回调增量。 */
 async function parseAnthropicSSE(
   stream: AsyncIterable<Uint8Array>,
-  onChunk: (chunk: StreamChunk) => void
+  onChunk: (chunk: StreamChunk) => void,
+  signal?: AbortSignal
 ): Promise<ChatCompletionResult> {
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
@@ -203,6 +347,7 @@ async function parseAnthropicSSE(
   const toolUses = new Map<number, ToolCallAccumulator>();
 
   for await (const value of stream) {
+    if (signal?.aborted) break; // P0-3：中断后立即停止消费
     buffer += decoder.decode(value, { stream: true });
     let idx: number;
     while ((idx = buffer.indexOf('\n')) >= 0) {
@@ -244,6 +389,9 @@ async function parseAnthropicSSE(
       }
     }
   }
+
+  // P0-3：中断同样显式抛出，避免把半截内容当作正常完成
+  if (signal?.aborted) throw abortReason(signal);
 
   const result: ChatCompletionResult = { reasoning, content };
   const nativeCalls = assembleToolCalls(toolUses);
@@ -367,7 +515,8 @@ function assembleToolCalls(accs: Map<number, ToolCallAccumulator>): ToolCall[] |
 /** 解析 OpenAI 兼容 SSE 流，累积 reasoning_content、content 与 tool_calls 增量并回调。 */
 async function parseSSE(
   stream: AsyncIterable<Uint8Array>,
-  onChunk: (chunk: StreamChunk) => void
+  onChunk: (chunk: StreamChunk) => void,
+  signal?: AbortSignal
 ): Promise<ChatCompletionResult> {
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
@@ -376,6 +525,8 @@ async function parseSSE(
   const toolCalls = new Map<number, ToolCallAccumulator>();
 
   for await (const value of stream) {
+    // P0-3：被中断（取消 / 空闲超时）时立即停止消费，不再解析后续增量
+    if (signal?.aborted) break;
     buffer += decoder.decode(value, { stream: true });
     let idx: number;
     while ((idx = buffer.indexOf('\n')) >= 0) {
@@ -419,6 +570,10 @@ async function parseSSE(
       }
     }
   }
+
+  // P0-3：因中断（取消 / 空闲超时）而提前退出时，必须把中断**显式抛给调用方**，
+  // 否则会静默返回半截内容，模型调用失败被误判为"正常完成"。
+  if (signal?.aborted) throw abortReason(signal);
 
   const result: ChatCompletionResult = { reasoning, content };
   const nativeCalls = assembleToolCalls(toolCalls);

@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatMessage, ChatModel, FakeChatModel, FakeTurn } from './model';
+import { ChatCompletionResult, ChatMessage, ChatModel, ChatStreamOptions, FakeChatModel, FakeTurn } from './model';
 import { applyTokenBudget, estimateTokens, generateTitle, RealAgentConfig, runRealAgent, TITLE_SYSTEM_PROMPT } from './realAgent';
 
 let root = '';
@@ -32,6 +32,17 @@ function makeCtx(caps?: AgentCapabilities): MockCtx {
   const events: Array<{ method: string; params: any }> = [];
   const waiters: Array<{ kind: 'approval' | 'patch'; resolve: (v: boolean) => void }> = [];
   let canceled = false;
+  // P0-3：模拟 server 的取消订阅语义（cancel 时同步触发，供 Agent abort 在途请求）
+  const cancelHooks = new Set<() => void>();
+  const fireCancel = () => {
+    for (const fn of [...cancelHooks]) {
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
   const ctx: MockCtx = {
     sessionId: 's1',
     workspaceRoot: root,
@@ -40,12 +51,21 @@ function makeCtx(caps?: AgentCapabilities): MockCtx {
     waitForUser: (kind) =>
       new Promise<boolean>((resolve) => waiters.push({ kind, resolve })),
     isCanceled: () => canceled,
+    onCancel: (fn) => {
+      if (canceled) {
+        fn();
+        return () => {};
+      }
+      cancelHooks.add(fn);
+      return () => cancelHooks.delete(fn);
+    },
     readFile: async (target) =>
       fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : undefined,
     events,
     waiters,
     setCanceled: () => {
       canceled = true;
+      fireCancel(); // 与 server 一致：置位后同步触发取消订阅
     },
   };
   return ctx;
@@ -326,6 +346,57 @@ describe('realAgent：取消', () => {
     expect(ended.params.reason).toBe('canceled');
     // 模型正文未被流式输出（仅取消提示）
     expect(ctx.events.some((e) => e.method === EVENTS.MessageDelta && e.params.delta.includes('不应输出'))).toBe(false);
+  });
+
+  it('P0-3 取消可中断在途请求：模型永不吐增量时取消能及时收尾（不等 onChunk）', async () => {
+    const ctx = makeCtx();
+    // 模拟"挂住的模型"：标题请求正常返回（否则会话起不来），正文请求不产生任何增量，
+    // 只在 signal abort 时才 reject —— 旧实现下 onChunk 永不触发，abort 永不被调用，
+    // 会话会永久卡在 running。
+    let aborted = false;
+    const hangingModel: ChatModel = {
+      chat: (messages: ChatMessage[], opts: ChatStreamOptions = {}) => {
+        if (isTitleRequest(messages)) return Promise.resolve<ChatCompletionResult>({ reasoning: '', content: '测试标题' });
+        return new Promise<never>((_resolve, reject) => {
+          const sig = opts.signal;
+          if (!sig) return; // 永不 resolve（无 signal 时就是永久挂起）
+          const fail = () => {
+            aborted = true;
+            const e = new Error('aborted');
+            e.name = 'AbortError';
+            reject(e);
+          };
+          if (sig.aborted) return fail();
+          sig.addEventListener('abort', fail, { once: true });
+        });
+      },
+    };
+    const run = runRealAgent(ctx, baseParams, {
+      model: hangingModel,
+      idleTimeoutMs: 0, // 关闭空闲超时，确保本用例只考察"取消"这条中断路径
+    });
+
+    await waitEvent(ctx, EVENTS.SessionStarted);
+    expect(aborted).toBe(false); // 请求确实在途
+    const t0 = Date.now();
+    ctx.setCanceled(); // 触发 cancel 订阅 -> abort 在途 fetch
+    await run;
+    const elapsed = Date.now() - t0;
+
+    expect(aborted).toBe(true); // 在途请求被真正中断
+    expect(elapsed).toBeLessThan(1000); // 及时收尾，而非挂死
+    const ended = ctx.events.find((e) => e.method === EVENTS.SessionEnded)!;
+    expect(ended.params.reason).toBe('canceled');
+  });
+
+  it('P0-3 会话收尾后取消订阅被清理（不泄漏到下一轮）', async () => {
+    const ctx = makeCtx();
+    const model = scripted([{ content: 'done' }]);
+    await runRealAgent(ctx, baseParams, { model });
+    // runRealAgent 已 subscribe/unsubscribe；此处再 cancel 不应抛错、不应产生重复事件
+    const before = ctx.events.length;
+    ctx.setCanceled();
+    expect(ctx.events.length).toBe(before);
   });
 });
 

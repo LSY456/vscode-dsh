@@ -45,6 +45,8 @@ export interface RealAgentConfig {
   maxReadBytes?: number;
   /** 上下文 token 预算（发送前裁剪历史，防止超出模型上下文窗口） */
   maxContextTokens?: number;
+  /** 模型请求空闲超时（ms，P0-3）：距上一增量超过该时长即中断；<= 0 关闭。缺省 60s。 */
+  idleTimeoutMs?: number;
   /** 命令沙箱（P3.5+）：可选，缺省 executeCommand 内部兜底 ProcessSandbox */
   sandbox?: CommandSandbox;
 }
@@ -160,6 +162,8 @@ export async function runRealAgent(
   const maxRounds = config.maxToolRounds ?? 8;
   const abort = new AbortController();
   const caps: AgentCapabilities = ctx.capabilities ?? {};
+  // P0-3：订阅会话取消，在途模型请求可被立即中断（不必等 onChunk 才察觉取消）
+  const unsubscribeCancel = ctx.onCancel?.(() => abort.abort());
   const trajectory = (kind: string, detail: string) =>
     ctx.notify(EVENTS.Trajectory, {
       sessionId: ctx.sessionId,
@@ -193,6 +197,7 @@ export async function runRealAgent(
       }
       const result = await config.model.chat(messages, {
         signal: abort.signal,
+        idleTimeoutMs: config.idleTimeoutMs,
         tools: TOOL_DEFINITIONS,
         onChunk: (c) => {
           if (ctx.isCanceled() || abort.signal.aborted) {
@@ -242,6 +247,7 @@ export async function runRealAgent(
   }
 
   const canceled = ctx.isCanceled();
+  unsubscribeCancel?.();
   if (canceled) {
     ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[已取消]' });
     ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'canceled' });
@@ -526,7 +532,7 @@ export async function generateTitle(model: ChatModel, prompt: string): Promise<s
         { role: 'system', content: TITLE_SYSTEM_PROMPT },
         { role: 'user', content: prompt },
       ],
-      { signal: abort.signal }
+      { signal: abort.signal, idleTimeoutMs: 0 } // 标题生成已由外层 5s 定时器兜底
     );
     const t = (result.content ?? '').replace(/\s+/g, ' ').trim();
     return t ? t.slice(0, TITLE_MAX) : fallback;
