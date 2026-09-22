@@ -49,6 +49,19 @@ export interface PatchSnapshot {
 }
 
 export const DEFAULT_APPROVAL_TTL_MS = 60_000;
+/** 挂起项 TTL 可配范围：太短来不及看，太长等于让 Agent 干等 */
+export const MIN_APPROVAL_TTL_MS = 10_000;
+export const MAX_APPROVAL_TTL_MS = 60 * 60_000;
+
+/**
+ * 收敛外部声明的挂起项 TTL（initialize.capabilities.approvalTtlMs）。
+ * 非数字 / 非正数回落到缺省 60s，越界钳制到 [10s, 60min]。
+ */
+export function clampApprovalTtlMs(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_APPROVAL_TTL_MS;
+  return Math.min(MAX_APPROVAL_TTL_MS, Math.max(MIN_APPROVAL_TTL_MS, Math.round(n)));
+}
 
 export class Session {
   state: SessionState = 'idle';
@@ -61,6 +74,8 @@ export class Session {
   private patchSnapshot: PatchSnapshot | null = null;
   /** P2 编辑后应用：patchId -> 用户编辑后的完整内容（accept 时带回，写盘覆盖 newContent） */
   private patchContent = new Map<string, string>();
+  /** P0-3 取消订阅者：Agent 注册的在途请求中断回调（如 abort 在途 fetch） */
+  private cancelHooks = new Set<() => void>();
 
   /** 事件投递钩子：由 server 绑定到当前连接的 ws；断线时不投递但缓冲仍记录 */
   deliver: (method: string, params: unknown) => void = () => {};
@@ -133,6 +148,34 @@ export class Session {
     if (this.state === 'pending_approval' || this.state === 'pending_patch') {
       this.state = 'running'; // Agent 会在下一轮检查 canceled 并收尾
     }
+    // P0-3：同步触发在途请求中断（在 rejectAllPending 之后，避免回调里再观察挂起态）
+    this.fireCancelHooks();
+  }
+
+  /**
+   * P0-3 注册取消回调；返回取消订阅函数。
+   *
+   * 会话已处于取消态时**立即同步触发一次**——否则「先取消、后注册」的竞态会让
+   * Agent 错过事件、在途请求无人中断。
+   */
+  onCancel(fn: () => void): () => void {
+    if (this.canceled) {
+      fn();
+      return () => {};
+    }
+    this.cancelHooks.add(fn);
+    return () => this.cancelHooks.delete(fn);
+  }
+
+  /** 触发全部取消回调；回调抛错不影响其它回调，也不向调用方冒泡。 */
+  private fireCancelHooks(): void {
+    for (const fn of [...this.cancelHooks]) {
+      try {
+        fn();
+      } catch {
+        /* 取消回调失败不应阻断取消流程 */
+      }
+    }
   }
 
   end(): void {
@@ -141,6 +184,8 @@ export class Session {
     this.patchSnapshot = null;
     this.patchContent.clear();
     this.rejectAllPending();
+    // 会话收尾：清空取消订阅，避免上一轮的钩子泄漏到下一轮
+    this.cancelHooks.clear();
   }
 
   isCanceled(): boolean {

@@ -106,6 +106,11 @@ export interface ModelConfig {
   agent?: 'mock' | 'real' | 'auto';
   /** 模型 provider（P3.5+ 多点位）：openai（OpenAI 兼容，含 DeepSeek/通义等）| anthropic | auto（缺省=openai） */
   provider?: 'openai' | 'anthropic' | 'auto';
+  /**
+   * 模型请求空闲超时（ms，P0-3）：距上一个流式增量超过该时长即中断本次请求，
+   * 避免模型端静默时会话永久挂起。缺省 60000；<= 0 关闭。
+   */
+  idleTimeoutMs?: number;
 }
 
 export interface InitializeParams {
@@ -125,6 +130,11 @@ export interface InitializeParams {
     allowedDirs?: string[];
     /** 全局并发会话上限；0 = 不限制 */
     maxConcurrency?: number;
+    /**
+     * 挂起项（approval.request / file.patch.pending）超时毫秒数；
+     * 缺省 60s，daemon 端钳制到 [10s, 60min]。到点未响应按拒绝处理。
+     */
+    approvalTtlMs?: number;
   };
   client: {
     name: string;
@@ -366,6 +376,8 @@ export interface EventFilePatchPending {
   /** 修改后完整内容 */
   newContent: string;
   description?: string;
+  /** 过期时间（epoch ms），过期后按拒绝处理（daemon 盖戳，UI 用于显示倒计时） */
+  expiresAt?: number;
 }
 
 export interface EventFilePatchResult {
