@@ -231,6 +231,57 @@ const emptyDom = await renderScenario(({ emitRaw }) => {
   });
 });
 
+// ---- 场景三：已决策的审批 / 补丁卡（折叠态：只留标题行 + 结论徽标）----
+// 决策走真实点击路径（decideApproval / decidePatch），而不是直接改 DOM——
+// 这样预览里看到的折叠效果与线上完全同源。
+const decidedDom = await renderScenario(({ emit, emitRaw }) => {
+  emitRaw({
+    kind: 'init',
+    state: {
+      sessionId: 'sess_preview_decided',
+      connected: true,
+      agent: 'real',
+      model: 'deepseek-chat',
+      history: [],
+    },
+  });
+  emitRaw({ kind: 'session.reset', sessionId: 'sess_preview_decided', reason: 'new' });
+
+  emit('approval.request', {
+    approvalId: 'ap_decided_reject',
+    tool: 'bash_execute',
+    input: { command: 'rm -rf build' },
+    risk: 'high',
+    reason: '高危命令需人工审批',
+  });
+  emit('approval.request', {
+    approvalId: 'ap_decided_trust',
+    tool: 'read_file',
+    input: { path: 'src/daemon/tools.ts' },
+    risk: 'low',
+    reason: '读取工作区内的文件',
+  });
+  emit('file.patch.pending', {
+    patchId: 'pt_decided',
+    path: 'src/daemon/tools.ts',
+    oldContent: 'a',
+    newContent: 'b',
+    description: '补上 realpath 解析后的前缀二次校验',
+  });
+
+  // 待办条一次只投影一个挂起项，所以按当前显示的按钮逐个点
+  const doc = globalThis.document;
+  const click = (label) => {
+    const b = [...doc.querySelectorAll('#pending-actions button')].find((n) => n.textContent === label);
+    if (!b) throw new Error('[uiPreview] 待办条上没有按钮：' + label);
+    b.click();
+  };
+  click('拒绝'); // ap_decided_reject → 已拒绝
+  click('接受并记住'); // ap_decided_trust → 已接受并记住
+  click('应用'); // pt_decided → 已提交，等待应用
+  emit('file.patch.result', { patchId: 'pt_decided', accepted: true, applied: true });
+});
+
 // ---- 组装预览页 ----
 const esc = (s) => s.replace(/<\/(script)/gi, '<\\/$1');
 
@@ -280,6 +331,10 @@ const preview = `<!DOCTYPE html>
       <figcaption>③ 侧边栏 340px · 空态 + 演示模式（深色主题）</figcaption>
       <div class="frame narrow"><iframe id="f-narrow-dark"></iframe></div>
     </figure>
+    <figure>
+      <figcaption>④ 侧边栏 340px · 已决策卡片折叠态（浅色主题，点标题可再展开）</figcaption>
+      <div class="frame narrow"><iframe id="f-narrow-decided"></iframe></div>
+    </figure>
   </div>
 
 <script type="text/plain" id="panel-css">${esc(PANEL_CSS)}</script>
@@ -287,6 +342,7 @@ const preview = `<!DOCTYPE html>
 <script type="text/plain" id="theme-dark">${esc(themeCss(DARK))}</script>
 <script type="text/plain" id="dom-conversation">${esc(conversationDom)}</script>
 <script type="text/plain" id="dom-empty">${esc(emptyDom)}</script>
+<script type="text/plain" id="dom-decided">${esc(decidedDom)}</script>
 <script>
   const txt = (id) => document.getElementById(id).textContent;
   const panelCss = txt('panel-css');
@@ -296,9 +352,11 @@ const preview = `<!DOCTYPE html>
     '</style></head><body>' + domHtml + '</body></html>';
   const conv = txt('dom-conversation');
   const empty = txt('dom-empty');
+  const decided = txt('dom-decided');
   document.getElementById('f-narrow-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-wide-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-narrow-dark').srcdoc = build(empty, 'theme-dark');
+  document.getElementById('f-narrow-decided').srcdoc = build(decided, 'theme-light');
 </script>
 </body>
 </html>
