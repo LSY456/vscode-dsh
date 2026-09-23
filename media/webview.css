@@ -515,6 +515,10 @@ body {
   font-family: var(--dsh-mono);
   font-size: var(--dsh-fs-xs);
 }
+/* 有失败步骤时头部计数着警示色——折叠状态下也要能一眼看出"这轮出过错" */
+.activity-meta.err {
+  color: var(--dsh-err);
+}
 .activity.collapsed .activity-list {
   display: none;
 }
@@ -585,6 +589,10 @@ body {
   font-family: var(--dsh-mono);
   font-size: var(--dsh-fs-xs);
   flex: 0 0 auto;
+}
+/* 失败行：耗时着警示色 + 行内「失败」徽标（不再自动展开正文，避免顶掉结论） */
+.tool-dur.err {
+  color: var(--dsh-err);
 }
 .tool-body {
   display: none;

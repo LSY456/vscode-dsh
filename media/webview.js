@@ -82,6 +82,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   let activityMeta = null;
   let activityStartedAt = 0;
   let activitySteps = 0;
+  /** 失败步数：折叠时也要让用户看见"有失败"，否则会误以为过程一切正常 */
+  let activityFailures = 0;
+  /** 过程计时器：折叠状态下靠它让「N 步 · 12.3s」持续走动，给出"还在干活"的反馈 */
+  let activityTimer = null;
 
   const toolRows = new Map(); // tool -> { row, body, dur, startedAt }
   const approvals = new Map(); // approvalId -> entry
@@ -353,6 +357,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
       addCopyAction(answerEl, raw);
     }
     finishReasoning();
+    stopActivityTimer();
     answerEl = null;
     answerBody = null;
     answerBatcher = null;
@@ -402,10 +407,14 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     reasoningBatcher = null;
   }
 
-  // ---- 过程：把工具调用聚合成一条时间线，步骤可展开看输入/输出
+  // ---- 过程：把工具调用聚合成一条时间线，默认折叠，点开才看输入/输出
+  //
+  // 为什么默认折叠：工具调用属于"过程"，而回答才是用户要的结论。展开状态下列表会把结论
+  // 一路挤出视野（实测一轮十来步就要滚好几屏），与"回答是主角"的层级正好相反。
+  // 折叠后头部仍持续显示「N 步 · 耗时 · N 失败」，既有进度反馈，也不占版面。
   function ensureActivity() {
     if (activityEl) return;
-    activityEl = el('section', 'activity');
+    activityEl = el('section', 'activity collapsed');
     const head = el('div', 'activity-head');
     head.appendChild(el('span', 'chev', '▾'));
     head.appendChild(el('b', '', '过程'));
@@ -417,12 +426,31 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     activityEl.appendChild(activityList);
     activityStartedAt = Date.now();
     activitySteps = 0;
+    activityFailures = 0;
+    ensureActivityTimer();
     addMessage(activityEl);
+  }
+
+  function ensureActivityTimer() {
+    if (activityTimer) return;
+    activityTimer = setInterval(updateActivityMeta, 1000);
+  }
+
+  function stopActivityTimer() {
+    if (activityTimer) {
+      clearInterval(activityTimer);
+      activityTimer = null;
+    }
   }
 
   function updateActivityMeta() {
     if (!activityMeta) return;
-    activityMeta.textContent = activitySteps + ' 步 · ' + fmtDuration(Date.now() - activityStartedAt);
+    activityMeta.textContent =
+      activitySteps +
+      ' 步 · ' +
+      fmtDuration(Date.now() - activityStartedAt) +
+      (activityFailures ? ' · ' + activityFailures + ' 失败' : '');
+    activityMeta.className = 'activity-meta' + (activityFailures ? ' err' : '');
   }
 
   function describeToolInput(input) {
@@ -438,6 +466,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   function addToolRow(tool, input) {
     ensureActivity();
     if (toolRows.has(tool)) return;
+    ensureActivityTimer(); // 同一轮里可能"回答 → 再调工具"，计时器要重新跑起来
     const row = el('div', 'tool-row running');
     const line = el('div', 'tool-line');
     line.appendChild(el('code', 'tool-name', tool));
@@ -452,7 +481,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     activityList.appendChild(row);
     activitySteps += 1;
     updateActivityMeta();
-    toolRows.set(tool, { row, body, dur, startedAt: Date.now() });
+    toolRows.set(tool, { row, line, body, dur, startedAt: Date.now() });
     scrollBottom();
   }
 
@@ -465,7 +494,13 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     entry.row.classList.add(executed.ok ? 'ok' : 'failed');
     entry.dur.textContent = fmtDuration(ms);
     entry.body.appendChild(el('pre', 'code-block', executed.output ?? '(无输出)'));
-    if (!executed.ok) entry.row.classList.add('open');
+    if (!executed.ok) {
+      // 失败**不**自动展开正文：一轮里连错几次（例如搜索无结果被反复重试）时，自动展开会
+      // 瞬间把结论顶出好几屏。改为行内标注 + 头部计数透出，要追细节用户自己点开。
+      activityFailures += 1;
+      entry.dur.classList.add('err');
+      entry.line.appendChild(el('span', 'badge err', '失败'));
+    }
     toolRows.delete(tool);
     updateActivityMeta();
     scrollBottom();
@@ -473,10 +508,12 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
 
   function resetTurn() {
     finishReasoning();
+    stopActivityTimer();
     activityEl = null;
     activityList = null;
     activityMeta = null;
     activitySteps = 0;
+    activityFailures = 0;
     toolRows.clear();
   }
 
@@ -908,9 +945,12 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     answerEl = null;
     answerBody = null;
     answerBatcher = null;
+    stopActivityTimer();
     activityEl = null;
     activityList = null;
     activityMeta = null;
+    activitySteps = 0;
+    activityFailures = 0;
     setSession('');
     setSessionTitle('');
     btnJump.hidden = true;

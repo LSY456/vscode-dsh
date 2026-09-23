@@ -111,14 +111,23 @@ describe('过程（工具调用）', () => {
     expect(document.querySelectorAll('.card').length).toBe(0);
   });
 
-  it('失败的步骤自动展开输出', () => {
+  it('过程默认折叠：结论不被过程细节挤出视野', () => {
+    expect(document.querySelector('.activity').className).toContain('collapsed');
+    // 折叠时列表整体不渲染（由 CSS 负责），但头部仍持续给出步数反馈
+    expect(document.querySelector('.activity-head').textContent).toContain('步');
+  });
+
+  it('失败的步骤行内标注 + 头部计数，但不自动展开输出', () => {
+    // 回归：原先失败行会自动 open，一轮连错几次就会把结论顶出好几屏
     emitEvent('tool.started', { tool: 'bash_execute', input: { command: 'rm -rf /' } });
     emitEvent('tool.executed', { tool: 'bash_execute', ok: false, output: '命令被拒绝', durationMs: 3 });
     const rows = document.querySelectorAll('.activity .tool-row');
     expect(rows.length).toBe(2);
     expect(rows[1].className).toContain('failed');
-    expect(rows[1].className).toContain('open');
-    expect(rows[1].textContent).toContain('命令被拒绝');
+    expect(rows[1].className).not.toContain('open');
+    expect(rows[1].textContent).toContain('失败');
+    expect(rows[1].textContent).toContain('命令被拒绝'); // 输出仍在 DOM 里，点开即可看
+    expect(document.querySelector('.activity-head').textContent).toContain('1 失败');
   });
 });
 
@@ -181,7 +190,9 @@ describe('审批卡与待办条', () => {
     expect(document.getElementById('pending-bar').hidden).toBe(false);
     emitEvent('approval.expired', { approvalId: 'ap3' });
     expect(document.getElementById('pending-bar').hidden).toBe(true);
-    expect(document.querySelector('.badge.err').textContent).toBe('已过期');
+    // 收窄到审批卡内部：工具行失败徽标（本轮新增）也带 .badge.err，
+    // 裸 querySelector('.badge.err') 会先命中它而误判。
+    expect(document.querySelector('.card.approval .badge.err').textContent).toBe('已过期');
   });
 });
 

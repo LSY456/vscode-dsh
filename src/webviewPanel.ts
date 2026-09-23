@@ -537,12 +537,19 @@ export class WebviewPanelHost {
     let html = fs.readFileSync(path.join(mediaDir, 'webview.html'), 'utf8');
     const nonce = requireCryptoRandom();
     html = html.replace(/__NONCE__/g, nonce);
-    const webviewUri = (file: string) =>
+    const rawUri = (file: string) =>
       webview
         .asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'out', 'media', file))
         .toString();
-    html = html.replace(/__CSS_URI__/g, webviewUri('webview.css'));
-    html = html.replace(/__JS_URI__/g, webviewUri('webview.js'));
+    // 资源 URI 挂内容指纹：VS Code 的 webview 资源加载器按 URI 缓存 CSS/JS，
+    // 而扩展路径只随版本号变化 —— 重装同版本、或在 F5 开发态下 rebuild，
+    // 路径都不变 → URI 不变 → 一直命中旧缓存，表现为"UI 改了但界面纹丝不动"。
+    // 指纹随文件内容变，重建后 URI 必变，无需依赖版本号或手动 reload 窗口。
+    const stampedUri = (file: string) => `${rawUri(file)}?v=${fileStamp(path.join(mediaDir, file))}`;
+    // CSP 里必须放不带 query 的原始 URI（见 media/webview.html 中的说明）。
+    html = html.replace(/__CSS_ORIGIN__/g, rawUri('webview.css'));
+    html = html.replace(/__CSS_URI__/g, stampedUri('webview.css'));
+    html = html.replace(/__JS_URI__/g, stampedUri('webview.js'));
     return html;
   }
 }
@@ -589,6 +596,25 @@ function summarizeAttachments(attachments: Attachment[]): { label: string }[] {
     return [...chips.slice(0, MAX_CHIPS - 1), { label: `+${extra}` }];
   }
   return chips;
+}
+
+/**
+ * 资源内容指纹（FNV-1a 32 位十六进制），用于 webview 资源 URI 的缓存击穿。
+ * 不引 crypto：这里只需要"内容一变指纹就变"，不需要密码学强度；
+ * 一次 webview 创建只算一次，几万字节的开销可忽略。
+ */
+function fileStamp(absPath: string): string {
+  try {
+    const buf = fs.readFileSync(absPath);
+    let h = 0x811c9dc5;
+    for (let i = 0; i < buf.length; i++) {
+      h = Math.imul(h ^ buf[i], 0x01000193) >>> 0;
+    }
+    return h.toString(16).padStart(8, '0');
+  } catch {
+    // 读不到就退化成每次都变的时间戳：宁可多拉一次资源，也不要发出旧的
+    return String(Date.now());
+  }
 }
 
 function requireCryptoRandom(): string {
