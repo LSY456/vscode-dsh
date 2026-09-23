@@ -412,3 +412,62 @@ describe('演示模式（未配置模型 Key 的显式提示）', () => {
     expect(document.getElementById('agent-mode').hidden).toBe(true);
   });
 });
+
+/**
+ * 布局重编排：锁定新的信息层级，防止后续改动把界面退回
+ * 「顶部两条 bar + 底部三个区块堆叠 + 靠气泡方向区分说话人」的旧形态。
+ *
+ * 三件事：
+ *  1. 消息用「角色列 + 全宽正文」，说话人由角色标记指明；
+ *  2. 执行迹线是审计信息，只亮计数、不主动弹面板打断阅读；
+ *  3. 顶栏显示当前会话标题（有才显示，没有不留占位）。
+ */
+describe('布局重编排（角色列 / 迹线按需 / 会话标题）', () => {
+  it('用户与助手消息都带角色标记', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_layout', reason: 'new' });
+    emitEvent('user.message', { text: '布局检查' });
+    const userTurn = document.querySelector('#messages .turn.user');
+    expect(userTurn.querySelector(':scope > .role').textContent).toBe('你');
+
+    emitEvent('message.delta', { delta: '收到' });
+    emitEvent('message.done', {});
+    const agentTurn = document.querySelector('#messages .turn.assistant');
+    expect(agentTurn.querySelector(':scope > .role').textContent).toBe('dsh');
+  });
+
+  it('迹线只亮计数，不主动弹面板；点按钮才打开', () => {
+    const box = document.getElementById('trajectory-box');
+    const btn = document.getElementById('btn-trajectory');
+    expect(btn.hidden).toBe(true);
+
+    emitEvent('trajectory.record', { step: 1, kind: 'tool', detail: 'read_file' });
+    expect(box.hidden).toBe(true); // 审计信息不打断对话
+    expect(btn.hidden).toBe(false);
+    expect(document.getElementById('traj-badge').textContent).toBe('1');
+    expect(document.getElementById('traj-count').textContent).toBe('1 步');
+    expect(document.getElementById('trajectory').textContent).toContain('read_file');
+
+    btn.click();
+    expect(box.hidden).toBe(false);
+    document.getElementById('btn-trajectory-close').click();
+    expect(box.hidden).toBe(true);
+  });
+
+  it('三个覆盖面板互斥：打开设置会收起迹线', () => {
+    document.getElementById('btn-trajectory').click();
+    expect(document.getElementById('trajectory-box').hidden).toBe(false);
+    document.getElementById('btn-settings').click();
+    expect(document.getElementById('settings-panel').hidden).toBe(false);
+    expect(document.getElementById('trajectory-box').hidden).toBe(true);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(document.getElementById('settings-panel').hidden).toBe(true);
+  });
+
+  it('会话标题显示在顶栏，无标题时收起', () => {
+    const titleEl = document.getElementById('session-title');
+    expect(titleEl.hidden).toBe(true);
+    emitEvent('session.started', { sessionId: 'sess_title_1', title: '重构面板布局' });
+    expect(titleEl.hidden).toBe(false);
+    expect(titleEl.textContent).toBe('重构面板布局');
+  });
+});

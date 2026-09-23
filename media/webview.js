@@ -56,6 +56,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   const demoBanner = $('demo-banner');
   const demoBannerText = $('demo-banner-text');
   const btnDemoConfig = $('btn-demo-config');
+  const sessionTitleEl = $('session-title');
+  const btnTrajectory = $('btn-trajectory');
+  const btnTrajectoryClose = $('btn-trajectory-close');
+  const trajBadge = $('traj-badge');
 
   let running = false;
   let pinned = true;
@@ -207,6 +211,14 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     sessionEl.title = id;
   }
 
+  /** 会话标题：有就显示在顶栏标识右侧，没有则整块收起（不留空白占位） */
+  function setSessionTitle(title) {
+    const text = String(title || '').trim();
+    sessionTitleEl.textContent = text;
+    sessionTitleEl.hidden = !text;
+    sessionTitleEl.title = text;
+  }
+
   function setRunning(r) {
     running = r;
     btnSend.disabled = r;
@@ -274,9 +286,19 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     addMessage(el('div', 'message error', '⚠ ' + text));
   }
 
-  // 用户回合：气泡 + 「Agent 看到了什么」上下文 chip（上下文保真是这个插件的核心卖点）
+  /**
+   * 角色标记：给"谁在说话"一个固定视觉锚点。
+   * 弃用左右对齐气泡的原因——窄侧栏里右对齐会压缩长 prompt，且 assistant 没有锚点，
+   * 而 agent 输出的是报告/代码而非寒暄，文档式的「角色列 + 全宽正文」更接近标准 agent 工具。
+   */
+  function roleMark(text, cls) {
+    return el('span', 'role ' + cls, text);
+  }
+
+  // 用户回合：角色标记 + 消息体 + 「Agent 看到了什么」上下文 chip（上下文保真是这个插件的核心卖点）
   function addUser(text, attachments) {
     const turn = el('div', 'turn user');
+    turn.appendChild(roleMark('你', 'user'));
     const bubble = el('div', 'message user');
     bubble.innerHTML = renderMarkdown(text);
     turn.appendChild(bubble);
@@ -295,6 +317,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
 
   function addAssistantHtml(md) {
     const turn = el('div', 'turn assistant');
+    turn.appendChild(roleMark('dsh', 'agent'));
     const body = el('div', 'message assistant md');
     body.innerHTML = renderMarkdown(md);
     turn.appendChild(body);
@@ -305,6 +328,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   function ensureAnswer() {
     if (answerEl) return;
     answerEl = el('div', 'turn assistant');
+    answerEl.appendChild(roleMark('dsh', 'agent'));
     answerBody = el('div', 'message assistant md streaming', '');
     answerEl.appendChild(answerBody);
     addMessage(answerEl);
@@ -814,9 +838,14 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   // 迹线（会话级审计信息，独立于消息流）
   // -------------------------------------------------------------------------
 
+  /**
+   * 迹线是审计信息、不是对话内容，所以不主动弹面板打断阅读：
+   * 只在顶栏按钮上亮出计数，用户想看时自己点开。
+   */
   function addTrajectory(t) {
-    trajectoryBox.hidden = false;
     trajCount += 1;
+    btnTrajectory.hidden = false;
+    trajBadge.textContent = String(trajCount);
     trajCountEl.textContent = trajCount + ' 步';
     const line = el('div', 'traj-line');
     line.appendChild(el('span', 'traj-step', '#' + t.step));
@@ -854,9 +883,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     emptyEl.style.display = '';
     trajectoryEl.textContent = '';
     trajectoryBox.hidden = true;
-    trajectoryBox.open = false;
     trajCount = 0;
     trajCountEl.textContent = '';
+    trajBadge.textContent = '';
+    btnTrajectory.hidden = true;
     toolRows.clear();
     approvals.clear();
     patches.clear();
@@ -882,6 +912,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     activityList = null;
     activityMeta = null;
     setSession('');
+    setSessionTitle('');
     btnJump.hidden = true;
     pinned = true;
     setRunning(false);
@@ -922,6 +953,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   function renderHistoryMessages(rec) {
     clearMessages();
     if (!rec || !Array.isArray(rec.messages)) return;
+    setSessionTitle(rec.title);
     for (const m of rec.messages) {
       if (m.role === 'user') addUser(m.text);
       else if (m.role === 'assistant') addAssistantHtml(m.text);
@@ -934,11 +966,12 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   // 设置面板（A4）
   // -------------------------------------------------------------------------
 
+  /** 打开指定覆盖面板（history / settings / trajectory 三者互斥，同一时刻只开一个）。 */
   function openSheet(which) {
-    const history = which === 'history';
-    historyPanel.hidden = !history;
-    settingsPanel.hidden = history;
-    if (history) return;
+    historyPanel.hidden = which !== 'history';
+    settingsPanel.hidden = which !== 'settings';
+    trajectoryBox.hidden = which !== 'trajectory';
+    if (which !== 'settings') return;
     settingsMsg.textContent = '';
     btnSettingsRestart.hidden = true;
     btnSettingsRestart.disabled = false;
@@ -949,6 +982,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   function closeSheets() {
     historyPanel.hidden = true;
     settingsPanel.hidden = true;
+    trajectoryBox.hidden = true;
   }
 
   function fillSettings(params) {
@@ -992,6 +1026,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
       case 'session.started':
         setRunning(true);
         setSession(params.sessionId);
+        setSessionTitle(params.title);
         addSystem('会话开始' + (params.title ? '：' + params.title : ''));
         break;
       case 'reasoning.delta':
@@ -1125,6 +1160,12 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     else closeSheets();
   });
   btnSettingsClose.addEventListener('click', closeSheets);
+  // 迹线：按需打开（不主动弹面板打断阅读），关闭与其它覆盖面板同一套逻辑
+  btnTrajectory.addEventListener('click', () => {
+    if (trajectoryBox.hidden) openSheet('trajectory');
+    else closeSheets();
+  });
+  btnTrajectoryClose.addEventListener('click', closeSheets);
   // 演示模式横幅 → 一键进入模型配置（配好 Key 并重启 daemon 后横幅自动撤下）
   btnDemoConfig.addEventListener('click', () => openSheet('settings'));
   for (const backdrop of document.querySelectorAll('.sheet-backdrop')) {
@@ -1174,7 +1215,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   // Esc：优先关闭覆盖面板，其次停止正在进行的会话
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!historyPanel.hidden || !settingsPanel.hidden) {
+    if (!historyPanel.hidden || !settingsPanel.hidden || !trajectoryBox.hidden) {
       closeSheets();
       return;
     }

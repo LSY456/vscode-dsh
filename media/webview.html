@@ -11,21 +11,48 @@
   <title>dsh Agent</title>
 </head>
 <body>
+  <!-- 顶栏：单行。左＝标识 + 当前会话标题，右＝图标动作组。
+       状态信息（连接 / 模式 / 会话号）下移到输入区下方，避免在 ~300px 侧边栏里
+       用两条 bar 吃掉六分之一高度却只装了两个字的有效信息。 -->
   <header id="header">
-    <div class="brand">dsh <span class="brand-sub">Agent</span></div>
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 16 16" width="16" height="16" focusable="false">
+        <rect x="1.7" y="1.7" width="12.6" height="12.6" rx="3.6" fill="none" stroke="currentColor" stroke-width="1.3" />
+        <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" d="M5.8 5.5v5M5.8 5.5h2a2.5 2.5 0 0 1 0 5h-2" />
+      </svg>
+    </span>
+    <div class="brand-block">
+      <span class="brand">dsh Agent</span>
+      <span id="session-title" class="session-title" hidden></span>
+    </div>
     <span class="grow"></span>
-    <button id="btn-new" class="icon-btn" type="button" title="新建会话（清空当前对话并向 daemon 申请新会话）">新会话</button>
-    <button id="btn-history" class="icon-btn" type="button" title="历史会话" aria-label="历史会话">历史</button>
-    <button id="btn-settings" class="icon-btn" type="button" title="模型设置" aria-label="模型设置">设置</button>
+    <div class="header-actions">
+      <button id="btn-new" class="icon-btn" type="button" title="新建会话" aria-label="新建会话">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+          <path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M8 3.6v8.8M3.6 8h8.8" />
+        </svg>
+      </button>
+      <button id="btn-trajectory" class="icon-btn has-badge" type="button" title="执行迹线（审计）" aria-label="执行迹线" hidden>
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+          <path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M2.6 4.2h10.8M4.6 8h6.8M6.6 11.8h2.8" />
+        </svg>
+        <span id="traj-badge" class="traj-badge"></span>
+      </button>
+      <button id="btn-history" class="icon-btn" type="button" title="历史会话" aria-label="历史会话">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+          <circle cx="8" cy="8" r="5.3" fill="none" stroke="currentColor" stroke-width="1.3" />
+          <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" d="M8 4.9V8l2.4 1.5" />
+        </svg>
+      </button>
+      <button id="btn-settings" class="icon-btn" type="button" title="模型设置" aria-label="模型设置">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+          <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" d="M2.4 5h11.2M2.4 11h11.2" />
+          <circle cx="6.2" cy="5" r="1.7" fill="var(--vscode-editor-background, #1f1f1f)" stroke="currentColor" stroke-width="1.3" />
+          <circle cx="10" cy="11" r="1.7" fill="var(--vscode-editor-background, #1f1f1f)" stroke="currentColor" stroke-width="1.3" />
+        </svg>
+      </button>
+    </div>
   </header>
-
-  <div id="meta-bar">
-    <span id="conn-dot" class="dot connecting" aria-hidden="true"></span>
-    <div id="status" class="status connecting" role="status" aria-live="polite">连接中…</div>
-    <span class="grow"></span>
-    <span id="agent-mode" class="meta-chip" hidden></span>
-    <span id="session-id" class="meta-chip mono" hidden></span>
-  </div>
 
   <div id="demo-banner" class="demo-banner" role="alert" hidden>
     <span class="demo-tag">演示模式</span>
@@ -36,14 +63,27 @@
 
   <main id="main">
     <div id="empty" class="empty">
-      <div class="empty-title">dsh Agent</div>
+      <div class="empty-mark" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="26" height="26" focusable="false">
+          <rect x="1.7" y="1.7" width="12.6" height="12.6" rx="3.6" fill="none" stroke="currentColor" stroke-width="1.2" />
+          <path fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" d="M5.8 5.5v5M5.8 5.5h2a2.5 2.5 0 0 1 0 5h-2" />
+        </svg>
+      </div>
+      <div class="empty-title">开始与 dsh Agent 对话</div>
       <div class="empty-hint">
-        自动携带当前编辑器上下文（活动文件 / 选区 / 诊断 / git 状态）与 Agent 对话；
+        自动携带当前编辑器上下文（活动文件 / 选区 / 诊断 / git 状态）；
         文件改动先经原生 Diff 审查，高危工具先请求你审批。
       </div>
       <div class="suggest" role="list">
         <button type="button" class="suggest-item" data-prompt="解释当前文件的关键逻辑，并指出潜在问题">
-          <b>解释</b> 当前文件的关键逻辑
+          <span class="suggest-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14" focusable="false">
+              <circle cx="8" cy="8" r="5.3" fill="none" stroke="currentColor" stroke-width="1.3" />
+              <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" d="M6.6 6.4a1.5 1.5 0 1 1 1.9 1.5c-.4.2-.6.4-.6.9" />
+              <circle cx="8" cy="11" r="0.7" fill="currentColor" />
+            </svg>
+          </span>
+          <span class="suggest-body"><b>解释</b> 当前文件的关键逻辑</span>
         </button>
         <button
           type="button"
@@ -52,7 +92,13 @@
           data-prompt="请修改当前文件中的 TODO"
           data-prompt-demo="请修改当前文件中的 TODO（write edit）"
         >
-          <b>修改</b> 当前文件里的 TODO
+          <span class="suggest-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14" focusable="false">
+              <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M10.4 3.6l2 2L6 12H4v-2z" />
+              <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" d="M2.6 14h10.8" />
+            </svg>
+          </span>
+          <span class="suggest-body"><b>修改</b> 当前文件里的 TODO</span>
         </button>
         <!-- mock 专属：用关键字「咒语」演示审批链路，接入真实模型后不展示 -->
         <button
@@ -62,21 +108,21 @@
           hidden
           data-prompt="危险操作：请运行 bash rm -rf（danger）"
         >
-          <b>演示</b> 高危工具审批流程（仅演示模式）
+          <span class="suggest-icon" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14" focusable="false">
+              <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" d="M8 2.4l5.2 9.2H2.8z" />
+              <path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" d="M8 6.4v2.6" />
+              <circle cx="8" cy="10.6" r="0.7" fill="currentColor" />
+            </svg>
+          </span>
+          <span class="suggest-body"><b>演示</b> 高危工具审批流程（仅演示模式）</span>
         </button>
       </div>
+      <div class="empty-foot">Enter 发送 · Shift+Enter 换行 · Esc 停止</div>
     </div>
     <div id="messages" aria-live="polite"></div>
     <button id="btn-jump" class="jump-btn" type="button" hidden>↓ 有新内容</button>
   </main>
-
-  <details id="trajectory-box" hidden>
-    <summary>
-      <span class="traj-title">执行迹线</span>
-      <span id="traj-count" class="traj-count"></span>
-    </summary>
-    <div id="trajectory"></div>
-  </details>
 
   <div id="pending-bar" class="pending-bar" role="group" aria-label="待处理请求" hidden>
     <div id="pending-label" class="pending-label"></div>
@@ -84,13 +130,44 @@
   </div>
 
   <footer id="composer">
-    <textarea id="input" rows="1" placeholder="输入 Prompt…Enter 发送，Shift+Enter 换行" aria-label="输入 Prompt"></textarea>
-    <div class="composer-row">
-      <span id="composer-hint" class="hint">Enter 发送 · Shift+Enter 换行</span>
-      <button id="btn-cancel" class="btn danger" type="button" hidden>停止</button>
-      <button id="btn-send" class="btn primary" type="button">发送</button>
+    <div class="composer-box">
+      <textarea id="input" rows="1" placeholder="问点什么，或描述你想改的地方…" aria-label="输入 Prompt"></textarea>
+      <div class="composer-row">
+        <span id="composer-hint" class="hint">Enter 发送 · Shift+Enter 换行</span>
+        <button id="btn-cancel" class="btn danger" type="button" hidden>停止</button>
+        <button id="btn-send" class="btn primary" type="button">发送</button>
+      </div>
     </div>
   </footer>
+
+  <!-- 状态行：贴在输入区下方（IDE 状态栏心智），字号最弱，不与内容争视线 -->
+  <div id="meta-bar">
+    <span id="conn-dot" class="dot connecting" aria-hidden="true"></span>
+    <div id="status" class="status connecting" role="status" aria-live="polite">连接中…</div>
+    <span class="grow"></span>
+    <span id="agent-mode" class="meta-chip" hidden></span>
+    <span id="session-id" class="meta-chip mono" hidden></span>
+  </div>
+
+  <!-- 执行迹线：从底部堆叠中移出，改为按需打开的覆盖式面板（不主动打断对话） -->
+  <nav id="trajectory-box" class="sheet" hidden aria-label="执行迹线">
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-card">
+      <div class="sheet-head">
+        <span class="sheet-title">执行迹线</span>
+        <span id="traj-count" class="traj-count"></span>
+        <span class="grow"></span>
+        <button id="btn-trajectory-close" class="icon-btn" type="button" aria-label="关闭执行迹线">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+            <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M4.3 4.3l7.4 7.4M11.7 4.3l-7.4 7.4" />
+          </svg>
+        </button>
+      </div>
+      <div class="sheet-body">
+        <div id="trajectory"></div>
+      </div>
+    </div>
+  </nav>
 
   <nav id="history-panel" class="sheet" hidden aria-label="历史会话">
     <div class="sheet-backdrop"></div>
@@ -98,7 +175,11 @@
       <div class="sheet-head">
         <span class="sheet-title">历史会话</span>
         <span class="grow"></span>
-        <button id="btn-history-close" class="icon-btn" type="button" aria-label="关闭历史会话">关闭</button>
+        <button id="btn-history-close" class="icon-btn" type="button" aria-label="关闭历史会话">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+            <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M4.3 4.3l7.4 7.4M11.7 4.3l-7.4 7.4" />
+          </svg>
+        </button>
       </div>
       <div class="sheet-body">
         <div id="history-list"></div>
@@ -112,7 +193,11 @@
       <div class="sheet-head">
         <span class="sheet-title">模型设置</span>
         <span class="grow"></span>
-        <button id="btn-settings-close" class="icon-btn" type="button" aria-label="关闭模型设置">关闭</button>
+        <button id="btn-settings-close" class="icon-btn" type="button" aria-label="关闭模型设置">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+            <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M4.3 4.3l7.4 7.4M11.7 4.3l-7.4 7.4" />
+          </svg>
+        </button>
       </div>
       <div class="sheet-body">
         <form id="settings-form" autocomplete="off">

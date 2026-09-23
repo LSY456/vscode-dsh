@@ -163,7 +163,7 @@ session.send ──> (流式事件...) ──> approval.request ──挂起─�
 - `detail`：人类可读的步骤摘要
 - `ts`：epoch 毫秒时间戳
 
-VSCode 侧将轨迹渲染为可折叠的"执行迹线"面板，并可据此实现审计、回放与失败定位；
+VSCode 侧将轨迹渲染为「执行迹线」面板（顶栏图标按钮按需打开，不常驻占位），并可据此实现审计、回放与失败定位；
 真实 daemon 的持久化轨迹会追加写 `.dsh/trajectory/<sessionId>.jsonl`（命中大小上限自动归档）。
 
 ## 6b. Agent 工具约定（真实 daemon 实现参考）
