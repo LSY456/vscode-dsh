@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { AnthropicModel, createModel, FakeChatModel, OpenAICompatibleModel } from './model';
+import {
+  AnthropicModel,
+  createModel,
+  describeHttpError,
+  FakeChatModel,
+  OpenAICompatibleModel,
+} from './model';
 
 function sseChunks(lines: string[]): AsyncIterable<Uint8Array> {
   return {
@@ -398,5 +404,41 @@ describe('模型请求空闲超时（P0-3）', () => {
     const p = model.chat([{ role: 'user', content: 'x' }], { signal: ctrl.signal, idleTimeoutMs: 5000 });
     setTimeout(() => ctrl.abort(), 20);
     await expect(p).rejects.toThrow(/已取消/);
+  });
+});
+
+describe('describeHttpError：HTTP 失败要给出可执行的原因', () => {
+  it('402 余额不足：说清原因，且不再把用户往"检查配置"上带', () => {
+    // 回归：前端曾统一补一句"请检查 apiKey 与 model 配置"，
+    // 而上游 402 是账号没钱，与配置无关 —— 实测把用户带偏过。
+    const msg = describeHttpError(
+      402,
+      '{"error":{"message":"Insufficient Balance","type":"unknown_error","code":"invalid_request_error"}}'
+    ).message;
+    expect(msg).toContain('HTTP 402');
+    expect(msg).toContain('余额不足');
+    expect(msg).toContain('Insufficient Balance');
+    expect(msg).not.toContain('apiKey');
+  });
+
+  it('401 才是配置问题：明确指向 dsh.apiKey', () => {
+    const msg = describeHttpError(401, 'unauthorized').message;
+    expect(msg).toContain('HTTP 401');
+    expect(msg).toContain('dsh.apiKey');
+  });
+
+  it('429 提示限流重试；5xx 归为上游异常', () => {
+    expect(describeHttpError(429, '').message).toContain('限流');
+    expect(describeHttpError(503, '').message).toContain('上游服务异常');
+  });
+
+  it('从原始 JSON 里掏出人话，并截断超长非 JSON 正文', () => {
+    expect(describeHttpError(400, '{"message":"bad payload"}').message).toContain('bad payload');
+    const long = describeHttpError(400, 'x'.repeat(500)).message;
+    expect(long).toContain('上游返回：' + 'x'.repeat(120) + '…');
+  });
+
+  it('响应体为空时只报状态码，不留悬空的冒号', () => {
+    expect(describeHttpError(500, '').message).not.toMatch(/：$/);
   });
 });

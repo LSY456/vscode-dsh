@@ -154,6 +154,57 @@ function describeFetchError(err: unknown, guard: { timedOut: () => boolean }): E
   return err instanceof Error ? err : new Error(String(err));
 }
 
+/**
+ * 常见 HTTP 状态 → 可执行提示。缺失的键按状态段兜底（5xx 视为上游异常）。
+ */
+const HTTP_STATUS_HINTS: Record<number, string> = {
+  400: '请求被上游拒绝（多为消息或参数格式不被接受）',
+  401: 'API Key 无效或未配置，请检查 dsh.apiKey',
+  402: '上游账号余额不足，请充值后重试',
+  403: '无访问权限：Key 无权访问该模型，或该模型未开通',
+  404: '接口或模型不存在，请检查 dsh.model 与 dsh.baseUrl',
+  413: '请求体过大，请减少上下文或附件后重试',
+  422: '上游判定请求语义不合法，请确认 dsh.model 是否可用',
+  429: '触发上游限流，请稍后重试',
+};
+
+/**
+ * 把模型接口的 HTTP 失败翻译成"能照着做"的文案。
+ *
+ * 为什么不直接把响应体抛给用户：
+ *  1) 上游给的是机器可读 JSON（`{"error":{"message":"Insufficient Balance",...}}`），
+ *     原样透出既不解释原因、长文本还会把面板排版撑坏；
+ *  2) 更要紧的是**不能诱导错误的排查方向**——曾在前端硬写"请检查 apiKey 与 model 配置"，
+ *     而上游返回 402 余额不足时这句话与配置毫无关系（实测把用户带偏过）。
+ *
+ * 因此这里按状态码给出确定的原因与动作，并保留上游原文作为佐证。
+ */
+export function describeHttpError(status: number, rawBody: string): Error {
+  const detail = extractUpstreamMessage(rawBody);
+  const hint = HTTP_STATUS_HINTS[status] ?? (status >= 500 ? '上游服务异常，请稍后重试' : '');
+  const tail = [hint, detail ? `上游返回：${detail}` : ''].filter(Boolean).join('；');
+  return new Error(tail ? `HTTP ${status}：${tail}` : `HTTP ${status}`);
+}
+
+/**
+ * 从上游错误体里掏出人话：优先 JSON 的 error.message / message，非 JSON 则按原文截断。
+ * 截断是为了不让一坨原始 JSON 把 webview 的正文列撑成十几行。
+ */
+function extractUpstreamMessage(rawBody: string): string {
+  const body = String(rawBody ?? '').trim();
+  if (!body) return '';
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: unknown }; message?: unknown };
+    const msg = parsed?.error?.message ?? parsed?.message;
+    if (typeof msg === 'string' && msg.trim()) return msg.trim();
+  } catch {
+    /* 不是 JSON，按原文处理 */
+  }
+  return body.length > MAX_UPSTREAM_DETAIL_LEN ? body.slice(0, MAX_UPSTREAM_DETAIL_LEN) + '…' : body;
+}
+
+const MAX_UPSTREAM_DETAIL_LEN = 120;
+
 /** 判定是否为中断类错误（不同运行时措辞不一：AbortError / "operation was aborted"）。 */
 function isAbortLike(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
@@ -205,7 +256,7 @@ export class OpenAICompatibleModel implements ChatModel {
 
       if (!res.ok || !res.body) {
         const body = await res.text().catch(() => '');
-        throw new Error(`模型请求失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+        throw describeHttpError(res.status, body);
       }
       const userOnChunk = opts.onChunk ?? (() => {});
       try {
@@ -267,7 +318,7 @@ export class AnthropicModel implements ChatModel {
 
       if (!res.ok || !res.body) {
         const body = await res.text().catch(() => '');
-        throw new Error(`模型请求失败 HTTP ${res.status}: ${body.slice(0, 200)}`);
+        throw describeHttpError(res.status, body);
       }
       const userOnChunk = opts.onChunk ?? (() => {});
       try {

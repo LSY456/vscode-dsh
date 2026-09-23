@@ -237,7 +237,11 @@ export async function runRealAgent(
         code: ERROR_CODES.InternalError,
         message: `模型调用失败：${streamFailed.message}`,
       });
-      ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[错误] 模型请求失败，请检查 dsh.apiKey 与 dsh.model.* 配置。' });
+      // 这里只做"本轮已中止"的收束，不重复转述原因、更不做配置层面的猜测：
+      // 具体原因由上面的 error 事件给出（model.ts 已按 HTTP 状态翻译成人话）。
+      // 曾经这里硬写"请检查 apiKey 与 model 配置"，而上游返回 402 余额不足时，
+      // 与配置毫无关系的这句话会把用户引到错误的排查方向。
+      ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[本轮已中止]' });
       ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'error', error: streamFailed.message });
       trajectory('system', 'session 错误（模型调用失败）');
       return;
