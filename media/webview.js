@@ -9,6 +9,7 @@
  */
 import { renderMarkdown } from '../src/webview/render.js';
 import { createBatcher } from '../src/webview/streamBatcher.js';
+import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
 
 (function () {
   'use strict';
@@ -71,6 +72,18 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   let answerEl = null;
   let answerBody = null;
   let answerBatcher = null;
+  /**
+   * 回答的**权威原文**（Markdown 源）。
+   *
+   * 为什么必须单独存一份：流式期间 DOM 里放的是**渲染后的 HTML**，
+   * 此时 `answerBody.textContent` 拿到的是"剥掉标记的纯文本"，
+   * 拿它去二次渲染会把标题/列表/代码块全部降级成段落（曾经就是靠读 DOM 拿原文的）。
+   */
+  let answerRaw = '';
+  /** 流式渲染的挂起定时器（节流用；-1 表示未挂起） */
+  let answerRenderTimer = null;
+  /** 上一次流式渲染的时刻，用于按体量节流 */
+  let answerRenderedAt = 0;
   let reasoningEl = null;
   let reasoningBody = null;
   let reasoningLabel = null;
@@ -329,6 +342,44 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     return turn;
   }
 
+  /**
+   * 流式渲染：对**累积全文**做一次正规渲染，所以屏幕上从头到尾都是排版好的内容，
+   * 不会出现 `|`、``` 、`**`、以及表格/代码里那些符号的原始形态。
+   *
+   * 节流间隔由 `streamRenderIntervalMs`（src/webview/streamRenderPolicy.js）给出：
+   * 那里记录了实测成本与"为什么不能逐帧渲染"。流式渲染只影响过程中的观感，
+   * 结束时还会完整渲染一次，最终结果与渲染时机无关。
+   */
+  function renderAnswerStream() {
+    if (!answerBody) return;
+    answerRenderedAt = Date.now();
+    answerBody.innerHTML = renderMarkdown(answerRaw);
+    scrollBottom();
+  }
+
+  /** 按体量节流地安排一次流式渲染：能渲就立刻渲，否则排一个尾随补渲。 */
+  function scheduleAnswerRender() {
+    if (!answerBody) return;
+    const wait = streamRenderIntervalMs(answerRaw.length) - (Date.now() - answerRenderedAt);
+    if (wait <= 0) {
+      cancelAnswerRender();
+      renderAnswerStream();
+      return;
+    }
+    if (answerRenderTimer != null) return;
+    answerRenderTimer = setTimeout(() => {
+      answerRenderTimer = null;
+      renderAnswerStream();
+    }, wait);
+  }
+
+  function cancelAnswerRender() {
+    if (answerRenderTimer != null) {
+      clearTimeout(answerRenderTimer);
+      answerRenderTimer = null;
+    }
+  }
+
   function ensureAnswer() {
     if (answerEl) return;
     answerEl = el('div', 'turn assistant');
@@ -336,9 +387,12 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     answerBody = el('div', 'message assistant md streaming', '');
     answerEl.appendChild(answerBody);
     addMessage(answerEl);
+    answerRaw = '';
+    // 让首次增量立刻渲染（避免"前 80ms 屏幕还是空的"，也便于同步断言）
+    answerRenderedAt = Date.now() - streamRenderIntervalMs(0);
     answerBatcher = createBatcher((text) => {
-      answerBody.textContent += text;
-      scrollBottom();
+      answerRaw += text;
+      scheduleAnswerRender();
     });
   }
 
@@ -347,20 +401,24 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     answerBatcher.append(delta);
   }
 
-  // 流式期间累积纯文本（廉价、安全）；结束时一次性渲染为已净化的 Markdown
+  // 流式期间按体量节流地渲染 Markdown；结束时再做一次完整定妆渲染。
   function finishAssistant() {
     if (answerBatcher) answerBatcher.flush();
+    cancelAnswerRender();
     if (answerBody) {
-      const raw = answerBody.textContent;
+      const raw = answerRaw;
       answerBody.classList.remove('streaming');
       answerBody.innerHTML = renderMarkdown(raw);
       addCopyAction(answerEl, raw);
+      scrollBottom();
     }
     finishReasoning();
     stopActivityTimer();
     answerEl = null;
     answerBody = null;
     answerBatcher = null;
+    answerRaw = '';
+    answerRenderedAt = 0;
   }
 
   // ---- 推理流：默认折叠，只用一个计时标签提示「正在思考」，不挤占回答
@@ -1018,6 +1076,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     updatePendingBar();
     if (reasoningBatcher) reasoningBatcher.reset();
     if (answerBatcher) answerBatcher.reset();
+    cancelAnswerRender();
     if (reasoningTimer) clearInterval(reasoningTimer);
     reasoningTimer = null;
     reasoningEl = null;
@@ -1027,6 +1086,8 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     answerEl = null;
     answerBody = null;
     answerBatcher = null;
+    answerRaw = '';
+    answerRenderedAt = 0;
     stopActivityTimer();
     activityEl = null;
     activityList = null;

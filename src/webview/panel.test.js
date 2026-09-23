@@ -22,6 +22,9 @@ const repoRoot = path.resolve(here, '..', '..');
 /** webview 通过 acquireVsCodeApi().postMessage 回传给扩展的消息 */
 const posted = [];
 
+/** 「复制回答原文」写入剪贴板的载荷（断言复制的是 Markdown 源文而非渲染后的纯文本） */
+const clipboardWrites = [];
+
 function emitEvent(method, params) {
   window.dispatchEvent(new MessageEvent('message', { data: { kind: 'event', method, params } }));
 }
@@ -49,6 +52,12 @@ beforeAll(async () => {
   document.body.innerHTML = body;
   // webview 宿主注入的 API（真实运行时由 VSCode 提供）
   globalThis.acquireVsCodeApi = () => ({ postMessage: (m) => posted.push(m) });
+  // 剪贴板桩：jsdom 没有 navigator.clipboard，而「复制」的**载荷内容**必须可断言
+  // （流式渲染后 DOM 里已是剥掉标记的 HTML，拿它当复制源会静默破坏原文）
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText: (text) => { clipboardWrites.push(text); return Promise.resolve(); } },
+  });
   await import('../../media/webview.js');
 });
 
@@ -284,6 +293,50 @@ describe('回答流与键盘', () => {
     expect(md.className).not.toContain('streaming');
     expect(md.querySelector('h1').textContent).toBe('结论');
     expect(document.querySelector('.msg-actions')).not.toBeNull();
+  });
+
+  it('流式期间就已渲染成排版好的内容，屏幕上不出现原始标记', async () => {
+    // 回归：此前流式期间是 `textContent += chunk`（纯文本），而 .message.assistant 没有
+    // white-space: pre-wrap —— 换行被折叠，于是表格/代码块/粗体全按源码挤成一行，
+    // 满屏 `|`、```、`**` 以及原文里的 ￥ & ： " 等符号，直到 message.done 才变正常。
+    emitEvent('message.delta', { delta: '## 结论\n\n' });
+    emitEvent('message.delta', { delta: '| 项目 | 价格 |\n|---|---|\n| A | ￥100 & 折扣 |\n' });
+    // 等批处理器 flush（无 rAF 时退避为 setTimeout(16)）
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const body = document.querySelector('.md.streaming');
+    expect(body).not.toBeNull();
+    // 已经是真实节点，而不是一串源码文本
+    expect(body.querySelector('h2').textContent).toBe('结论');
+    expect(body.querySelector('table')).not.toBeNull();
+    // 表格单元里的 ￥ / & 是**答案内容**，应作为正文出现在格子里，而不是符号乱码
+    expect(body.querySelector('table').textContent).toContain('￥100 & 折扣');
+    // 原始标记不再出现在可见文本里
+    expect(body.textContent).not.toContain('##');
+    expect(body.textContent).not.toContain('|');
+    expect(body.textContent).not.toContain('---');
+  });
+
+  it('流式渲染只影响过程观感：结束时仍以完整文本做定妆渲染', async () => {
+    // 接着上面的半截表格收尾：定妆后段落/表格结构完整
+    emitEvent('message.delta', { delta: '\n补充说明。\n' });
+    emitEvent('message.done', {});
+    const turns = document.querySelectorAll('.turn.assistant');
+    const turn = turns[turns.length - 1];
+    const md = turn.querySelector('.md');
+    expect(md.className).not.toContain('streaming');
+    expect(md.querySelector('table')).not.toBeNull();
+    expect(md.textContent).toContain('补充说明。');
+
+    // 「复制」必须给出 Markdown 源文（含标记）：流式渲染后 DOM 里只剩剥掉标记的 HTML，
+    // 若退回"从 DOM 读 textContent"当复制源，用户拿到的会是丢光结构的纯文本。
+    const copyBtn = turn.querySelector('.msg-actions button');
+    expect(copyBtn).not.toBeNull();
+    copyBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(clipboardWrites).toHaveLength(1);
+    expect(clipboardWrites[0]).toContain('## 结论');
+    expect(clipboardWrites[0]).toContain('|---|');
   });
 
   it('推理流默认折叠，结束显示耗时', () => {
