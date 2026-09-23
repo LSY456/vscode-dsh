@@ -2,15 +2,19 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <!-- CSP 的 style-src 用 __CSS_ORIGIN__（不带 query 的原始 URI）：
-       host-source 语法不接受查询串，带 ? 的源会被整条丢弃；
-       而 CSP 匹配本身忽略 query，故与下面带缓存指纹的 <link href> 仍能对上。 -->
+  <!-- 样式表内联在下面的 <style> 里、由 nonce 放行，不再引用外部 CSS 文件。
+       为什么：外部样式表只能靠 CSP 的 URL 匹配放行，而 webview 资源 URI 里带
+       百分号编码的盘符路径（形如 /c%3A/Users/...），匹配一旦不成立就被
+       default-src 'none' 整条拦掉 —— 症状恰好是"脚本正常、界面完全没有样式"，
+       排查时极容易被误判成"改的样式没生效"（实测踩过）。内联后不经过 URL 匹配，
+       顺带绕开 webview 的资源缓存，改样式必然生效。
+       style-src 保留 cspSource（不带路径）以便将来确需引入其它样式资源。 -->
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src __CSS_ORIGIN__; script-src 'nonce-__NONCE__'; img-src data:;"
+    content="default-src 'none'; style-src 'nonce-__NONCE__' __CSP_SOURCE__; script-src 'nonce-__NONCE__'; img-src data:;"
   />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="stylesheet" href="__CSS_URI__" />
+  <style nonce="__NONCE__">__CSS__</style>
   <title>dsh Agent</title>
 </head>
 <body>

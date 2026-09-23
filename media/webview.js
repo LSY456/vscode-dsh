@@ -1276,6 +1276,36 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
 
   autosizeInput();
 
+  /**
+   * 样式表自检：样式若被 CSP 拦掉，脚本照常工作、界面只是"退化成浏览器默认样式"，
+   * 从行为上完全看不出异常 —— 实测就这样静默退化过，排查花了很久才定位到
+   * 「脚本靠 nonce 放行、样式只能靠 CSP 的 URL 匹配」这个差异。
+   * 判据见下方两条件：取不到 webview.css 的哨兵变量、且一个样式表都没有。
+   */
+  function checkStylesLoaded() {
+    const probe = getComputedStyle(document.documentElement)
+      .getPropertyValue('--dsh-role-col')
+      .trim();
+    // 判据要同时满足三条才告警（缺任一条都会在 jsdom 测试 / 静态预览里误报：
+    // 那两处既不解析自定义属性、也不经过 CSP）：
+    //   ① 文档里确实声明了样式（<style nonce> 或 <link rel=stylesheet>）；
+    //   ② 生效的样式表数量为 0（被 CSP 拦掉时 <style> 元素仍在 DOM，但不生成样式表）；
+    //   ③ 哨兵变量取不到值。
+    const declared = document.querySelector('style[nonce], link[rel="stylesheet"]');
+    if (!declared || probe || document.styleSheets.length > 0) return;
+    console.error('[dsh] webview.css 未生效（无任何样式表）：样式表很可能被 CSP 拦下。');
+    const bar = document.createElement('div');
+    bar.id = 'style-warning';
+    bar.textContent =
+      '⚠ 面板样式表未加载，界面已退化为浏览器默认样式。请打开开发者工具 Console 查看是否被 CSP 拦截。';
+    // 用 CSSOM 写入而不用 style 属性：CSP 的 style-src 拦的是标记里解析出来的 style 属性，
+    // CSSOM 写入不在其管辖内 —— 否则这条"样式没加载"的提示自己也会被拦成裸文本。
+    bar.style.cssText =
+      'padding:8px 10px;font:12px/1.5 sans-serif;background:#5a1d1d;color:#ffd9d9;border-bottom:2px solid #ff6b6b';
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
+  checkStylesLoaded();
+
   // 通知扩展：面板已就绪
   vscode.postMessage({ kind: 'ready' });
 })();
