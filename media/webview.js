@@ -521,6 +521,59 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   // 审批卡（Human-in-the-Loop）
   // -------------------------------------------------------------------------
 
+  /**
+   * 让卡片标题行成为开合开关（与「过程」时间线同一套实现：常量 ▾ + CSS 旋转）。
+   *
+   * 为什么决策后要折叠：决策前卡片要占十几行（原因 + 完整命令 + 操作按钮），决策后它
+   * 已经不需要再操作，全展开会把后续消息顶出视野；而用户又需要能回看「当时请求的是什么
+   * 命令」，所以做的是"自动折叠 + 可再展开"，而不是把一张死卡片留在原地。
+   *
+   * 折叠范围是 `.card-body`（正文），标题行始终可见——结论徽标（已接受 / 已拒绝 / 已过期）
+   * 就落在标题行上，折叠后依然读得到结果。
+   */
+  function attachCollapse(card, title) {
+    const chev = el('span', 'chev', '▾');
+    title.insertBefore(chev, title.firstChild);
+    title.classList.add('clickable');
+    title.tabIndex = 0;
+    title.setAttribute('role', 'button');
+    const setCollapsed = (collapsed) => {
+      card.classList.toggle('collapsed', collapsed);
+      title.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    };
+    const toggle = () => setCollapsed(!card.classList.contains('collapsed'));
+    title.addEventListener('click', toggle);
+    title.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle();
+      }
+    });
+    setCollapsed(false);
+    return { setCollapsed };
+  }
+
+  /**
+   * 决策后收掉已无意义的操作按钮：统一置 disabled，并隐藏「决策类」按钮
+   * ——留一排点了没反应的按钮，用户会以为操作没生效（实测就是这么被误解的）。
+   * 补丁卡的「打开 Diff」是只读审查入口，标 data-keep 予以保留，决策后仍可回看改了什么。
+   * 整行都收空了就把这一行也隐藏，免得留下一片空白。
+   */
+  function retireActions(entry) {
+    for (const b of entry.buttons) {
+      b.disabled = true;
+      if (b.dataset.keep !== '1') b.hidden = true;
+    }
+    if (entry.actions && [...entry.actions.children].every((c) => c.hidden)) {
+      entry.actions.hidden = true;
+    }
+  }
+
+  /** 折叠已决策的卡片（老会话恢复出来的挂起项没有控制器，做空值保护）。 */
+  function collapseEntry(entry) {
+    entry?.collapse?.setCollapsed(true);
+  }
+
   function stopApprovalTimer(id) {
     const t = approvalTimers.get(id);
     if (t) {
@@ -532,7 +585,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
   function markApprovalDecided(entry, outcome) {
     entry.decided = true;
     entry.card.classList.add('decided');
-    for (const b of entry.buttons) b.disabled = true;
+    retireActions(entry);
     if (entry.countdown) entry.countdown.textContent = '';
     if (entry.badge) {
       if (outcome === 'rejected') {
@@ -546,6 +599,8 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
         entry.badge.textContent = outcome === 'trusted' ? '已接受并记住' : '已接受';
       }
     }
+    // 结论已经落到标题行的徽标上，正文（命令 + 按钮）随之折叠
+    collapseEntry(entry);
   }
 
   function decideApproval(approvalId, approved, trust) {
@@ -570,8 +625,11 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     title.appendChild(badge);
     title.appendChild(el('code', 'card-sub', p.tool));
     card.appendChild(title);
-    if (p.reason) card.appendChild(el('div', 'card-reason', p.reason));
-    card.appendChild(el('pre', 'code-block', JSON.stringify(p.input ?? {}, null, 2)));
+
+    // 正文单独成块：折叠时整块隐藏，标题行（含结论徽标）保持可见
+    const body = el('div', 'card-body');
+    if (p.reason) body.appendChild(el('div', 'card-reason', p.reason));
+    body.appendChild(el('pre', 'code-block', JSON.stringify(p.input ?? {}, null, 2)));
 
     const countdown = el('div', 'countdown', '');
     const actions = el('div', 'card-actions');
@@ -584,8 +642,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     btnTrust.addEventListener('click', () => decideApproval(p.approvalId, true, true));
     actions.append(btnReject, btnAccept, btnTrust);
 
-    if (p.expiresAt) card.appendChild(countdown);
-    card.appendChild(actions);
+    if (p.expiresAt) body.appendChild(countdown);
+    body.appendChild(actions);
+    card.appendChild(body);
+    const collapse = attachCollapse(card, title);
     addMessage(card);
 
     const entry = {
@@ -593,7 +653,9 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
       card,
       badge,
       countdown: p.expiresAt ? countdown : null,
+      actions,
       buttons: [btnReject, btnAccept, btnTrust],
+      collapse,
       decided: false,
     };
     approvals.set(p.approvalId, entry);
@@ -641,15 +703,23 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     // 两者分开，才能做到「点了就有反馈」而不谎报结果。
     if (entry) {
       entry.responded = true;
-      for (const b of entry.buttons) b.disabled = true;
+      // 表态即收按钮 + 折叠：卡片不再占屏，结论落到标题行徽标上
+      retireActions(entry);
       if (action === 'reject') {
         entry.decided = true;
         entry.card.classList.add('decided');
       }
-      if (action === 'reject' && entry.badge) {
-        entry.badge.className = 'badge err';
-        entry.badge.textContent = '已拒绝';
+      if (entry.badge) {
+        if (action === 'reject') {
+          entry.badge.className = 'badge err';
+          entry.badge.textContent = '已拒绝';
+        } else {
+          // 已回执但尚未落地：不能沿用「待审查」，否则折叠后看起来像没生效
+          entry.badge.className = 'badge running';
+          entry.badge.textContent = '已提交，等待应用';
+        }
       }
+      collapseEntry(entry);
     }
     const kind =
       action === 'accept' ? 'patch.accept' : action === 'reject' ? 'patch.reject' : 'patch.applyEdited';
@@ -664,8 +734,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     const badge = el('span', 'badge warn', '待审查');
     title.appendChild(badge);
     card.appendChild(title);
-    card.appendChild(el('div', 'card-sub', p.path || ''));
-    if (p.description) card.appendChild(el('div', 'card-reason', p.description));
+
+    const body = el('div', 'card-body');
+    body.appendChild(el('div', 'card-sub', p.path || ''));
+    if (p.description) body.appendChild(el('div', 'card-reason', p.description));
 
     const actions = el('div', 'card-actions');
     const btnDiff = el('button', '', '打开 Diff');
@@ -673,6 +745,8 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     const btnAccept = el('button', 'ok-btn', '应用');
     const btnEdit = el('button', 'ok-btn', '编辑后应用');
     btnDiff.type = btnReject.type = btnAccept.type = btnEdit.type = 'button';
+    // 只读审查入口：决策后仍然有用（回看改了哪儿），故豁免于"决策后收按钮"
+    btnDiff.dataset.keep = '1';
     btnDiff.addEventListener('click', () => vscode.postMessage({ kind: 'patch.openDiff', patchId: p.patchId }));
     btnReject.addEventListener('click', () => decidePatch(p.patchId, 'reject'));
     btnAccept.addEventListener('click', () => decidePatch(p.patchId, 'accept'));
@@ -691,7 +765,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     let countdown = null;
     if (p.expiresAt) {
       countdown = el('div', 'countdown', '');
-      card.appendChild(countdown);
+      body.appendChild(countdown);
       const tick = () => {
         const remain = Math.max(0, Math.ceil((p.expiresAt - Date.now()) / 1000));
         if (remain <= 0) {
@@ -703,7 +777,9 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
       patchTimers.set(p.patchId, setInterval(tick, 1000));
       tick();
     }
-    card.appendChild(actions);
+    body.appendChild(actions);
+    card.appendChild(body);
+    const collapse = attachCollapse(card, title);
     addMessage(card);
 
     patches.set(p.patchId, {
@@ -711,7 +787,9 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
       card,
       badge,
       countdown,
+      actions,
       buttons: [btnDiff, btnReject, btnAccept, btnEdit],
+      collapse,
       responded: false,
       decided: false,
     });
@@ -734,12 +812,13 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
       entry.responded = true;
       entry.decided = true;
       entry.card.classList.add('decided');
-      for (const b of entry.buttons) b.disabled = true;
+      retireActions(entry);
       if (entry.badge) {
         entry.badge.className = 'badge err';
         entry.badge.textContent = '已过期';
       }
       if (entry.countdown) entry.countdown.textContent = '⏱ 已过期（按拒绝处理）';
+      collapseEntry(entry);
     }
     updatePendingBar();
   }
@@ -750,7 +829,7 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
     if (entry) {
       entry.decided = true;
       entry.card.classList.add('decided');
-      for (const b of entry.buttons) b.disabled = true;
+      retireActions(entry);
       if (entry.badge) {
         if (result.applied) {
           entry.badge.className = 'badge ok';
@@ -763,7 +842,10 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
           entry.badge.textContent = '已拒绝';
         }
       }
+      // 失败原因挂在 card 上而不是 card-body 内：折叠后仍然可见，
+      // 否则标题只写「应用失败」，用户还得手动展开才知道为什么失败。
       if (result.error) entry.card.appendChild(el('pre', 'code-block', result.error));
+      collapseEntry(entry);
       patches.delete(result.patchId);
     }
     updatePendingBar();
@@ -1283,7 +1365,11 @@ import { createBatcher } from '../src/webview/streamBatcher.js';
    * 判据见下方两条件：取不到 webview.css 的哨兵变量、且一个样式表都没有。
    */
   function checkStylesLoaded() {
-    const probe = getComputedStyle(document.documentElement)
+    // 走 window.* 而不是裸全局：静态预览骨架（jsdom）只挂了 window/document 等少数名字，
+    // 裸 getComputedStyle 会 ReferenceError，把整支脚本打断。
+    const view = typeof window !== 'undefined' ? window : globalThis;
+    const probe = view
+      .getComputedStyle(document.documentElement)
       .getPropertyValue('--dsh-role-col')
       .trim();
     // 判据要同时满足三条才告警（缺任一条都会在 jsdom 测试 / 静态预览里误报：

@@ -162,6 +162,34 @@ describe('审批卡与待办条', () => {
     expect(document.querySelector('.card.approval').textContent).toContain('已接受');
   });
 
+  it('决策后卡片自动折叠、操作按钮收起（不再留一排点不动的按钮）', () => {
+    const card = document.querySelector('.card.approval');
+    // 回归：此前只加 .decided 置灰，正文与三个按钮全留在原地，
+    // 用户点完看着一排没反应的按钮，判断为"选项卡无法隐藏"。
+    expect(card.className).toContain('collapsed');
+    const actions = card.querySelector('.card-actions');
+    expect(actions.hidden).toBe(true);
+    const buttons = [...actions.querySelectorAll('button')];
+    expect(buttons.length).toBe(3);
+    expect(buttons.every((b) => b.hidden)).toBe(true);
+    // 折叠的是正文，不是结论：结果徽标落在标题行上，折起来也读得到
+    expect(card.querySelector('.card-title').textContent).toContain('已接受');
+  });
+
+  it('折叠的卡片可以再展开（点标题行 / 回车）', () => {
+    const card = document.querySelector('.card.approval');
+    const title = card.querySelector('.card-title');
+    expect(title.querySelector('.chev').textContent).toBe('▾');
+    expect(title.getAttribute('aria-expanded')).toBe('false');
+
+    title.click();
+    expect(card.className).not.toContain('collapsed');
+    expect(title.getAttribute('aria-expanded')).toBe('true');
+
+    title.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(card.className).toContain('collapsed');
+  });
+
   it('「接受并记住」额外带上 trust 标记（B1 免审批白名单）', () => {
     emitEvent('approval.request', {
       approvalId: 'ap2',
@@ -224,6 +252,17 @@ describe('补丁卡与待办条', () => {
   it('补丁落地后卡片标记结果', () => {
     emitEvent('file.patch.result', { patchId: 'p1', accepted: true, applied: true });
     expect(document.querySelector('.card.patch').textContent).toContain('已应用');
+  });
+
+  it('补丁卡决策后折叠，但「打开 Diff」豁免保留（仍可回看改了什么）', () => {
+    const card = document.querySelector('.card.patch');
+    expect(card.className).toContain('collapsed');
+    const buttons = [...card.querySelectorAll('.card-actions button')];
+    const diff = buttons.find((b) => b.textContent === '打开 Diff');
+    expect(diff.hidden).toBe(false);
+    expect(buttons.filter((b) => b !== diff).every((b) => b.hidden)).toBe(true);
+    // 还有按钮可用，整行就不该收掉
+    expect(card.querySelector('.card-actions').hidden).toBe(false);
   });
 
   it('「打开 Diff」总是直通扩展（不改变待办状态）', () => {
@@ -366,6 +405,15 @@ describe('surface 重建后的挂起项恢复', () => {
     const card = document.querySelector('.card.patch');
     expect(card.textContent).toMatch(/剩余 \d+s/);
   });
+
+  it('恢复出来的挂起项保持展开，用户仍能直接操作', () => {
+    // 折叠只属于"已决策"的卡片；挂起项还没决策，折起来等于让用户多点一次
+    const card = document.querySelector('.card.approval');
+    expect(card.className).not.toContain('collapsed');
+    const buttons = [...card.querySelectorAll('.card-actions button')];
+    expect(buttons.length).toBe(3);
+    expect(buttons.every((b) => !b.hidden)).toBe(true);
+  });
 });
 
 /**
@@ -480,5 +528,50 @@ describe('布局重编排（角色列 / 迹线按需 / 会话标题）', () => {
     emitEvent('session.started', { sessionId: 'sess_title_1', title: '重构面板布局' });
     expect(titleEl.hidden).toBe(false);
     expect(titleEl.textContent).toBe('重构面板布局');
+  });
+});
+
+/**
+ * 折叠的 DOM ↔ CSS 契约。
+ *
+ * 为什么要单独测：上面的断言只能证明 JS 在卡片上加了 `.collapsed`、并且把正文包进了
+ * `.card-body`。但真正决定"看不看得见"的是样式表里的选择器——`.card-body` 拼错、`>`
+ * 写成空格、或者规则被谁删掉，DOM 断言照样全绿，而界面上卡片依旧是摊开的（这正是本次
+ * 用户报的"选项卡无法隐藏"）。
+ *
+ * 所以这里把两半接起来：CSS 文本必须含有那条规则，且 JS 生成的 DOM 必须真的 matches() 它。
+ */
+describe('折叠的 DOM ↔ CSS 契约', () => {
+  const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+
+  it('样式表声明了折叠规则与正文块的 flex 节奏', () => {
+    expect(css).toMatch(/\.card\.collapsed\s*>\s*\.card-body\s*\{[^}]*display:\s*none/);
+    // 正文块必须自己重建间距：迁移后不再由 .card 的 gap 兜底
+    expect(css).toMatch(/\.card-body\s*\{[^}]*display:\s*flex/);
+    // 变量 hidden 的硬性兜底还在（.card-actions 自带 display:flex，会盖掉 UA 的 [hidden]）
+    expect(css).toMatch(/\[hidden\]\s*\{[^}]*display:\s*none\s*!important/);
+  });
+
+  it('已决策卡片的正文命中折叠选择器，标题行不命中', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_css_contract', reason: 'new' });
+    emitEvent('approval.request', {
+      approvalId: 'ap_css_contract',
+      tool: 'bash_execute',
+      input: { command: 'npm test' },
+      risk: 'medium',
+      reason: '普通命令',
+    });
+    const card = document.querySelector('.card.approval');
+    const body = card.querySelector('.card-body');
+    const title = card.querySelector('.card-title');
+    // 决策前：正文不命中折叠选择器（即保持展开）
+    expect(body.matches('.card.collapsed > .card-body')).toBe(false);
+
+    pendingButton('接受').click();
+
+    expect(card.className).toContain('collapsed');
+    expect(body.matches('.card.collapsed > .card-body')).toBe(true);
+    // 标题行是折叠后唯一保留的一行，不能被同一条规则吃掉
+    expect(title.matches('.card.collapsed > .card-body')).toBe(false);
   });
 });

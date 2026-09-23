@@ -646,12 +646,41 @@ body {
 .card.decided {
   opacity: 0.62;
 }
+/* 正文块：原先是 .card 的直接子元素、靠 .card 的 flex gap 拉开间距，
+   挪进包裹层后必须在这里重建同样的节奏（全局 `* { margin: 0 }` 不会有回退）。 */
+.card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dsh-sp-2);
+}
+/* 决策后折叠：正文（命令 / 按钮 / 倒计时）收起，标题行与结论徽标保留，
+   点标题行可再展开——留一张全展开的死卡片会把后续消息顶出视野。 */
+.card.collapsed > .card-body {
+  display: none;
+}
 .card-title {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
   font-size: var(--dsh-fs-md);
+}
+.card-title.clickable {
+  cursor: pointer;
+  user-select: none;
+}
+.card-title.clickable:focus-visible {
+  outline: 1px solid var(--dsh-focus);
+  outline-offset: 2px;
+}
+/* 与「过程」时间线共用一套开合隐喻：常量 ▾，折叠时旋转 -90° */
+.card .card-title .chev {
+  width: 11px;
+  color: var(--dsh-fg-dim);
+  flex: 0 0 auto;
+}
+.card.collapsed .card-title .chev {
+  transform: rotate(-90deg);
 }
 .card-title b {
   font-weight: 600;
