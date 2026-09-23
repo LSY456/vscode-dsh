@@ -100,11 +100,16 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'grep',
-    description: '跨文件搜索包含指定关键字/符号的行（无需审批的只读工具，跳过 node_modules/.git 与二进制、超大文件）',
+    description:
+      '跨文件搜索匹配的行（无需审批的只读工具，跳过 node_modules/.git 与二进制、超大文件）。' +
+      'pattern 按正则解析，用 | 可多选一（如 resolveTarget|assertPathInside）。',
     parameters: {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: '要搜索的字面量关键字' },
+        pattern: {
+          type: 'string',
+          description: '正则表达式（如 "resolveTarget|assertPathInside"、"async function"）',
+        },
         path: { type: 'string', description: '搜索目录（缺省为工作区根）' },
         include: { type: 'string', description: '文件名过滤通配（如 *.ts，可选）' },
       },
@@ -477,7 +482,11 @@ function formatFileRange(filePath: string, r: FileRangeResult): string {
 }
 
 function formatGrepResult(res: GrepResult): string {
-  if (res.matches.length === 0) return '(无匹配)';
+  if (res.matches.length === 0) {
+    // 把正则语义写进返回值：早期实现只做字面量匹配，模型常因 `a|b|c` 无结果而误判
+    // "代码里没有这个符号"，接着连续换模式重试（一轮能连错五次）。这句提示直接掐掉那串重试。
+    return '(无匹配：pattern 按正则解析，可用 | 做多选一，或先用 glob 确认文件是否存在)';
+  }
   const lines = res.matches.map((m) => `${m.file}:${m.line}: ${m.text}`);
   if (res.truncated) lines.push('…（匹配过多已截断）');
   return lines.join('\n');

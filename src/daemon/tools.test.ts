@@ -214,6 +214,31 @@ describe('grep / glob 只读搜索', () => {
     expect([...new Set(res.matches.map((m) => path.basename(m.file)))].sort()).toEqual(['lib.ts', 'src.ts']);
   });
 
+  it('grep：pattern 按正则解析（| 多选一），不再是字面量匹配', () => {
+    // 回归：早期实现只做 includes，模型写 `foo|bar` 时一律无匹配，
+    // 于是误判"代码里没有这个符号"并反复换模式重试，把过程面板刷满。
+    const res = grepFiles(base, [], 'foo|bar');
+    expect(res.matches.length).toBeGreaterThan(0);
+    expect(res.matches.some((m) => path.basename(m.file) === 'src.ts')).toBe(true);
+  });
+
+  it('grep：非法正则回退字面量匹配（不抛错，且确实是字面量语义）', () => {
+    // 'foo(' 不是合法正则（未闭合分组）-> 回退到 includes('foo(')
+    // fixtures 里 `function foo() {}` 恰含该字面量，故应命中 src.ts 第 1 行。
+    // 用"应当命中"而不是"应当为空"来断言，才真正证明回退走的是字面量语义。
+    expect(() => grepFiles(base, [], 'foo(')).not.toThrow();
+    const res = grepFiles(base, [], 'foo(');
+    expect(res.matches).toHaveLength(1);
+    expect(path.basename(res.matches[0].file)).toBe('src.ts');
+    expect(res.matches[0].line).toBe(1);
+    // 字面量里没有的串一律不命中（若被当成正则会误报）
+    expect(grepFiles(base, [], '[[[').matches).toHaveLength(0);
+  });
+
+  it('grep：pattern 超长被拒绝（挡 ReDoS 型输入）', () => {
+    expect(() => grepFiles(base, [], 'a'.repeat(1001))).toThrow();
+  });
+
   it('grep：命中超过 maxResults 时截断', () => {
     const res = grepFiles(base, [], 'foo', { maxResults: 2 });
     expect(res.truncated).toBe(true);

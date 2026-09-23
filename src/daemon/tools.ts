@@ -162,6 +162,8 @@ const MAX_GREP_RESULTS = 200;
 const MAX_GLOB_RESULTS = 200;
 const MAX_GREP_LINE_LEN = 200;
 const MAX_GREP_FILE_BYTES = 1024 * 1024;
+/** grep pattern 长度上限：正则交给 V8 编译，防御性地挡住天量回溯型输入。 */
+const MAX_GREP_PATTERN_LEN = 1000;
 /**
  * 行号范围读取的独立大小上限（grep 之外，允许精读更大的单个文件）。
  * 也用作 realAgent 在「脏文档优先」通路下取内容时的字节上限，
@@ -173,6 +175,23 @@ export const MAX_RANGE_FILE_BYTES = 16 * 1024 * 1024;
 function globToRegex(pattern: string): RegExp {
   const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp('^' + pattern.split('*').map(escape).join('.*') + '$');
+}
+
+/**
+ * 把 grep 的 pattern 编译为正则；非法正则返回 null（调用方回退字面量匹配）。
+ *
+ * 为什么必须支持正则：模型天然会写 `a|b|c`、`foo.*bar`、`\bname\b` 这类模式
+ * （与 grep / ripgrep 的直觉一致）。早期实现只做字面量 `includes`，于是"多选一"的搜索
+ * 一律返回无匹配 —— 模型会误判成"代码里没有这个符号"，接着反复换模式重试（实测一轮连错
+ * 五次、把过程面板刷满）。这里按正则解析，语义与标准搜索工具对齐；
+ * 非法正则（例如落单的 `(`）回退字面量，保证任何输入都给确定结果而不是抛错。
+ */
+function compilePattern(needle: string): RegExp | null {
+  try {
+    return new RegExp(needle);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -224,7 +243,12 @@ function readLines(file: string, maxBytes: number = MAX_GREP_FILE_BYTES): string
   return raw.toString('utf8').split('\n');
 }
 
-/** 在指定目录（默认工作区根）递归搜索包含 pattern 的行，返回「文件:行号:内容」。 */
+/**
+ * 在指定目录（默认工作区根）递归搜索匹配 pattern 的行，返回「文件:行号:内容」。
+ *
+ * pattern 按**正则**解析（非法正则回退为字面量），与 grep / ripgrep 语义一致：
+ * `a|b|c`、`foo.*bar` 这类模型常用写法一次就能命中，不再被误判成"无匹配"。
+ */
 export function grepFiles(
   root: string,
   allowedDirs: string[],
@@ -233,6 +257,10 @@ export function grepFiles(
 ): GrepResult {
   const needle = String(pattern ?? '');
   if (!needle) throw new Error('grep 需要非空 pattern');
+  if (needle.length > MAX_GREP_PATTERN_LEN) {
+    throw new Error(`grep pattern 过长（上限 ${MAX_GREP_PATTERN_LEN} 字符）`);
+  }
+  const needleRx = compilePattern(needle);
   const base = resolveTarget(root, allowedDirs, opts.dir || root);
   const includeRx = opts.include ? globToRegex(String(opts.include)) : null;
   const maxResults = opts.maxResults ?? MAX_GREP_RESULTS;
@@ -244,7 +272,8 @@ export function grepFiles(
     const lines = readLines(file);
     if (lines === null) continue;
     for (let i = 0; i < lines.length; i++) {
-      if (!lines[i].includes(needle)) continue;
+      const hit = needleRx ? needleRx.test(lines[i]) : lines[i].includes(needle);
+      if (!hit) continue;
       if (matches.length >= maxResults) {
         truncated = true;
         break;
