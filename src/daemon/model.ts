@@ -65,10 +65,85 @@ export interface ChatStreamOptions {
   onChunk?: (chunk: StreamChunk) => void;
   /** 暴露给模型的工具清单（原生 function calling） */
   tools?: ToolDefinition[];
+  /** 瞬时失败自动重试次数（缺省 2，0 关闭）。仅对"尚未推送任何增量"的请求生效。 */
+  maxRetries?: number;
 }
 
 export interface ChatModel {
   chat(messages: ChatMessage[], opts?: ChatStreamOptions): Promise<ChatCompletionResult>;
+}
+
+/** 瞬时失败自动重试次数（缺省）。 */
+export const DEFAULT_MAX_RETRIES = 2;
+/** 重试退避基数（ms）：第 n 次重试等待 baseDelay * 2^n。 */
+export const RETRY_BASE_DELAY_MS = 600;
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 判定「值得重试的瞬时失败」。
+ *
+ * 只有两类值得重试：
+ *  1. **网络层错误**（无 HTTP 状态码：DNS / TLS / 连接重置 / 代理抖动）；
+ *  2. **429 与 5xx**（限流、上游异常）。
+ * 其余 4xx 都是确定性错误（401 Key 无效、402 余额不足、404 模型不存在……），重试只会让用户
+ * 多等两秒再读到同一句话；取消与空闲超时也不重试——取消是用户意图，超时意味着流已中断，
+ * 已经推送出去的增量收不回来。
+ *
+ * 实测教训：真实会话里三次「模型调用失败」有两次在 ~110ms 内就返回了，而 19 秒后的同一请求
+ * 却成功了——典型的瞬时失败。当时没有重试，一次网络抖动就等于整场会话"自动中断"。
+ */
+function isRetryableFailure(err: Error): boolean {
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return false;
+  const status = (err as Error & { httpStatus?: number }).httpStatus;
+  if (typeof status === 'number') return status === 429 || status >= 500;
+  return true; // 无状态码 => fetch 层抛出的网络错误
+}
+
+/**
+ * 给任意 ChatModel 叠加「瞬时失败自动重试」（装饰器）。
+ *
+ * **只在本次尝试尚未向前端推送任何增量时才重试**：一旦有 delta 到达，重试会把同一段正文
+ * 再推一遍，前端出现重复内容——那比直接失败更难排查。
+ * 重试次数可用 `ChatStreamOptions.maxRetries` 逐次覆盖（如标题生成这类短请求设为 0）。
+ */
+export interface RetryOptions {
+  /** 瞬时失败自动重试次数（缺省 2）。 */
+  maxRetries?: number;
+  /** 退避基数（ms，缺省 600）：第 n 次重试等待 baseDelayMs * 2^n。 */
+  baseDelayMs?: number;
+}
+
+export function withRetry(model: ChatModel, options: RetryOptions = {}): ChatModel {
+  return {
+    async chat(messages: ChatMessage[], opts: ChatStreamOptions = {}): Promise<ChatCompletionResult> {
+      const maxRetries = opts.maxRetries ?? options.maxRetries ?? DEFAULT_MAX_RETRIES;
+      const baseDelayMs = options.baseDelayMs ?? RETRY_BASE_DELAY_MS;
+      const userOnChunk = opts.onChunk;
+      let streamed = false;
+      const wrapped: ChatStreamOptions = {
+        ...opts,
+        onChunk: (c) => {
+          streamed = true;
+          userOnChunk?.(c);
+        },
+      };
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await model.chat(messages, wrapped);
+        } catch (err) {
+          const e = err instanceof Error ? err : new Error(String(err));
+          const canRetry = attempt < maxRetries && !streamed && !opts.signal?.aborted && isRetryableFailure(e);
+          if (!canRetry) throw e;
+          const waitMs = baseDelayMs * 2 ** attempt;
+          console.error(`[dsh-daemon] 模型请求失败（第 ${attempt + 1} 次），${waitMs}ms 后重试：${e.message}`);
+          await sleepMs(waitMs);
+        }
+      }
+    },
+  };
 }
 
 export interface OpenAIModelOptions {
@@ -183,7 +258,10 @@ export function describeHttpError(status: number, rawBody: string): Error {
   const detail = extractUpstreamMessage(rawBody);
   const hint = HTTP_STATUS_HINTS[status] ?? (status >= 500 ? '上游服务异常，请稍后重试' : '');
   const tail = [hint, detail ? `上游返回：${detail}` : ''].filter(Boolean).join('；');
-  return new Error(tail ? `HTTP ${status}：${tail}` : `HTTP ${status}`);
+  const err = new Error(tail ? `HTTP ${status}：${tail}` : `HTTP ${status}`);
+  // 带上状态码，供重试策略判定（429/5xx 可重试，其余 4xx 不可）——从错误文案里正则抠状态码太脆。
+  (err as Error & { httpStatus?: number }).httpStatus = status;
+  return err;
 }
 
 /**

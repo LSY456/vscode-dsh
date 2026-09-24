@@ -37,7 +37,7 @@ import {
 } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
 import { DirtyOverlay } from './dirtyOverlay';
-import { ChatModel, createKeywordFakeModel, createModel as createProviderModel } from './model';
+import { ChatModel, createKeywordFakeModel, createModel as createProviderModel, withRetry } from './model';
 import { assertPathInside } from './paths';
 import { RealAgentConfig, runRealAgent } from './realAgent';
 import { DEFAULT_APPROVAL_TTL_MS, clampApprovalTtlMs, Session, SessionManager } from './sessionManager';
@@ -144,15 +144,22 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
   const { sandbox, warnings } = detectSandbox(opts.workspaceRoot);
   if (warnings.length > 0) console.warn(`[dsh-daemon] 命令沙箱：${warnings.join('；')}`);
 
-  /** 依据连接级运行时配置创建真实模型（auto 切换 + 集成假模型）。 */
+  /**
+   * 依据连接级运行时配置创建真实模型（auto 切换 + 集成假模型）。
+   *
+   * 真实模型统一套一层「瞬时失败自动重试」：一次网络抖动或 429 不该让整场会话直接中断
+   * （实测会话失败中两次在 ~110ms 内返回、19 秒后同一请求即成功）。假模型不套：确定性、无网络。
+   */
   function createModel(rt: RuntimeConfig): ChatModel {
     if (opts.fakeModel) return createKeywordFakeModel();
-    return createProviderModel({
-      provider: rt.provider,
-      baseURL: rt.baseURL || undefined,
-      apiKey: rt.apiKey,
-      model: rt.model || undefined,
-    });
+    return withRetry(
+      createProviderModel({
+        provider: rt.provider,
+        baseURL: rt.baseURL || undefined,
+        apiKey: rt.apiKey,
+        model: rt.model || undefined,
+      })
+    );
   }
 
   const server = http.createServer((_req, res) => {

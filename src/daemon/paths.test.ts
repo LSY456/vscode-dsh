@@ -121,4 +121,27 @@ describe('assertPathInside canonical 护栏（防符号链接/联结逃逸）', 
       expect((err as { code?: number }).code).toBe(-32012);
     }
   });
+
+  it('相对路径按工作区根解析（daemon 的 cwd 未必等于工作区根）', () => {
+    // 模型天然会写 `.` / `src` 这类相对路径；若按 daemon 进程的 cwd 解析，会被误判"路径越界"，
+    // 逼模型改用需要审批的 bash_execute 去列目录 —— 真实会话实测：8 轮工具预算全耗在
+    // "先把目录列出来"上，最后没有轮次留给结论，会话以 completed 静默收场。
+    expect(assertPathInside(root, '.')).toBe(fs.realpathSync(root));
+    expect(assertPathInside(root, './')).toBe(fs.realpathSync(root));
+    expect(assertPathInside(root, 'inside.txt')).toBe(fs.realpathSync(path.join(root, 'inside.txt')));
+    expect(assertPathInside(root, 'src')).toBe(path.join(fs.realpathSync(root), 'src'));
+  });
+
+  it('相对路径的 `..` 逃逸仍被拒绝（放宽相对路径 ≠ 放宽护栏）', () => {
+    expect(() => assertPathInside(root, path.join('..', 'secret.txt'))).toThrow();
+    expect(() => assertPathInside(root, path.join('src', '..', '..', 'secret.txt'))).toThrow();
+  });
+
+  it('相对路径指向工作区内的符号链接逃逸：仍被拒绝', (ctx) => {
+    if (!symlinkSupported) {
+      ctx.skip();
+      return;
+    }
+    expect(() => assertPathInside(root, path.join('link-out', 'secret.txt'))).toThrow();
+  });
 });

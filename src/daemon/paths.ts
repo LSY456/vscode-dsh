@@ -97,10 +97,19 @@ export function canonicalizeTarget(target: string): string {
 /**
  * 校验 target 位于 root 内（canonical 判定），返回解析后的规范绝对路径；
  * 越界抛 PathError(-32012)。
+ *
+ * **相对路径按 `root` 解析，而不是 daemon 进程的 cwd。**
+ * 模型天然会写 `.`、`src/daemon` 这类工作区相对路径（实测会话的第一个工具调用就是
+ * `list_dir {"path":"."}`），而 daemon 的 cwd 未必等于工作区根 —— 按 cwd 解析会把它判成
+ * "路径越界"，逼模型改用需要审批的 `bash_execute`（ls / dir）去列目录。
+ * 实测两个真实会话的 8 轮工具预算全耗在"先把目录列出来"上，最后没有轮次留给结论，
+ * 会话以 `completed` 静默收场（用户看到的就是「agent 没有返回任何信息」）。
+ * 安全性不受影响：解析结果仍要过 canonicalize + 越界判定，符号链接/`..` 逃逸依旧被拒。
  */
 export function assertPathInside(root: string, target: string): string {
   const rootCanon = canonicalize(root);
-  const targetCanon = canonicalizeTarget(target);
+  const abs = path.isAbsolute(target) ? target : path.resolve(root, target);
+  const targetCanon = canonicalizeTarget(abs);
   if (!isPathInside(rootCanon, targetCanon)) {
     throw new PathError(`路径越界：${target} 不在工作区 ${root} 内`);
   }

@@ -14,7 +14,7 @@ import {
 } from '../../shared/protocol';
 import * as path from 'path';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatMessage, ChatModel, ToolDefinition } from './model';
+import { ChatMessage, ChatModel, StreamChunk, ToolDefinition } from './model';
 import { parseToolCalls, ToolCall } from './toolcall';
 import {
   CommandPolicy,
@@ -64,8 +64,10 @@ const SYSTEM_PROMPT = [
   '   或 apply_patch {path, search, replace}（字符串替换）。修改会先提交给用户做 Diff 审查，',
   '   只有用户接受后才会真正写入。',
   '3. 需要执行高危命令（如 rm、npm build 等 shell 命令）时调用工具 bash_execute {command}；',
-  '   该调用需要用户审批后才能执行。',
-  '4. 所有路径必须是工作区内的绝对路径；越界操作会被拒绝。',
+  '   该调用需要用户审批后才能执行。浏览目录 / 查看文件 / 搜索代码请一律使用上面的只读工具，',
+  '   **不要用 bash_execute（ls、dir、cat）代替**——那样每次都要用户审批，且会多占一轮工具调用。',
+  '4. 路径可以写工作区内的绝对路径，也可以写相对工作区的路径',
+  '   （如 `.`、`src`、`src/daemon/tools.ts`）；越界操作会被拒绝。省略 path 表示工作区根。',
   '5. 调用工具时优先使用原生 function calling（工具定义已随请求提供）；若需以文本形式表达，',
   '   输出 fenced JSON 块（```toolcall 或 ```json 均可，块内为单个 JSON 对象或对象数组）：',
   '   ```toolcall',
@@ -73,6 +75,8 @@ const SYSTEM_PROMPT = [
   '   ```',
   '6. 工具执行结果会以 tool 角色消息回灌，你需要据此继续作答或发起下一轮工具调用。',
   '7. 最终给用户的正文应简洁、以中文为主，并给出关键结论。',
+  '8. 工具调用轮次有上限：请用最少的调用拿到"足以作答"的信息，不要为追求穷尽而反复试探；',
+  '   轮次用尽后你只能基于已有信息收尾，因此每轮都要为"万一到此为止"留好结论。',
 ].join('\n');
 
 /** 暴露给模型的原生工具清单（JSON Schema；与 dispatchTool 支持的工具一一对应）。 */
@@ -83,7 +87,10 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: '工作区内的绝对路径' },
+        path: {
+          type: 'string',
+          description: '文件路径：工作区内绝对路径，或相对工作区的路径（如 src/daemon/tools.ts）',
+        },
         startLine: { type: 'number', description: '起始行（1-based，可选；配合 endLine 精读片段）' },
         endLine: { type: 'number', description: '结束行（1-based 含，可选）' },
       },
@@ -92,10 +99,15 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'list_dir',
-    description: '列出目录内容',
+    description: '列出目录内容（浏览目录请用本工具，不要用 bash_execute 的 ls/dir）',
     parameters: {
       type: 'object',
-      properties: { path: { type: 'string', description: '目录路径（缺省为工作区根）' } },
+      properties: {
+        path: {
+          type: 'string',
+          description: '目录路径：相对工作区（如 src、`src/daemon`；`.` 表示工作区根）或绝对路径；缺省为工作区根',
+        },
+      },
     },
   },
   {
@@ -110,7 +122,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
           type: 'string',
           description: '正则表达式（如 "resolveTarget|assertPathInside"、"async function"）',
         },
-        path: { type: 'string', description: '搜索目录（缺省为工作区根）' },
+        path: { type: 'string', description: '搜索目录：相对工作区或绝对路径；缺省为工作区根' },
         include: { type: 'string', description: '文件名过滤通配（如 *.ts，可选）' },
       },
       required: ['pattern'],
@@ -123,7 +135,7 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       type: 'object',
       properties: {
         pattern: { type: 'string', description: '文件名通配（如 *.ts、test*）' },
-        path: { type: 'string', description: '搜索目录（缺省为工作区根）' },
+        path: { type: 'string', description: '搜索目录：相对工作区或绝对路径；缺省为工作区根' },
       },
       required: ['pattern'],
     },
@@ -191,6 +203,78 @@ export async function runRealAgent(
   const messages: ChatMessage[] = buildMessages(prompt, attachments);
   const maxContextTokens = config.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS;
 
+  /**
+   * 每个增量到达时的统一投影（推理 / 正文分流）。
+   * 收束请求复用同一条通路，保证流式渲染与结束时的定妆完全一致。
+   */
+  const streamChunk = (c: StreamChunk) => {
+    if (ctx.isCanceled() || abort.signal.aborted) {
+      abort.abort();
+      return;
+    }
+    if (c.type === 'reasoning') {
+      ctx.notify(EVENTS.ReasoningDelta, { sessionId: ctx.sessionId, delta: c.text });
+      trajectory('reasoning', c.text);
+    } else {
+      ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: c.text });
+    }
+  };
+
+  /** 轮次耗尽时追加的指令：明确"不要再调工具"，逼模型用已收集的信息给结论。 */
+  const FINAL_ANSWER_INSTRUCTION =
+    '（系统提示）工具调用轮次已达上限，不能再调用任何工具。请立即基于上面已经获得的信息，' +
+    '直接给出最终结论（中文、简洁，含关键判断与依据）。若信息仍不足以回答，请明确说明还缺什么、' +
+    '下一步该看哪里；不要输出任何工具调用格式。';
+
+  /** 收束请求本身失败 / 仍没有正文时的兜底告知——绝不静默收场。 */
+  const exhaustedNotice = () =>
+    `\n\n> ⚠️ 工具调用已达上限（${maxRounds} 轮），未能生成完整结论。` +
+    '上方「过程」里保留了已完成的步骤；你可以直接再发一条消息让我继续，' +
+    '或把问题收窄一些（例如指定具体文件）以便更快作答。\n\n';
+
+  /**
+   * 收束回答：轮次用尽后追加一条"不要再调工具"的指令，并且**不提供工具定义**，
+   * 让模型用已收集的信息给出最终结论。
+   *
+   * 为什么非有这一步不可：主循环在轮次耗尽时只是退出 `for`，随后直接报 `completed`。
+   * 而工具调用轮里模型的正文通常只有一句"我先看看…"，于是用户看到的是一屏工具行加半句
+   * 开场白，然后会话"自动中断"、什么结论都没有——这正是「agent 并没有返回任何信息、
+   * 也不明确执行到哪一步」的根因。
+   */
+  const requestFinalAnswer = async (): Promise<boolean> => {
+    trajectory('system', `工具轮次已达上限（${maxRounds} 轮），转为收束回答（不再提供工具）`);
+    messages.push({ role: 'user', content: FINAL_ANSWER_INSTRUCTION });
+    try {
+      const result = await config.model.chat(messages, {
+        signal: abort.signal,
+        idleTimeoutMs: config.idleTimeoutMs,
+        // 刻意不传 tools：模型无法再发起工具调用，只能作答。
+        onChunk: streamChunk,
+      });
+      if (ctx.isCanceled() || abort.signal.aborted) return true; // 取消由调用方另行判定
+      ctx.notify(EVENTS.MessageDone, { sessionId: ctx.sessionId });
+      if (!(result.content ?? '').trim()) {
+        ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: exhaustedNotice() });
+      }
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[dsh-daemon] 收束回答失败（session=${ctx.sessionId}）：${msg}`);
+      ctx.notify(EVENTS.Error, {
+        sessionId: ctx.sessionId,
+        code: ERROR_CODES.InternalError,
+        message: `收束回答失败：${msg}`,
+      });
+      ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: exhaustedNotice() });
+      // 返回 false 让调用方以 reason=error 收尾：已经报了 error，却宣称"已完成"是自相矛盾的，
+      // 而"会话为什么结束"正是用户最需要看懂的信息。
+      return false;
+    }
+  };
+
+  /** 模型是否自己收的尾（不再调用工具 => 已有最终回答）。false 即轮次被耗尽。 */
+  let concludedByModel = false;
+
   for (let round = 0; round < maxRounds; round++) {
     if (ctx.isCanceled()) break;
 
@@ -210,18 +294,7 @@ export async function runRealAgent(
         signal: abort.signal,
         idleTimeoutMs: config.idleTimeoutMs,
         tools: TOOL_DEFINITIONS,
-        onChunk: (c) => {
-          if (ctx.isCanceled() || abort.signal.aborted) {
-            abort.abort();
-            return;
-          }
-          if (c.type === 'reasoning') {
-            ctx.notify(EVENTS.ReasoningDelta, { sessionId: ctx.sessionId, delta: c.text });
-            trajectory('reasoning', c.text);
-          } else {
-            ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: c.text });
-          }
-        },
+        onChunk: streamChunk,
       });
       reasoning = result.reasoning;
       content = result.content;
@@ -232,6 +305,12 @@ export async function runRealAgent(
 
     if (ctx.isCanceled() || abort.signal.aborted) break;
     if (streamFailed) {
+      // 真机排查：daemon.log 此前只有启动行，模型失败的真实原因（HTTP 状态 / 上游原文）
+      // 既不落盘也不进会话历史，事后完全无法诊断。这里 console.error 会被 logFile 的 tee
+      // 镜像到 <workspace>/.dsh/logs/daemon.log。
+      console.error(
+        `[dsh-daemon] 模型调用失败（session=${ctx.sessionId}，第 ${round + 1}/${maxRounds} 轮）：${streamFailed.message}`
+      );
       ctx.notify(EVENTS.Error, {
         sessionId: ctx.sessionId,
         code: ERROR_CODES.InternalError,
@@ -251,7 +330,10 @@ export async function runRealAgent(
 
     // 原生 function calling 优先；无原生调用时兜底解析 fenced 文本
     const calls = nativeToolCalls && nativeToolCalls.length > 0 ? nativeToolCalls : parseToolCalls(content);
-    if (calls.length === 0) break; // 无工具调用 => 最终回答已流式输出
+    if (calls.length === 0) {
+      concludedByModel = true; // 无工具调用 => 最终回答已流式输出
+      break;
+    }
 
     messages.push({ role: 'assistant', content, toolCalls: nativeToolCalls });
     for (const call of calls) {
@@ -261,15 +343,30 @@ export async function runRealAgent(
     }
   }
 
-  const canceled = ctx.isCanceled();
-  unsubscribeCancel?.();
-  if (canceled) {
+  // 收束阶段之前也要能感知取消，所以取消订阅推迟到真正收尾时再解绑。
+  if (ctx.isCanceled() || abort.signal.aborted) {
+    unsubscribeCancel?.();
     ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[已取消]' });
     ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'canceled' });
-  } else {
-    ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'completed' });
+    trajectory('system', 'session 结束：canceled');
+    return;
   }
-  trajectory('system', `session 结束：${canceled ? 'canceled' : 'completed'}`);
+
+  const finalAnswerOk = concludedByModel ? true : await requestFinalAnswer();
+
+  unsubscribeCancel?.();
+  if (ctx.isCanceled() || abort.signal.aborted) {
+    // 收束期间被取消：按取消收尾，不报 completed（避免"看起来成功了"）
+    ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[已取消]' });
+    ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'canceled' });
+    trajectory('system', 'session 结束：canceled');
+    return;
+  }
+  ctx.notify(EVENTS.SessionEnded, {
+    sessionId: ctx.sessionId,
+    reason: finalAnswerOk ? 'completed' : 'error',
+  });
+  trajectory('system', `session 结束：${finalAnswerOk ? 'completed' : 'error（收束回答失败）'}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -560,7 +657,7 @@ export async function generateTitle(model: ChatModel, prompt: string): Promise<s
         { role: 'system', content: TITLE_SYSTEM_PROMPT },
         { role: 'user', content: prompt },
       ],
-      { signal: abort.signal, idleTimeoutMs: 0 } // 标题生成已由外层 5s 定时器兜底
+      { signal: abort.signal, idleTimeoutMs: 0, maxRetries: 0 } // 标题生成已由外层 5s 定时器兜底
     );
     const t = (result.content ?? '').replace(/\s+/g, ' ').trim();
     return t ? t.slice(0, TITLE_MAX) : fallback;

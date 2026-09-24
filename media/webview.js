@@ -1245,11 +1245,16 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
       case 'trajectory.record':
         addTrajectory(params);
         break;
-      case 'session.ended':
+      case 'session.ended': {
         setRunning(false);
         finishAssistant();
-        addSystem('会话结束（' + (params.reason || 'completed') + '）');
+        // reason 是协议里的英文枚举，直接展示等于把 "error" 这种内部字眼丢给用户；
+        // 而"会话为什么结束"恰恰是此刻最该看懂的信息——早先只写 completed/error，
+        // 用户既不知道发生了什么，也不知道停在哪一步（本次修复的原始反馈之一）。
+        const endedLabels = { completed: '已完成', canceled: '已取消', error: '出错中止（详见上方错误）' };
+        addSystem('会话结束：' + (endedLabels[params.reason] || params.reason || '已完成'));
         break;
+      }
       case 'history.loaded':
         renderHistoryMessages(params);
         break;

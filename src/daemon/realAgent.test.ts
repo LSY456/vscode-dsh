@@ -722,3 +722,131 @@ describe('realAgent：标题生成', () => {
     expect(started.params.title).toBe('解释递归');
   });
 });
+
+describe('realAgent：工具轮次耗尽必须收束（不得静默结束）', () => {
+  /**
+   * 记录每次 chat 是否携带了工具定义。
+   * 「收束请求禁用了工具」这一条只能靠它验证——FakeChatModel 不暴露 opts。
+   */
+  function recordingModel(handler: (hasTools: boolean) => ChatCompletionResult): {
+    model: ChatModel;
+    calls: boolean[];
+  } {
+    const calls: boolean[] = [];
+    const model: ChatModel = {
+      async chat(messages, opts = {}) {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        const hasTools = !!(opts.tools && opts.tools.length > 0);
+        calls.push(hasTools);
+        const turn = handler(hasTools);
+        if (turn.content) opts.onChunk?.({ type: 'content', text: turn.content });
+        return turn;
+      },
+    };
+    return { model, calls };
+  }
+
+  /** 永远"再调一次工具"的模型：逼出轮次耗尽。 */
+  const keepCalling = (): ChatCompletionResult => ({
+    reasoning: '',
+    content: '我先看看目录结构。',
+    toolCalls: [{ id: 'c1', tool: 'list_dir', input: { path: '.' } }],
+  });
+
+  function deltasOf(ctx: MockCtx): string {
+    return ctx.events
+      .filter((e) => e.method === EVENTS.MessageDelta)
+      .map((e) => e.params.delta)
+      .join('');
+  }
+
+  it('轮次耗尽 -> 补一次"不带 tools"的收束请求，最终结论送达且 reason=completed', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = recordingModel((hasTools) =>
+      hasTools ? keepCalling() : { reasoning: '', content: '最终结论：工作区结构正常，无阻塞项。' }
+    );
+
+    await runRealAgent(ctx, baseParams, { model, maxToolRounds: 3 });
+
+    // 3 轮工具（每轮带 tools）+ 1 次收束（不带 tools）
+    expect(calls).toEqual([true, true, true, false]);
+    expect(deltasOf(ctx)).toContain('最终结论：工作区结构正常');
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('completed');
+  });
+
+  it('收束请求仍没有正文 -> 显式告知用户（不再无声收场）', async () => {
+    const ctx = makeCtx();
+    const { model } = recordingModel((hasTools) => (hasTools ? keepCalling() : { reasoning: '', content: '   ' }));
+
+    await runRealAgent(ctx, baseParams, { model, maxToolRounds: 2 });
+
+    expect(deltasOf(ctx)).toContain('工具调用已达上限（2 轮）');
+  });
+
+  it('收束请求失败 -> 报 error 且以 reason=error 收尾（不谎报"已完成"）', async () => {
+    const ctx = makeCtx();
+    const calls: boolean[] = [];
+    const model: ChatModel = {
+      async chat(messages, opts = {}) {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        const hasTools = !!(opts.tools && opts.tools.length > 0);
+        calls.push(hasTools);
+        if (hasTools) return keepCalling();
+        throw new Error('连接被重置');
+      },
+    };
+
+    await runRealAgent(ctx, baseParams, { model, maxToolRounds: 1 });
+
+    expect(ctx.events.find((e) => e.method === EVENTS.Error)!.params.message).toContain('收束回答失败');
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('error');
+    expect(deltasOf(ctx)).toContain('工具调用已达上限（1 轮）');
+  });
+
+  it('模型主动收尾（无工具调用）-> 不追加收束请求', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = recordingModel(() => ({ reasoning: '', content: '直接给出结论。' }));
+
+    await runRealAgent(ctx, baseParams, { model, maxToolRounds: 3 });
+
+    expect(calls).toHaveLength(1); // 只有正常那一轮，没有多余的收束请求
+    expect(ctx.events.filter((e) => e.method === EVENTS.MessageDone)).toHaveLength(1);
+  });
+
+  it('工作区相对路径（list_dir "."）直接可用：不再逼模型改用需审批的 bash_execute', async () => {
+    // 这是"轮次被白白吃光"的源头：`.` 被判越界后，模型只好改用 bash_execute（ls/dir）列目录，
+    // 每次都要用户审批且各占一轮。相对路径按工作区根解析后，只读工具直接就能用。
+    const ctx = makeCtx();
+    const { model } = recordingModel((hasTools) =>
+      hasTools
+        ? { reasoning: '', content: '', toolCalls: [{ id: 'c1', tool: 'list_dir', input: { path: '.' } }] }
+        : { reasoning: '', content: '结论。' }
+    );
+
+    await runRealAgent(ctx, baseParams, { model, maxToolRounds: 1 });
+
+    const exec = ctx.events.find((e) => e.method === EVENTS.ToolExecuted)!;
+    expect(exec.params.ok).toBe(true);
+    expect(exec.params.output).toContain('a.txt');
+    // 没有发起任何审批（只读工具本就不该审批）
+    expect(ctx.events.some((e) => e.method === EVENTS.ApprovalRequest)).toBe(false);
+  });
+
+  it('轮次耗尽但已被取消 -> 不发起收束请求，按 canceled 收尾', async () => {
+    const ctx = makeCtx();
+    const calls: boolean[] = [];
+    const model: ChatModel = {
+      async chat(messages, opts = {}) {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        calls.push(!!(opts.tools && opts.tools.length > 0));
+        ctx.setCanceled(); // 模拟"用户不等了"
+        return keepCalling();
+      },
+    };
+
+    await runRealAgent(ctx, baseParams, { model, maxToolRounds: 3 });
+
+    expect(calls.filter((hasTools) => !hasTools)).toHaveLength(0);
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('canceled');
+  });
+});

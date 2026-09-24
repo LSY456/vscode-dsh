@@ -628,3 +628,24 @@ describe('折叠的 DOM ↔ CSS 契约', () => {
     expect(title.matches('.card.collapsed > .card-body')).toBe(false);
   });
 });
+
+describe('面板：会话结束原因必须说人话', () => {
+  it('session.ended 的英文枚举映射为中文（不再把 completed/error 丢给用户）', () => {
+    // "会话为什么结束"正是用户最需要看懂的信息：此前直接展示协议枚举 completed/error，
+    // 用户既不知道发生了什么，也不知道停在哪一步。
+    const lastSystem = () => [...document.querySelectorAll('.message.system')].at(-1)?.textContent ?? '';
+
+    emitEvent('session.ended', { reason: 'error' });
+    expect(lastSystem()).toContain('出错中止');
+
+    emitEvent('session.ended', { reason: 'canceled' });
+    expect(lastSystem()).toContain('已取消');
+
+    emitEvent('session.ended', { reason: 'completed' });
+    expect(lastSystem()).toContain('已完成');
+
+    // 未知 reason 原样透出：排障时宁可难看，也不能把信息吞掉
+    emitEvent('session.ended', { reason: 'weird_reason' });
+    expect(lastSystem()).toContain('weird_reason');
+  });
+});
