@@ -282,6 +282,26 @@ const decidedDom = await renderScenario(({ emit, emitRaw }) => {
   emit('file.patch.result', { patchId: 'pt_decided', accepted: true, applied: true });
 });
 
+// ---- 场景四：点「新建会话」后空态回来（用户报的"新页面一片空白"）----
+// 关键差别：这里先有一轮对话，再走真正的 session.reset(new)。
+// 旧实现里紧随其后的「已新建会话：sess_xxx」系统行会把空态顶掉，新页面只剩一行会话号。
+const newSessionDom = await renderScenario(({ emit, emitRaw }) => {
+  emitRaw({
+    kind: 'init',
+    state: {
+      sessionId: 'sess_preview_before',
+      connected: true,
+      agent: 'real',
+      model: 'deepseek-chat',
+      history: [],
+    },
+  });
+  emit('user.message', { text: '上一轮问的问题', attachments: [{ label: 'tools.ts' }] });
+  emit('message.delta', { delta: '上一轮的回答。' });
+  emit('message.done', {});
+  emitRaw({ kind: 'session.reset', sessionId: 'sess_preview_after', reason: 'new' });
+});
+
 // ---- 组装预览页 ----
 const esc = (s) => s.replace(/<\/(script)/gi, '<\\/$1');
 
@@ -335,6 +355,10 @@ const preview = `<!DOCTYPE html>
       <figcaption>④ 侧边栏 340px · 已决策卡片折叠态（浅色主题，点标题可再展开）</figcaption>
       <div class="frame narrow"><iframe id="f-narrow-decided"></iframe></div>
     </figure>
+    <figure>
+      <figcaption>⑤ 侧边栏 340px · 点「新建会话」后回到空态（浅色主题）</figcaption>
+      <div class="frame narrow"><iframe id="f-narrow-newsession"></iframe></div>
+    </figure>
   </div>
 
 <script type="text/plain" id="panel-css">${esc(PANEL_CSS)}</script>
@@ -343,6 +367,7 @@ const preview = `<!DOCTYPE html>
 <script type="text/plain" id="dom-conversation">${esc(conversationDom)}</script>
 <script type="text/plain" id="dom-empty">${esc(emptyDom)}</script>
 <script type="text/plain" id="dom-decided">${esc(decidedDom)}</script>
+<script type="text/plain" id="dom-newsession">${esc(newSessionDom)}</script>
 <script>
   const txt = (id) => document.getElementById(id).textContent;
   const panelCss = txt('panel-css');
@@ -353,10 +378,12 @@ const preview = `<!DOCTYPE html>
   const conv = txt('dom-conversation');
   const empty = txt('dom-empty');
   const decided = txt('dom-decided');
+  const newsession = txt('dom-newsession');
   document.getElementById('f-narrow-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-wide-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-narrow-dark').srcdoc = build(empty, 'theme-dark');
   document.getElementById('f-narrow-decided').srcdoc = build(decided, 'theme-light');
+  document.getElementById('f-narrow-newsession').srcdoc = build(newsession, 'theme-light');
 </script>
 </body>
 </html>

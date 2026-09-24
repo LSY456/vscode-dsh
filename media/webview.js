@@ -10,6 +10,7 @@
 import { renderMarkdown } from '../src/webview/render.js';
 import { createBatcher } from '../src/webview/streamBatcher.js';
 import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
+import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from '../src/webview/suggestions.js';
 
 (function () {
   'use strict';
@@ -21,6 +22,7 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
   const mainEl = $('main');
   const messagesEl = $('messages');
   const emptyEl = $('empty');
+  const suggestEl = $('suggest');
   const statusEl = $('status');
   const connDot = $('conn-dot');
   const agentModeEl = $('agent-mode');
@@ -146,11 +148,61 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
   });
   btnJump.addEventListener('click', () => scrollBottom(true));
 
+  /**
+   * 空态与消息区互斥：消息区一有内容就收起欢迎块，空了就把它交还回来。
+   *
+   * 可见性只由「消息区是否为空」这一处决定。早先是在 addMessage 里单向隐藏、在 clearMessages 里
+   * 单向恢复，各写一半 —— 于是任何"清空后紧跟一条消息"的路径都会把欢迎块永久藏掉：点「新建会话」
+   * 时紧跟的正是「已新建会话：sess_xxx」那条系统行，新页面就只剩一行会话号（用户报的就是这个）。
+   */
+  function syncEmptyState() {
+    emptyEl.style.display = messagesEl.childElementCount ? 'none' : '';
+  }
+
   function addMessage(node) {
-    emptyEl.style.display = 'none';
     messagesEl.appendChild(node);
+    syncEmptyState();
     scrollBottom();
     return node;
+  }
+
+  // -------------------------------------------------------------------------
+  // 空态建议项
+  // -------------------------------------------------------------------------
+
+  function suggestionButton(item) {
+    const btn = el('button', 'suggest-item');
+    btn.type = 'button';
+    btn.dataset.prompt = item.prompt;
+    if (item.demoOnly) {
+      btn.dataset.demoOnly = '1';
+      // 演示模式专属项只在 mock 下露面（真实模型不需要关键字「咒语」这把钥匙）
+      btn.hidden = currentAgent !== 'mock';
+    }
+    const icon = el('span', 'suggest-icon');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.innerHTML = SUGGEST_ICONS[item.icon] || '';
+    const body = el('span', 'suggest-body');
+    body.appendChild(el('b', '', item.bold));
+    body.appendChild(document.createTextNode(' ' + item.text));
+    btn.appendChild(icon);
+    btn.appendChild(body);
+    return btn;
+  }
+
+  /**
+   * 重建空态建议项。每次空态出现（首屏 / 新建会话 / 切换会话）都换一组：
+   * 池子与轮换规则见 src/webview/suggestions.js —— 写死的几条看第二眼就成装饰了。
+   */
+  function renderSuggestions(seed) {
+    if (!suggestEl) return;
+    suggestEl.textContent = '';
+    for (const item of pickSuggestions(SUGGESTION_POOL, seed)) {
+      suggestEl.appendChild(suggestionButton(item));
+    }
+    for (const item of demoSuggestions(SUGGESTION_POOL)) {
+      suggestEl.appendChild(suggestionButton(item));
+    }
   }
 
   const STATUS_LABEL = {
@@ -1043,13 +1095,19 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
   /**
    * 会话级重置：新建会话 / 切回旧会话 / 断线重放前调用。
    * 除了清空视图，还要清掉上一会话的挂起卡片（它们的 approvalId 在新会话里已失效）。
+   *
+   * 「新建会话」不再往消息流里插一句「已新建会话：sess_xxx」：
+   *  ① 会话号对使用者没有意义（排障那份已挪到 #meta-bar 的 data-session / 悬停提示）；
+   *  ② 那句系统行会让消息区变成"非空"，把空态欢迎块（标记 + 标题 + 可点的起点）当场顶掉，
+   *     新会话只剩一行会话号 —— 这正是"点新建会话后页面一片空白"的成因。空态本身就是
+   *     「已新建」的反馈，不需要第二份文案。
    */
   function resetForSession(sessionId, reason) {
     clearMessages();
     setSession(sessionId);
-    const short = sessionId ? String(sessionId).slice(0, 12) : '';
-    if (reason === 'new') addSystem(short ? '已新建会话：' + short : '已新建会话');
-    else if (reason === 'switch') addSystem('已切换到会话 ' + short + '，可继续对话');
+    // 顺带换一组起点：同池按会话号轮换（见 src/webview/suggestions.js）
+    renderSuggestions(sessionId);
+    if (reason === 'switch') addSystem('已切换到该会话，可继续对话');
     else if (reason === 'replay') addSystem('连接已恢复，正在重放会话内容…');
   }
 
@@ -1062,7 +1120,7 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
 
   function clearMessages() {
     messagesEl.textContent = '';
-    emptyEl.style.display = '';
+    syncEmptyState();
     trajectoryEl.textContent = '';
     trajectoryBox.hidden = true;
     trajCount = 0;
@@ -1415,17 +1473,22 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
     if (running) cancel();
   });
 
-  // 空态建议：点击填入输入框（不直接发送，避免误触）
-  for (const item of document.querySelectorAll('.suggest-item')) {
-    item.addEventListener('click', () => {
-      // 演示模式下用关键字「咒语」版本（mock 靠它触发特定分支）；
-      // 真实模型下用干净的自然语言，避免把内部演示语法教给用户
-      const demo = currentAgent === 'mock' ? item.dataset.promptDemo : '';
-      inputEl.value = demo || item.dataset.prompt || '';
+  // 空态建议：点击填入输入框（不直接发送，避免误触）。
+  // 用事件委派而不是逐项挂监听：建议项现在按会话号轮换、每次空态整批重建，
+  // 逐项 addEventListener 会在重建后全部失效（点上去毫无反应）。
+  if (suggestEl) {
+    suggestEl.addEventListener('click', (e) => {
+      const node = e.target;
+      const item = node && typeof node.closest === 'function' ? node.closest('.suggest-item') : null;
+      if (!item) return;
+      inputEl.value = item.dataset.prompt || '';
       autosizeInput();
       inputEl.focus();
     });
   }
+
+  // 首屏也要有一组起点（此时还没有会话号，用空 seed 的确定性结果）
+  renderSuggestions('');
 
   autosizeInput();
 

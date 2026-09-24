@@ -388,20 +388,30 @@ describe('会话管理（新会话 / 切换 / 重连重放）', () => {
     expect(lastMessageOfKind('session.new')).toBeTruthy();
   });
 
-  it('session.reset(new)：清空视图、更新会话号并提示', () => {
+  it('session.reset(new)：清空视图、更新会话号，并把空态欢迎块交还给用户', () => {
     const before = document.querySelectorAll('.message.user').length;
     emitEvent('user.message', { text: '旧会话里的问题' });
     expect(document.querySelectorAll('.message.user').length).toBe(before + 1);
+    // 有对话内容时，空态是收起的
+    expect(document.getElementById('empty').style.display).toBe('none');
+
     emitRaw({ kind: 'session.reset', sessionId: 'sess_new_0001', reason: 'new' });
+
     expect(document.querySelectorAll('.message.user').length).toBe(0);
     expect(document.getElementById('meta-bar').dataset.session).toBe('sess_new_0001');
-    expect(document.querySelector('.message.system').textContent).toContain('已新建会话');
+    // 消息区空了 → 欢迎块回来（用户报的"新建会话后一片空白"就在这里）
+    expect(document.getElementById('empty').style.display).not.toBe('none');
+    // 且不再往消息流里插「已新建会话：sess_xxx」——那句系统行会把欢迎块当场顶掉，
+    // 而会话号对使用者没有意义（排障那份在 meta-bar.dataset.session）
+    expect(document.querySelectorAll('#messages .message').length).toBe(0);
   });
 
   it('session.reset(switch)：提示已切换且可继续对话', () => {
     emitRaw({ kind: 'session.reset', sessionId: 'sess_old_0002', reason: 'switch' });
     const texts = [...document.querySelectorAll('.message.system')].map((n) => n.textContent);
-    expect(texts.some((t) => t.includes('已切换到会话'))).toBe(true);
+    expect(texts.some((t) => t.includes('已切换到该会话'))).toBe(true);
+    // 会话号同样不出现在给用户看的文案里
+    expect(texts.some((t) => t.includes('sess_old_0002'))).toBe(false);
   });
 
   it('session.reset(replay)：断线重连提示重放中', () => {
@@ -414,6 +424,70 @@ describe('会话管理（新会话 / 切换 / 重连重放）', () => {
     emitEvent('notice', { text: '该会话已结束（daemon 重启过）' });
     const texts = [...document.querySelectorAll('.message.system')].map((n) => n.textContent);
     expect(texts.some((t) => t.includes('该会话已结束'))).toBe(true);
+  });
+});
+
+/**
+ * 空态欢迎块：用户报的「点了新建会话，新页面一片空白」就发生在这里。
+ *
+ * 失效路径很隐蔽 —— clearMessages() 已经把空态露出来了，但紧随其后的
+ * 「已新建会话：sess_xxx」系统行走的是 addMessage()，又把空态藏了回去：
+ * 于是新页面只剩一行会话号，标题 / 提示 / 可点的起点全都不见。
+ * 现在可见性只由「消息区是否为空」单点决定，下面几条把这条不变式钉住。
+ */
+describe('空态欢迎块（新建会话后必须回来）', () => {
+  const emptyVisible = () => document.getElementById('empty').style.display !== 'none';
+  const suggestItems = () => [...document.querySelectorAll('#suggest .suggest-item')];
+
+  it('新建会话后欢迎块与可点建议项一起回来', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_empty_a', reason: 'new' });
+    expect(emptyVisible()).toBe(true);
+    expect(document.querySelector('.empty-title').textContent).toContain('dsh Agent');
+
+    const items = suggestItems();
+    expect(items.length).toBeGreaterThanOrEqual(3);
+    for (const item of items) {
+      expect(item.dataset.prompt.trim().length).toBeGreaterThan(0);
+      expect(item.querySelector('.suggest-body').textContent.trim().length).toBeGreaterThan(0);
+      // 图标是 JS 注入的那段 SVG，漏了就会渲染成一个空白行首
+      expect(item.querySelector('.suggest-icon svg')).toBeTruthy();
+    }
+  });
+
+  it('点击建议项只填入输入框，不直接发送', () => {
+    const sends = posted.filter((m) => m.kind === 'send').length;
+    const input = document.getElementById('input');
+    input.value = '';
+    const first = suggestItems()[0];
+    first.click();
+    expect(input.value).toBe(first.dataset.prompt);
+    expect(posted.filter((m) => m.kind === 'send').length).toBe(sends);
+  });
+
+  it('不同会话号给出不同的建议组合（不是每次新建都一模一样）', () => {
+    const combos = new Set();
+    for (const id of ['sess_r1', 'sess_r2', 'sess_r3', 'sess_r4', 'sess_r5', 'sess_r6']) {
+      emitRaw({ kind: 'session.reset', sessionId: id, reason: 'new' });
+      combos.add(suggestItems().map((n) => n.dataset.prompt).join('|'));
+    }
+    expect(combos.size).toBeGreaterThan(1);
+  });
+
+  it('新一轮对话开始后，空态再次收起', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_empty_b', reason: 'new' });
+    expect(emptyVisible()).toBe(true);
+    emitEvent('user.message', { text: '这一轮问点别的' });
+    expect(emptyVisible()).toBe(false);
+  });
+
+  it('建议项重建后点击依然有效（委派监听，不是逐项挂监听）', () => {
+    // 逐项 addEventListener 会在每次空态重建后全部失效 —— 点上去毫无反应
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_empty_c', reason: 'new' });
+    const input = document.getElementById('input');
+    input.value = '';
+    const last = suggestItems().pop();
+    last.click();
+    expect(input.value).toBe(last.dataset.prompt);
   });
 });
 
@@ -499,19 +573,26 @@ describe('演示模式（未配置模型 Key 的显式提示）', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 
-  it('演示模式下「修改 TODO」带 mock 咒语，mock 专属入口可见', () => {
-    expect(document.querySelector('[data-demo-only]').hidden).toBe(false);
-    document.getElementById('suggest-edit').click();
-    expect(document.getElementById('input').value).toBe('请修改当前文件中的 TODO（write edit）');
+  it('演示模式下：mock 专属入口可见，点击填入关键字咒语', () => {
+    const demoItem = document.querySelector('#suggest [data-demo-only]');
+    expect(demoItem).toBeTruthy();
+    expect(demoItem.hidden).toBe(false);
+    document.getElementById('input').value = '';
+    demoItem.click();
+    expect(document.getElementById('input').value).toContain('danger');
   });
 
-  it('接入真实模型后：横幅撤下、咒语消失、mock 专属入口隐藏', () => {
+  it('接入真实模型后：横幅撤下、mock 专属入口隐藏、建议项回到自然语言', () => {
     emitEvent('agent.info', { agent: 'real', model: 'deepseek-chat' });
     expect(document.getElementById('demo-banner').hidden).toBe(true);
     expect(document.getElementById('agent-mode').className).not.toContain('warn');
-    expect(document.querySelector('[data-demo-only]').hidden).toBe(true);
-    document.getElementById('suggest-edit').click();
-    expect(document.getElementById('input').value).toBe('请修改当前文件中的 TODO');
+    expect(document.querySelector('#suggest [data-demo-only]').hidden).toBe(true);
+    const plain = document.querySelector('#suggest .suggest-item:not([data-demo-only])');
+    document.getElementById('input').value = '';
+    plain.click();
+    expect(document.getElementById('input').value).toBe(plain.dataset.prompt);
+    // 通用建议项一律自然语言：内部演示语法（danger / write edit）不该出现在真实模型的路径上
+    expect(plain.dataset.prompt).not.toMatch(/danger|write edit/);
   });
 
   it('显式 mock（forced-mock）用另一套文案，不误报成"忘了配 Key"', () => {
