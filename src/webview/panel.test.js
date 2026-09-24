@@ -79,8 +79,11 @@ describe('面板骨架', () => {
     });
     const agentEl = document.getElementById('agent-mode');
     expect(agentEl.hidden).toBe(false);
-    expect(agentEl.textContent).toBe('真实模型 · deepseek-chat');
-    expect(document.getElementById('session-id').textContent).toContain('sess_abcdef');
+    // 徽标只显示当前模型，不再带 `真实模型 · ` 这个多余的定语
+    expect(agentEl.textContent).toBe('deepseek-chat');
+    // 状态行里不再有面向使用者的会话号徽标；排障用的会话号挪到 data-session / 悬停提示
+    expect(document.getElementById('session-id')).toBe(null);
+    expect(document.getElementById('meta-bar').dataset.session).toBe('sess_abcdef123456');
     expect(document.getElementById('conn-dot').className).toContain('connected');
   });
 });
@@ -391,7 +394,7 @@ describe('会话管理（新会话 / 切换 / 重连重放）', () => {
     expect(document.querySelectorAll('.message.user').length).toBe(before + 1);
     emitRaw({ kind: 'session.reset', sessionId: 'sess_new_0001', reason: 'new' });
     expect(document.querySelectorAll('.message.user').length).toBe(0);
-    expect(document.getElementById('session-id').textContent).toContain('sess_new_000');
+    expect(document.getElementById('meta-bar').dataset.session).toBe('sess_new_0001');
     expect(document.querySelector('.message.system').textContent).toContain('已新建会话');
   });
 

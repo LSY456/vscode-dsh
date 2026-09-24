@@ -24,7 +24,7 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
   const statusEl = $('status');
   const connDot = $('conn-dot');
   const agentModeEl = $('agent-mode');
-  const sessionEl = $('session-id');
+  const metaBar = $('meta-bar');
   const inputEl = $('input');
   const btnSend = $('btn-send');
   const btnCancel = $('btn-cancel');
@@ -170,7 +170,8 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
     statusEl.title = detail || '';
   }
 
-  const AGENT_LABEL = { mock: '演示模式', real: '真实模型' };
+  /** 徽标只显示「当前模型」；mock 没有模型可显示，才回退到这个短标签。 */
+  const AGENT_LABEL = { mock: '演示模式' };
   const AGENT_TITLE = {
     mock: '未接入真实模型：回复由内置模拟 Agent 生成（关键词语义，非模型输出）',
     real: '当前使用真实模型 Agent',
@@ -204,9 +205,12 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
       demoBanner.hidden = true;
       return;
     }
-    agentModeEl.hidden = false;
     agentModeEl.className = 'meta-chip' + (isMock ? ' warn' : '');
-    agentModeEl.textContent = [AGENT_LABEL[agent] || agent, model].filter(Boolean).join(' · ');
+    // 只显示当前模型名：`真实模型 · ` 这个定语是多余的——能列出模型名就说明在跑真模型，
+    // 而"当前不是真模型"由演示模式横幅专门负责讲清（见 DEMO_REASON_TEXT）。
+    // mock 下模型名没有意义（关键字模拟不调用模型），所以只显示「演示模式」。
+    agentModeEl.textContent = isMock ? AGENT_LABEL.mock : model || '';
+    agentModeEl.hidden = !agentModeEl.textContent;
     agentModeEl.title = AGENT_TITLE[agent] || '';
 
     demoBanner.hidden = !isMock;
@@ -216,16 +220,17 @@ import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
     }
   }
 
+  /**
+   * 记录当前会话号。
+   *
+   * 会话号是排障信息（`.dsh/trajectory/<sessionId>.jsonl` 就按它命名），但对使用者毫无意义，
+   * 常驻在状态行上纯属噪音（原先那枚 `session sess_xxx` 徽标已移除）。
+   * 现改为落到 `#meta-bar` 的 `data-session` 与悬停提示：平时看不见，需要时悬停 / devtools 可查。
+   */
   function setSession(id) {
-    if (!id) {
-      sessionEl.hidden = true;
-      sessionEl.textContent = '';
-      sessionEl.title = '';
-      return;
-    }
-    sessionEl.hidden = false;
-    sessionEl.textContent = 'session ' + String(id).slice(0, 12);
-    sessionEl.title = id;
+    const text = id ? String(id) : '';
+    metaBar.dataset.session = text;
+    metaBar.title = text ? 'session ' + text : '';
   }
 
   /** 会话标题：有就显示在顶栏标识右侧，没有则整块收起（不留空白占位） */
