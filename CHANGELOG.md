@@ -7,6 +7,20 @@
 
 ### 修复
 
+- **没有打开文件夹时，"工作区"被悄悄换成扩展宿主的工作目录（P0-2）**：`getWorkspaceRoot()` 在无
+  `workspaceFolders` 时回落 `vscode.workspace.rootPath ?? process.cwd()`，于是 daemon 的工作区成了
+  VS Code 安装目录或用户主目录——端口文件、`.dsh/` 落盘、以及路径护栏的 root 全跟着跑偏，
+  而用户完全不知道 Agent 在操作哪个目录（`rootPath` 本身也早已废弃）。现改为**明确拒绝启动**
+  （状态 `disabled` + 「请先用『文件 → 打开文件夹』打开一个工作区」），不再猜根。工作区根同时收成
+  单点 `resolveWorkspaceRoot()`：`daemonManager` / `contextCapture` / `webviewPanel` 三处此前各自取
+  `workspaceFolders[0]`，现统一走它；多根工作区会记录"只作用于第一个文件夹"。
+- **`.dsh/` 不自守，会话全文与工具轨迹会出现在用户仓库的 `git status` 里（P0-3）**：`history.json`
+  （对话全文）、`trajectory/*.jsonl`（工具输入输出）、`logs/daemon.log`、`trust.json` 都不带忽略规则，
+  轻则刷一屏未跟踪文件，重则被 `git add -A` 把含业务代码与对话内容的记录提交进公司仓库。
+  现由 daemon 启动与扩展写历史两处统一经 `shared/dshDir.ts` 的 `ensureDshDir()` 建目录，并在目录名
+  确为 `.dsh` 时写下自守 `.gitignore`（内容 `*`；已存在则不覆盖用户的规则）。
+- **调试命令每次点击都新建一个 `dsh Debug` 输出通道且从不回收（P2-3）**：反复触发会持续堆叠输出
+  面板。现改为注册期创建一次并交给 `context.subscriptions` 回收。
 - **未受信任的工作区里照常拉起 daemon（打开恶意仓库即可执行任意进程）**：`dsh.daemon.command`
   在 auto（默认）模式下被当作**可执行文件直接 `spawn`**，而它是普通 `window` 作用域设置 ——
   **工作区设置可以覆盖**，且激活流程无条件 `daemon.start()`。于是仓库里放一份 `.vscode/settings.json`，

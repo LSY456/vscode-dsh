@@ -21,6 +21,7 @@ import { VSD_DSH_VERSION } from '../shared/version';
 import type { ConfigAccessor } from './configAccessor';
 import { logger } from './logger';
 import { DshClient } from './wsClient';
+import { resolveWorkspaceRoot } from './workspaceRoot';
 import { resolveTrustGate } from './workspaceTrust';
 
 /**
@@ -83,6 +84,8 @@ export class DaemonManager {
 
   private sessionId = '';
   private agentInfo: AgentInfo = {};
+  /** 本次启动解析出的工作区根（`start()` 单点写入；握手 / 端口文件 / 陈旧回收都读它） */
+  private workspaceRoot = '';
 
   constructor(opts: DaemonManagerOptions) {
     this.opts = opts;
@@ -138,14 +141,28 @@ export class DaemonManager {
   }
 
   async start(): Promise<void> {
-    // 信任门禁必须在读配置**之前**：要执行的命令来自 `dsh.daemon.command`，
+    // ① 信任门禁必须在读配置**之前**：要执行的命令来自 `dsh.daemon.command`，
     // 而未受信任时它可能由工作区提供（即便有 package.json 的声明，这里也要能兜住）。
     const gate = resolveTrustGate(this.opts.isTrusted ? this.opts.isTrusted() : true);
     if (gate.blocked) {
       logger.warn(`工作区未受信任，不启动 daemon：${gate.statusDetail}`);
+      this.workspaceRoot = '';
       this.setStatus('restricted', gate.statusDetail);
       return;
     }
+    // ② 没有打开文件夹时**不猜根**：旧实现回落 `rootPath ?? process.cwd()`，会让 daemon 的
+    // 工作区变成扩展宿主的 cwd（端口文件、.dsh/、路径护栏 root 全跟着跑偏）。宁可不启动。
+    const ws = resolveWorkspaceRoot(vscode.workspace.workspaceFolders);
+    if (!ws.ok) {
+      logger.warn(`未打开文件夹，不启动 daemon：${ws.reason}`);
+      this.workspaceRoot = '';
+      this.setStatus('disabled', ws.reason);
+      return;
+    }
+    if (ws.folderCount > 1) {
+      logger.info(`多根工作区：dsh 只作用于第一个文件夹 ${ws.root}（共 ${ws.folderCount} 个）`);
+    }
+    this.workspaceRoot = ws.root;
     const mode = vscode.workspace.getConfiguration('dsh').get<string>('daemon.mode', 'auto');
     logger.info(`daemon.start: mode=${mode}`);
     if (mode === 'none') {
@@ -528,12 +545,14 @@ export class DaemonManager {
     }
   }
 
+  /**
+   * 当前 daemon 的工作区根。
+   *
+   * 由 `start()` 经 `resolveWorkspaceRoot()` 解析并缓存（唯一来源），这里只读不再自己判断 ——
+   * 之前这里会回落 `vscode.workspace.rootPath ?? process.cwd()`（P0-2），而 `rootPath` 也早已废弃。
+   */
   private getWorkspaceRoot(): string {
-    const folders = vscode.workspace.workspaceFolders;
-    if (folders && folders.length > 0) {
-      return folders[0].uri.fsPath;
-    }
-    return vscode.workspace.rootPath ?? process.cwd();
+    return this.workspaceRoot;
   }
 
   private setStatus(status: DaemonStatus, detail: string): void {

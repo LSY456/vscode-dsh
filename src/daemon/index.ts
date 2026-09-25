@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { startDaemonServer } from './server';
 import { attachStreamLog } from './logFile';
+import { dshDirPath, ensureDshDir } from '../../shared/dshDir';
 
 interface CliArgs {
   port: number;
@@ -81,6 +82,10 @@ function parseArgs(argv: string[]): CliArgs {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
+  // P0-3：`.dsh/` 单点创建 —— 先建目录并写下自守的 .gitignore，之后 logFile / trajectory /
+  // trustStore 才往里写，不会留下"目录已存在但没有忽略规则"的窗口。
+  ensureDshDir(dshDirPath(args.workspace));
 
   // C2 日志落盘：tee stdout/stderr 到日志文件（缺省 <workspace>/.dsh/logs/daemon.log），
   // 覆盖 daemon 全生命周期输出（启动、握手、异常、信任规则等），进程退出后仍可排查。

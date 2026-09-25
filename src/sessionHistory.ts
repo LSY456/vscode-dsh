@@ -15,6 +15,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { ensureDshDir } from '../shared/dshDir';
 
 export interface MementoLike {
   get<T>(key: string): T | undefined;
@@ -41,6 +42,9 @@ export class FileMemento implements MementoLike {
     if (!this.file) return Promise.resolve();
     this.load()[key] = value;
     const write = this.pending.then(async () => {
+      // P0-3：顺手补上 `.dsh/` 的自守 .gitignore（只在目录名恰为 `.dsh` 时才写，
+      // 否则本函数被复用到临时目录时会越界塞忽略文件）
+      ensureDshDir(path.dirname(this.file));
       await fs.promises.mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
       await fs.promises.writeFile(this.file, JSON.stringify(this.load(), null, 2), {
         encoding: 'utf8',

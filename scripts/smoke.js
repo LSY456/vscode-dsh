@@ -605,6 +605,14 @@ async function main() {
     'daemon 日志已落盘（.dsh/logs/daemon.log）'
   );
 
+  // P0-3：`.dsh/` 必须自守 —— daemon 进程自己写下忽略规则，否则用户的 git status
+  // 会暴露会话全文 / 工具轨迹 / 日志，一个 git add -A 就带进仓库
+  const dshIgnore = path.join(tmpDir, '.dsh', '.gitignore');
+  assert(
+    fs.existsSync(dshIgnore) && fs.readFileSync(dshIgnore, 'utf8').split(/\r?\n/).includes('*'),
+    '.dsh/ 自守忽略已生成（.dsh/.gitignore 含 *）'
+  );
+
   await rconn.rpc.request('shutdown', {});
   rconn.ws.close();
 

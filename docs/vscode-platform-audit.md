@@ -5,6 +5,12 @@
 > 与 [`project-review.md`](project-review.md) 的分工：那份评的是**架构 / 正确性 / 安全**（其 P0-1~P0-4 已全部落地），
 > 本文评的是**"作为一个能在 Marketplace 上被别人装上就用"的 VS Code 插件，还差什么**。
 > 结论以代码与实测为准，判断项已标注【判断】。
+>
+> **实施状态（2026-09-25 同日更新）**：Batch A 的改动清单 4 项已全部落地 —— P0-1 见 `e1dad7e`（0.5.0），
+> P0-2 / P0-3 / P2-3 见 0.5.1。**未做**：验收里提到的集成测试 T6（Restricted Mode）——它需要再起一个
+> **不带** `--disable-workspace-trust` 的 Extension Host 进程（现有 `scripts/runIntegrationTests.js`
+> 固定传该参数以保证 T1~T5 的 `isTrusted === true`），本机无法验证，留待有 CI 环境时补。
+> Batch B / C 未动。
 
 ---
 

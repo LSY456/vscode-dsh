@@ -206,6 +206,12 @@ vscode-dsh/
   **机器作用域**（工作区设置无法改写）—— 否则仓库里放一份 `.vscode/settings.json` 就能在用户点开面板时
   执行任意进程。受限时面板横幅与状态栏会说明原因并提供「信任此工作区」入口（命令 `dsh: 信任此工作区`）；
   信任后自动补齐启动，无需重启窗口。
+- **不猜工作区根（P0-2）**：没有打开文件夹时**明确拒绝启动**（状态「仅 UI 模式」+ 指引先打开文件夹），
+  而不是回落 `process.cwd()` —— 后者会让"工作区"变成扩展宿主的工作目录，端口文件、`.dsh/` 与路径护栏
+  的根全跟着跑偏。工作区根由 `src/workspaceRoot.ts` 单点解析（多根只取第一个并在日志中说明）。
+- **`.dsh/` 自守（P0-3）**：首次创建 `.dsh/` 时自动写入 `.gitignore`（内容 `*`）—— 目录里是对话全文
+  （`history.json`）、工具输入输出（`trajectory/*.jsonl`）、日志与信任规则，不该出现在你的 `git status`
+  里，更不该被 `git add -A` 带进仓库。已存在的 `.gitignore` 不会被覆盖。
 - **端口**：daemon 仅监听 `127.0.0.1` 随机端口；端口经 stdout/端口文件上报，不暴露公网。
 - **一次性 Token**：扩展生成 24 字节随机 token，经环境变量传给 daemon 子进程；WS 打开握手必须
   携带 `Authorization: Bearer <token>`；拒绝任何带浏览器 `Origin` 的连接（防跨站 WebSocket 劫持）。
@@ -223,7 +229,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，317 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，416 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
   Webview Markdown 渲染与净化（XSS 安全）、以及面板 DOM 契约（jsdom 载入真实 `media/webview.html`）。
@@ -242,7 +248,7 @@ vscode-dsh/
   typecheck → build → unit → smoke → 协议第二实现（win/ubuntu，显式 setup-python）、
   integration（vscode extension host，ubuntu）；main 分支额外产出 VSIX 构件。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
-- **打包**：`npm run package` 产出约 389KB 的 VSIX（`dist/`，35 文件）。
+- **打包**：`npm run package` 产出约 243KB 的 VSIX（`dist/`，38 文件）。
 
 ## 迹线（Trajectory）数据映射
 

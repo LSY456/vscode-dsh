@@ -162,12 +162,15 @@ export function activate(context: vscode.ExtensionContext): DshApi {
   );
 
   // ---- 调试辅助：在输出面板打印当前捕获的上下文
+  // P2-3：OutputChannel 在注册期创建一次并交给 subscriptions 回收。旧实现每次点击命令都
+  // 新建一个且从不 dispose —— 反复触发会持续堆叠输出面板（真实的小泄漏）。
+  const debugOutput = vscode.window.createOutputChannel('dsh Debug');
   context.subscriptions.push(
+    debugOutput,
     vscode.commands.registerCommand('dsh.debug.captureContext', async () => {
-      const output = vscode.window.createOutputChannel('dsh Debug');
-      output.show(true);
+      debugOutput.show(true);
       const attachments = await captureContext();
-      output.appendLine(JSON.stringify(attachments, null, 2));
+      debugOutput.appendLine(JSON.stringify(attachments, null, 2));
     })
   );
 

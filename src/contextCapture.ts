@@ -11,6 +11,7 @@ import * as cp from 'child_process';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Attachment, Diagnostic } from '../shared/protocol';
+import { resolveWorkspaceRoot } from './workspaceRoot';
 
 export interface CaptureOptions {
   maxFileBytes?: number;
@@ -140,8 +141,10 @@ function summarizeWorkspaceDiagnostics(): Diagnostic[] {
 }
 
 function getGitStatus(): Promise<string | null> {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!root) return Promise.resolve(null);
+  // 工作区根的解析收在 resolveWorkspaceRoot（P0-2）：没有文件夹就明确不做，不猜目录
+  const ws = resolveWorkspaceRoot(vscode.workspace.workspaceFolders);
+  if (!ws.ok) return Promise.resolve(null);
+  const root = ws.root;
   return new Promise((resolve) => {
     let settled = false;
     const child = cp.execFile(

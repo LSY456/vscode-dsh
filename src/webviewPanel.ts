@@ -51,6 +51,7 @@ import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
 import { FileMemento, SessionHistoryStore, SessionSummary } from './sessionHistory';
 import { openTrustManagement } from './trustCommands';
+import { resolveWorkspaceRoot } from './workspaceRoot';
 import { resolveTrustGate, TrustGate } from './workspaceTrust';
 
 /** 侧边栏视图 id（package.json contributes.views 必须与此一致） */
@@ -222,8 +223,8 @@ export class WebviewPanelHost {
 
   /** 历史文件路径：优先工作区 .dsh/history.json，无工作区时退化为扩展全局存储。 */
   private resolveHistoryFile(): string {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (root) return path.join(root, '.dsh', 'history.json');
+    const ws = resolveWorkspaceRoot(vscode.workspace.workspaceFolders);
+    if (ws.ok) return path.join(ws.root, '.dsh', 'history.json');
     return path.join(this.context.globalStorageUri.fsPath, 'history.json');
   }
 
