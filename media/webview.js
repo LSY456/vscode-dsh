@@ -56,9 +56,10 @@ import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from
   const pendingBar = $('pending-bar');
   const pendingLabel = $('pending-label');
   const pendingActions = $('pending-actions');
-  const demoBanner = $('demo-banner');
-  const demoBannerText = $('demo-banner-text');
-  const btnDemoConfig = $('btn-demo-config');
+  const stateBanner = $('state-banner');
+  const stateBannerTag = $('state-banner-tag');
+  const stateBannerText = $('state-banner-text');
+  const btnStateAction = $('btn-state-action');
   const sessionTitleEl = $('session-title');
   const btnTrajectory = $('btn-trajectory');
   const btnTrajectoryClose = $('btn-trajectory-close');
@@ -211,6 +212,8 @@ import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from
     starting: '启动中…',
     stopped: '未启动',
     disabled: '仅 UI 模式',
+    // 受限模式：工作区未被信任，daemon 刻意不启动（它不是故障，而是缺一个前置条件）
+    restricted: '受限模式',
     error: '错误',
   };
 
@@ -235,6 +238,63 @@ import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from
   };
   const DEMO_FALLBACK_TEXT = '当前由内置模拟 Agent 生成回复，不是真实模型的输出。';
 
+  // -------------------------------------------------------------------------
+  // 状态横幅（受限模式 / 演示模式共用同一块 UI）
+  // -------------------------------------------------------------------------
+
+  /** 工作区信任快照：{ blocked, banner:{tag,text,actionLabel} }；null = 尚未收到 / 已信任 */
+  let trustGate = null;
+  /** 演示模式横幅文案；null = 当前不在演示模式 */
+  let demoBannerMessage = null;
+  /** 横幅按钮的动作：'trust' | 'settings' | ''（点击时据此派发） */
+  let bannerAction = '';
+
+  /**
+   * 渲染状态横幅。两个来源互斥，**受限模式优先**：
+   * 未受信任时 daemon 根本没启动，此时再说"没配 Key 所以是模拟回复"纯属误导。
+   */
+  function renderStateBanner() {
+    const restricted = trustGate && trustGate.blocked ? trustGate.banner : null;
+    if (restricted) {
+      showStateBanner({
+        tag: restricted.tag,
+        text: restricted.text,
+        action: 'trust',
+        actionLabel: restricted.actionLabel,
+      });
+      return;
+    }
+    if (demoBannerMessage) {
+      showStateBanner({
+        tag: AGENT_LABEL.mock,
+        text: demoBannerMessage,
+        action: 'settings',
+        actionLabel: '配置模型',
+      });
+      return;
+    }
+    showStateBanner(null);
+  }
+
+  function showStateBanner(state) {
+    if (!state) {
+      stateBanner.hidden = true;
+      bannerAction = '';
+      return;
+    }
+    stateBannerTag.textContent = state.tag;
+    stateBannerText.textContent = state.text;
+    btnStateAction.textContent = state.actionLabel;
+    bannerAction = state.action || '';
+    stateBanner.hidden = false;
+  }
+
+  /** 工作区信任（init 快照 / 用户信任后推来的 trust.info） */
+  function setTrustGate(gate) {
+    trustGate = gate || null;
+    renderStateBanner();
+  }
+
   /**
    * 同步 Agent 实现信息（init 快照 / 每次握手后的 agent.info）。
    *
@@ -254,22 +314,21 @@ import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from
 
     if (!agent && !model) {
       agentModeEl.hidden = true;
-      demoBanner.hidden = true;
+      demoBannerMessage = null;
+      renderStateBanner();
       return;
     }
     agentModeEl.className = 'meta-chip' + (isMock ? ' warn' : '');
     // 只显示当前模型名：`真实模型 · ` 这个定语是多余的——能列出模型名就说明在跑真模型，
-    // 而"当前不是真模型"由演示模式横幅专门负责讲清（见 DEMO_REASON_TEXT）。
+    // 而"当前不是真模型"由状态横幅专门负责讲清（见 DEMO_REASON_TEXT）。
     // mock 下模型名没有意义（关键字模拟不调用模型），所以只显示「演示模式」。
     agentModeEl.textContent = isMock ? AGENT_LABEL.mock : model || '';
     agentModeEl.hidden = !agentModeEl.textContent;
     agentModeEl.title = AGENT_TITLE[agent] || '';
 
-    demoBanner.hidden = !isMock;
-    if (isMock) {
-      const reason = (state && state.agentReason) || '';
-      demoBannerText.textContent = DEMO_REASON_TEXT[reason] || DEMO_FALLBACK_TEXT;
-    }
+    const reason = (state && state.agentReason) || '';
+    demoBannerMessage = isMock ? DEMO_REASON_TEXT[reason] || DEMO_FALLBACK_TEXT : null;
+    renderStateBanner();
   }
 
   /**
@@ -1325,6 +1384,11 @@ import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from
         // 扩展本地事件（非 daemon 协议）：每次握手后同步当前 Agent 实现
         setAgentInfo(params);
         break;
+      case 'trust.info':
+        // 扩展本地事件：工作区信任状态（受限模式下 daemon 不启动，拿不到任何握手事件，
+        // 所以撤下「受限模式」横幅只能靠这条）
+        setTrustGate(params);
+        break;
       case 'notice':
         addSystem(params.text);
         break;
@@ -1361,6 +1425,7 @@ import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from
       case 'init':
         setSession(msg.state && msg.state.sessionId);
         setAgentInfo(msg.state);
+        setTrustGate(msg.state && msg.state.trust);
         if (msg.state && msg.state.connected) setStatus('connected', '');
         renderHistory(msg.state && msg.state.history);
         restorePending(msg.state && msg.state.pending);
@@ -1418,7 +1483,12 @@ import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from
   });
   btnTrajectoryClose.addEventListener('click', closeSheets);
   // 演示模式横幅 → 一键进入模型配置（配好 Key 并重启 daemon 后横幅自动撤下）
-  btnDemoConfig.addEventListener('click', () => openSheet('settings'));
+  // 状态横幅的动作按钮：受限模式去信任工作区，演示模式去配置模型。
+  // 用 bannerAction 这一个出口派发 —— 横幅是同一块 UI，动作却由当前状态决定。
+  btnStateAction.addEventListener('click', () => {
+    if (bannerAction === 'trust') vscode.postMessage({ kind: 'trust.manage' });
+    else if (bannerAction === 'settings') openSheet('settings');
+  });
   for (const backdrop of document.querySelectorAll('.sheet-backdrop')) {
     backdrop.addEventListener('click', () => {
       const sheet = backdrop.parentElement;

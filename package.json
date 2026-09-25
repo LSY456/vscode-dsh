@@ -2,7 +2,7 @@
   "name": "vscode-dsh",
   "displayName": "dsh · DeepSeek Harness Agent for VSCode",
   "description": "VSCode 与 dsh Agent Daemon 的联动：上下文捕获、流式推理、工具审批与原生 Diff 审查。",
-  "version": "0.4.7",
+  "version": "0.5.0",
   "publisher": "deepseek-ai",
   "license": "MIT",
   "repository": {
@@ -11,6 +11,24 @@
   },
   "engines": {
     "vscode": "^1.85.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "受限模式（工作区未被信任）下允许激活 —— 面板要能打开、要能说清「为什么不能用」并给出信任入口；但本地 daemon 不会被启动：它会读写工作区文件、执行命令，并在 .dsh/ 下落盘会话记录。",
+      "restrictedConfigurations": [
+        "dsh.daemon.mode",
+        "dsh.daemon.command",
+        "dsh.daemon.port",
+        "dsh.daemon.token",
+        "dsh.capabilities.allowedTools",
+        "dsh.model.baseURL"
+      ]
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Agent 需要真实文件系统：读取工作区文件、应用补丁、在 .dsh/ 下落盘会话历史与轨迹。"
+    }
   },
   "categories": [
     "Other",
@@ -63,6 +81,11 @@
       {
         "command": "dsh.daemon.status",
         "title": "dsh: 查看 Daemon 状态"
+      },
+      {
+        "command": "dsh.trustWorkspace",
+        "title": "dsh: 信任此工作区（启用 Agent）",
+        "enablement": "!isWorkspaceTrusted"
       },
       {
         "command": "dsh.diff.accept",
@@ -148,22 +171,26 @@
             "不启动 daemon，仅 UI（调试用）"
           ],
           "default": "auto",
-          "description": "dsh daemon 的运行模式。"
+          "scope": "machine",
+          "description": "dsh daemon 的运行模式。机器作用域：指向哪个 daemon 决定了信任谁，不能由工作区设置改写。"
         },
         "dsh.daemon.command": {
           "type": "string",
           "default": "",
-          "description": "外部 daemon 启动命令模板（auto 模式也优先使用它）。留空则使用插件内置的参考 daemon。"
+          "scope": "machine",
+          "description": "外部 daemon 启动命令模板（auto 模式也优先使用它）。留空则使用插件内置的参考 daemon。机器作用域：这是会被当作可执行文件直接启动的字符串，绝不允许工作区设置改写（否则打开恶意仓库即等于执行任意进程）。"
         },
         "dsh.daemon.port": {
           "type": "number",
           "default": 0,
-          "description": "external 模式下的 daemon 端口（0 表示从端口文件中读取）。"
+          "scope": "machine",
+          "description": "external 模式下的 daemon 端口（0 表示从端口文件中读取）。机器作用域：决定连到哪个 daemon。"
         },
         "dsh.daemon.token": {
           "type": "string",
           "default": "",
-          "description": "external 模式下的握手令牌。留空时使用插件生成的随机令牌（需与 daemon 端一致）。"
+          "scope": "machine",
+          "description": "external 模式下的握手令牌。留空时使用插件生成的随机令牌（需与 daemon 端一致）。机器作用域：属于凭据，不接受工作区设置下发的值。"
         },
         "dsh.apiKey": {
           "type": "string",

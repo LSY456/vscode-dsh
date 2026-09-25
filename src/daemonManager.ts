@@ -21,8 +21,21 @@ import { VSD_DSH_VERSION } from '../shared/version';
 import type { ConfigAccessor } from './configAccessor';
 import { logger } from './logger';
 import { DshClient } from './wsClient';
+import { resolveTrustGate } from './workspaceTrust';
 
-export type DaemonStatus = 'stopped' | 'starting' | 'connecting' | 'connected' | 'error' | 'disabled';
+/**
+ * daemon 状态机。
+ * `restricted` 是安全态而非故障：工作区未被信任时**连子进程都不拉起**，
+ * 因为要执行的命令来自配置项（见 src/workspaceTrust.ts 的三层防护说明）。
+ */
+export type DaemonStatus =
+  | 'stopped'
+  | 'starting'
+  | 'connecting'
+  | 'connected'
+  | 'error'
+  | 'disabled'
+  | 'restricted';
 
 export interface StatusInfo {
   status: DaemonStatus;
@@ -33,6 +46,13 @@ export interface DaemonManagerOptions {
   extensionPath: string;
   /** 注入后 apiKey 经 SecretStorage 读取（A4 安全化）；缺省回退 settings.json（兼容裸用） */
   configAccessor?: ConfigAccessor;
+  /**
+   * 工作区信任探针（缺省视为已信任，便于裸用与测试）。
+   *
+   * 放在这里而不是各个调用点：`start()` 是唯一的拉起入口（`restart()` 也走它），
+   * 于是命令、状态栏、面板「重启 daemon」、断线重连全都被同一道门覆盖，不会有绕行路径。
+   */
+  isTrusted?: () => boolean;
 }
 
 /** 握手后 daemon 回报的运行信息（UI 用：当前是 mock 还是真实模型）。 */
@@ -118,6 +138,14 @@ export class DaemonManager {
   }
 
   async start(): Promise<void> {
+    // 信任门禁必须在读配置**之前**：要执行的命令来自 `dsh.daemon.command`，
+    // 而未受信任时它可能由工作区提供（即便有 package.json 的声明，这里也要能兜住）。
+    const gate = resolveTrustGate(this.opts.isTrusted ? this.opts.isTrusted() : true);
+    if (gate.blocked) {
+      logger.warn(`工作区未受信任，不启动 daemon：${gate.statusDetail}`);
+      this.setStatus('restricted', gate.statusDetail);
+      return;
+    }
     const mode = vscode.workspace.getConfiguration('dsh').get<string>('daemon.mode', 'auto');
     logger.info(`daemon.start: mode=${mode}`);
     if (mode === 'none') {

@@ -302,6 +302,39 @@ const newSessionDom = await renderScenario(({ emit, emitRaw }) => {
   emitRaw({ kind: 'session.reset', sessionId: 'sess_preview_after', reason: 'new' });
 });
 
+// ---- 场景五：受限模式（工作区未被信任，P0-1 安全门禁）----
+// 未信任时 daemon **不启动**，所以这块 UI 必须自己说清「为什么不能用 + 点哪里能解除」。
+// trust 载荷与 src/workspaceTrust.ts 的 resolveTrustGate 保持一致（那份是 .ts，预览侧只能内联）。
+const restrictedDom = await renderScenario(({ emitRaw }) => {
+  emitRaw({
+    kind: 'init',
+    state: {
+      sessionId: '',
+      connected: false,
+      history: [],
+      trust: {
+        blocked: true,
+        statusLabel: '受限模式',
+        statusDetail:
+          '当前工作区未被信任（受限模式），Agent 未启动：它需要读写工作区文件、执行命令，' +
+          '并在 .dsh/ 下写入会话记录。信任此工作区后即可正常使用。',
+        banner: {
+          tag: '受限模式',
+          text:
+            '当前工作区未被信任，Agent 未启动 —— 它需要读写工作区文件、执行命令，' +
+            '并在 .dsh/ 下写入会话记录。',
+          actionLabel: '信任此工作区',
+        },
+      },
+    },
+  });
+  emitRaw({
+    kind: 'status',
+    status: 'restricted',
+    detail: '当前工作区未被信任（受限模式），Agent 未启动：它需要读写工作区文件、执行命令。',
+  });
+});
+
 // ---- 组装预览页 ----
 const esc = (s) => s.replace(/<\/(script)/gi, '<\\/$1');
 
@@ -359,6 +392,10 @@ const preview = `<!DOCTYPE html>
       <figcaption>⑤ 侧边栏 340px · 点「新建会话」后回到空态（浅色主题）</figcaption>
       <div class="frame narrow"><iframe id="f-narrow-newsession"></iframe></div>
     </figure>
+    <figure>
+      <figcaption>⑥ 侧边栏 340px · 受限模式：工作区未被信任，daemon 未启动（浅色主题）</figcaption>
+      <div class="frame narrow"><iframe id="f-narrow-restricted"></iframe></div>
+    </figure>
   </div>
 
 <script type="text/plain" id="panel-css">${esc(PANEL_CSS)}</script>
@@ -368,6 +405,7 @@ const preview = `<!DOCTYPE html>
 <script type="text/plain" id="dom-empty">${esc(emptyDom)}</script>
 <script type="text/plain" id="dom-decided">${esc(decidedDom)}</script>
 <script type="text/plain" id="dom-newsession">${esc(newSessionDom)}</script>
+<script type="text/plain" id="dom-restricted">${esc(restrictedDom)}</script>
 <script>
   const txt = (id) => document.getElementById(id).textContent;
   const panelCss = txt('panel-css');
@@ -379,11 +417,13 @@ const preview = `<!DOCTYPE html>
   const empty = txt('dom-empty');
   const decided = txt('dom-decided');
   const newsession = txt('dom-newsession');
+  const restricted = txt('dom-restricted');
   document.getElementById('f-narrow-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-wide-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-narrow-dark').srcdoc = build(empty, 'theme-dark');
   document.getElementById('f-narrow-decided').srcdoc = build(decided, 'theme-light');
   document.getElementById('f-narrow-newsession').srcdoc = build(newsession, 'theme-light');
+  document.getElementById('f-narrow-restricted').srcdoc = build(restricted, 'theme-light');
 </script>
 </body>
 </html>

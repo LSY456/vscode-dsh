@@ -13,15 +13,17 @@
  *       - method='notice' 为扩展本地提示（非 daemon 事件），渲染为系统消息
  *       - method='agent.info' 为扩展本地事件：当前 Agent 实现（mock/real + 成因），
  *         驱动「演示模式」横幅与模式 chip（配好 Key 重启后据此撤下横幅）
+ *       - method='trust.info' 为扩展本地事件：工作区信任状态（受限模式横幅）。未信任时 daemon
+ *         不会启动，所以这是撤下横幅的唯一来源，与 agent.info 同一套本地事件机制
  *     { kind: 'session.reset', sessionId }   // 清空视图（新建会话 / 切换会话 / 断线重放前）
- *     { kind: 'init', state }                // 某个 surface 就绪后的初始状态（含挂起项快照）
+ *     { kind: 'init', state }                // 某个 surface 就绪后的初始状态（含挂起项快照 + trust）
  *   webview -> extension:
  *     { kind: 'ready' } { kind: 'send', prompt } { kind: 'cancel' }
  *     { kind: 'session.new' } { kind: 'history.open', sessionId }
  *     { kind: 'approval.respond', approvalId, approved, trust? }
  *     { kind: 'patch.accept'|'patch.reject'|'patch.openDiff'|'patch.applyEdited', patchId }
  *     { kind: 'settings.get'|'settings.apply' } { kind: 'daemon.restart' }
- *     { kind: 'trust.list'|'trust.clear' }
+ *     { kind: 'trust.list'|'trust.clear' } { kind: 'trust.manage' }
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -48,6 +50,8 @@ import { DshDiffManager } from './diffProvider';
 import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
 import { FileMemento, SessionHistoryStore, SessionSummary } from './sessionHistory';
+import { openTrustManagement } from './trustCommands';
+import { resolveTrustGate, TrustGate } from './workspaceTrust';
 
 /** 侧边栏视图 id（package.json contributes.views 必须与此一致） */
 export const VIEW_ID = 'dsh.agentView';
@@ -74,6 +78,8 @@ interface ToWebview {
     model?: string;
     daemonVersion?: string;
     pending?: { approvals: PendingApproval[]; patches: PendingPatch[] };
+    /** 工作区信任状态快照：受限模式横幅据此显示（未声明 = 已信任） */
+    trust?: TrustGate;
   };
 }
 
@@ -93,7 +99,8 @@ interface FromWebview {
     | 'settings.apply'
     | 'daemon.restart'
     | 'trust.list'
-    | 'trust.clear';
+    | 'trust.clear'
+    | 'trust.manage';
   prompt?: string;
   approvalId?: string;
   approved?: boolean;
@@ -458,6 +465,10 @@ export class WebviewPanelHost {
         void vscode.window.showInformationMessage('已清空全部信任命令');
         return;
       }
+      case 'trust.manage':
+        // 受限模式横幅的「信任此工作区」：信任由 VS Code 判定，本扩展只是把入口递过去
+        await openTrustManagement();
+        return;
     }
   }
 
@@ -479,7 +490,18 @@ export class WebviewPanelHost {
         approvals: [...this.pendingApprovals.values()],
         patches: [...this.pendingPatches.values()],
       },
+      trust: resolveTrustGate(vscode.workspace.isTrusted),
     };
+  }
+
+  /**
+   * 工作区信任状态变化后重新广播（与 agent.info 同一套"扩展侧本地事件"）。
+   *
+   * 必须单独推一次：受限模式下 daemon 不会启动，因而收不到任何握手事件，
+   * 「受限模式」横幅就没有别的撤下时机（用户信任工作区后要能立刻恢复正常观感）。
+   */
+  notifyTrustChange(): void {
+    this.post({ kind: 'event', method: 'trust.info', params: resolveTrustGate(vscode.workspace.isTrusted) });
   }
 
   private async doSend(prompt: string): Promise<void> {
@@ -488,7 +510,13 @@ export class WebviewPanelHost {
       return;
     }
     if (!this.daemon.client.isOpen) {
-      void vscode.window.showErrorMessage('daemon 未连接，请检查状态栏或运行 “dsh: 查看 Daemon 状态”');
+      // 受限模式是"为什么没连上"的确定答案：不要退化成含糊的"daemon 未连接"让用户去猜
+      const gate = resolveTrustGate(vscode.workspace.isTrusted);
+      void vscode.window.showErrorMessage(
+        gate.blocked
+          ? `${gate.statusLabel}：${gate.statusDetail}`
+          : 'daemon 未连接，请检查状态栏或运行 “dsh: 查看 Daemon 状态”'
+      );
       return;
     }
     try {

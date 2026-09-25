@@ -547,28 +547,27 @@ describe('surface 重建后的挂起项恢复', () => {
 });
 
 /**
- * 演示模式：未配置模型 Key 时**必须显式告知**，不能静默降级。
+ * 状态横幅：一块 UI 承载两种"当前为什么不好用"。
  *
- * 背景：旧行为在没配 Key 时直接走 mock 关键字循环，既不报错也不提示，
- * 用户会把模拟回复当成真实模型的回答。这里锁定三件事：
- *  1. 横幅出现且说清成因（缺 Key / 显式 mock）；
- *  2. 横幅能一键进设置面板；接入真实模型后自动撤下；
- *  3. mock 专属的「咒语」入口不混在真实模型的主路径上。
+ * ① 演示模式：未配置模型 Key 时**必须显式告知**，不能静默降级（旧行为直接走 mock 关键字循环，
+ *    用户会把模拟回复当成真实模型的回答）；
+ * ② 受限模式：工作区未被信任时 daemon 不启动（P0-1 安全门禁），必须说清"为什么不能用"并给出信任入口。
+ * 二者互斥且**受限模式优先**：未受信任时 daemon 根本没启动，再讲"没配 Key 所以是模拟回复"就是误导。
  */
-describe('演示模式（未配置模型 Key 的显式提示）', () => {
+describe('状态横幅：演示模式', () => {
   it('mock + 缺 Key：横幅可见、模式 chip 警示、文案点明成因', () => {
     emitEvent('agent.info', { agent: 'mock', agentReason: 'no-api-key', model: 'deepseek-chat' });
-    const banner = document.getElementById('demo-banner');
+    const banner = document.getElementById('state-banner');
     expect(banner.hidden).toBe(false);
-    expect(banner.textContent).toContain('演示模式');
-    expect(banner.textContent).toContain('未配置模型 Key');
+    expect(document.getElementById('state-banner-tag').textContent).toBe('演示模式');
+    expect(document.getElementById('state-banner-text').textContent).toContain('未配置模型 Key');
     const chip = document.getElementById('agent-mode');
     expect(chip.className).toContain('warn');
     expect(chip.textContent).toContain('演示模式');
   });
 
   it('横幅「配置模型」直达设置面板', () => {
-    document.getElementById('btn-demo-config').click();
+    document.getElementById('btn-state-action').click();
     expect(document.getElementById('settings-panel').hidden).toBe(false);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
@@ -584,7 +583,7 @@ describe('演示模式（未配置模型 Key 的显式提示）', () => {
 
   it('接入真实模型后：横幅撤下、mock 专属入口隐藏、建议项回到自然语言', () => {
     emitEvent('agent.info', { agent: 'real', model: 'deepseek-chat' });
-    expect(document.getElementById('demo-banner').hidden).toBe(true);
+    expect(document.getElementById('state-banner').hidden).toBe(true);
     expect(document.getElementById('agent-mode').className).not.toContain('warn');
     expect(document.querySelector('#suggest [data-demo-only]').hidden).toBe(true);
     const plain = document.querySelector('#suggest .suggest-item:not([data-demo-only])');
@@ -597,15 +596,79 @@ describe('演示模式（未配置模型 Key 的显式提示）', () => {
 
   it('显式 mock（forced-mock）用另一套文案，不误报成"忘了配 Key"', () => {
     emitEvent('agent.info', { agent: 'mock', agentReason: 'forced-mock' });
-    const text = document.getElementById('demo-banner-text').textContent;
+    const text = document.getElementById('state-banner-text').textContent;
     expect(text).toContain('agent=mock');
     expect(text).not.toContain('未配置模型 Key');
   });
 
   it('agent 未知时不显示横幅（避免无依据的误报）', () => {
     emitEvent('agent.info', {});
-    expect(document.getElementById('demo-banner').hidden).toBe(true);
+    expect(document.getElementById('state-banner').hidden).toBe(true);
     expect(document.getElementById('agent-mode').hidden).toBe(true);
+  });
+});
+
+/**
+ * 受限模式（P0-1）的用户面：工作区未被信任时**连 daemon 都不启动**。
+ *
+ * 这里锁的不是"有个横幅"，而是**安全默认值必须可自救**：
+ * 说清为什么 + 给出点哪里，且动作不能走错（点"信任此工作区"却打开设置面板就是死路）。
+ */
+describe('状态横幅：受限模式（工作区未被信任）', () => {
+  const trusted = { blocked: false, statusLabel: '', statusDetail: '', banner: null };
+  const restricted = {
+    blocked: true,
+    statusLabel: '受限模式',
+    statusDetail: '当前工作区未被信任（受限模式），Agent 未启动：它需要读写工作区文件、执行命令。',
+    banner: {
+      tag: '受限模式',
+      text: '当前工作区未被信任，Agent 未启动 —— 它需要读写工作区文件、执行命令。',
+      actionLabel: '信任此工作区',
+    },
+  };
+
+  it('init 快照带 trust：横幅显示受限模式与信任入口', () => {
+    emitRaw({
+      kind: 'init',
+      state: { sessionId: 'sess_trust', connected: false, history: [], trust: restricted },
+    });
+    expect(document.getElementById('state-banner').hidden).toBe(false);
+    expect(document.getElementById('state-banner-tag').textContent).toBe('受限模式');
+    expect(document.getElementById('state-banner-text').textContent).toContain('未启动');
+    expect(document.getElementById('btn-state-action').textContent).toBe('信任此工作区');
+  });
+
+  it('受限模式的按钮请求扩展走信任流程，而不是打开设置面板', () => {
+    const settingsWasHidden = document.getElementById('settings-panel').hidden;
+    const before = posted.filter((m) => m.kind === 'trust.manage').length;
+    document.getElementById('btn-state-action').click();
+    expect(posted.filter((m) => m.kind === 'trust.manage').length).toBe(before + 1);
+    expect(document.getElementById('settings-panel').hidden).toBe(settingsWasHidden);
+  });
+
+  it('受限模式优先于演示模式（daemon 没启动时谈"没配 Key"是误导）', () => {
+    emitEvent('agent.info', { agent: 'mock', agentReason: 'no-api-key', model: 'deepseek-chat' });
+    expect(document.getElementById('state-banner-tag').textContent).toBe('受限模式');
+    expect(document.getElementById('state-banner-text').textContent).not.toContain('未配置模型 Key');
+  });
+
+  it('用户信任后（trust.info）：受限横幅撤下，按真实情况交还给演示模式横幅', () => {
+    emitEvent('trust.info', trusted);
+    // 此刻 daemon 仍是 mock（未配 Key），于是演示模式横幅接着显示 —— 而不是整块消失
+    expect(document.getElementById('state-banner-tag').textContent).toBe('演示模式');
+    expect(document.getElementById('state-banner-text').textContent).toContain('未配置模型 Key');
+
+    // 真的没有"不好用"的理由时，整块收起（不留空白占位）
+    emitEvent('agent.info', { agent: 'real', model: 'deepseek-chat' });
+    expect(document.getElementById('state-banner').hidden).toBe(true);
+  });
+
+  it('受限期在状态行显示中文标签，而不是内部枚举', () => {
+    emitRaw({ kind: 'status', status: 'restricted', detail: '工作区未被信任（受限模式）' });
+    const status = document.getElementById('status');
+    expect(status.textContent).toContain('受限模式');
+    expect(status.textContent).not.toContain('restricted');
+    expect(status.title).toContain('受限模式');
   });
 });
 

@@ -199,6 +199,13 @@ vscode-dsh/
 
 ## 安全设计
 
+- **工作区信任门禁（P0-1）**：未受信任的工作区（受限模式）**不启动 daemon** —— 它会读写工作区文件、
+  执行命令、并在 `.dsh/` 下落盘会话记录。同时把会执行代码 / 触及网络 / 放开工具白名单的配置项
+  （`dsh.daemon.command`、`dsh.daemon.mode`、`dsh.daemon.port`、`dsh.daemon.token`、
+  `dsh.capabilities.allowedTools`、`dsh.model.baseURL`）声明为受限配置，并把其中会执行进程的钉成
+  **机器作用域**（工作区设置无法改写）—— 否则仓库里放一份 `.vscode/settings.json` 就能在用户点开面板时
+  执行任意进程。受限时面板横幅与状态栏会说明原因并提供「信任此工作区」入口（命令 `dsh: 信任此工作区`）；
+  信任后自动补齐启动，无需重启窗口。
 - **端口**：daemon 仅监听 `127.0.0.1` 随机端口；端口经 stdout/端口文件上报，不暴露公网。
 - **一次性 Token**：扩展生成 24 字节随机 token，经环境变量传给 daemon 子进程；WS 打开握手必须
   携带 `Authorization: Bearer <token>`；拒绝任何带浏览器 `Origin` 的连接（防跨站 WebSocket 劫持）。

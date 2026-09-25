@@ -14,7 +14,9 @@ import { DaemonManager, DaemonStatus } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
 import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
+import { openTrustManagement } from './trustCommands';
 import { WebviewPanelHost } from './webviewPanel';
+import { resolveTrustGate } from './workspaceTrust';
 
 const STATUS_ICONS: Record<DaemonStatus, string> = {
   connected: '$(circle-filled)',
@@ -23,6 +25,8 @@ const STATUS_ICONS: Record<DaemonStatus, string> = {
   stopped: '$(circle-outline)',
   error: '$(error)',
   disabled: '$(circle-outline)',
+  // 受限模式不是故障，而是"缺一个前置条件"：用锁形图标 + 警示色，并把点击动作指向信任入口
+  restricted: '$(lock)',
 };
 
 let activeDaemon: DaemonManager | undefined;
@@ -54,7 +58,14 @@ export function activate(context: vscode.ExtensionContext): DshApi {
     }
   );
 
-  const daemon = new DaemonManager({ extensionPath: context.extensionPath, configAccessor });
+  const daemon = new DaemonManager({
+    extensionPath: context.extensionPath,
+    configAccessor,
+    // P0-1（安全）：未受信任的工作区里**不拉起任何子进程**。
+    // 唯一的拉起入口是 DaemonManager.start()（restart 也走它），所以命令 / 状态栏 /
+    // 面板「重启 daemon」/ 断线重连都被同一道门覆盖，不存在绕行路径。
+    isTrusted: () => vscode.workspace.isTrusted,
+  });
   activeDaemon = daemon;
   const diff = new DshDiffManager(() => daemon.client);
   // P0-1：脏文档跟随——把编辑器里未保存的缓冲区内容同步给 daemon，
@@ -69,9 +80,28 @@ export function activate(context: vscode.ExtensionContext): DshApi {
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = 'dsh.openPanel';
   statusBar.text = '$(hubot) dsh: 启动中';
+
+  /**
+   * 受限模式在状态栏上的呈现：文案给**动作**（而不是把 `restricted` 这个内部枚举丢给用户），
+   * 颜色给警示，点击直接进信任流程。已信任时只回收颜色与命令，文本交给 onStatus 维护。
+   */
+  function applyTrustAppearance(): void {
+    const gate = resolveTrustGate(vscode.workspace.isTrusted);
+    if (!gate.blocked) {
+      statusBar.backgroundColor = undefined;
+      statusBar.command = 'dsh.openPanel';
+      return;
+    }
+    statusBar.text = '$(lock) dsh: 需要信任此工作区';
+    statusBar.tooltip = `dsh ${gate.statusLabel}\n${gate.statusDetail}`;
+    statusBar.command = 'dsh.trustWorkspace';
+    statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+  }
+
   daemon.onStatus((info) => {
     statusBar.text = `${STATUS_ICONS[info.status] ?? '$(circle-outline)'} dsh: ${info.status}`;
     statusBar.tooltip = `dsh daemon\n状态: ${info.status}\n详情: ${info.detail}`;
+    applyTrustAppearance();
     statusBar.show();
   });
 
@@ -125,6 +155,9 @@ export function activate(context: vscode.ExtensionContext): DshApi {
       const s = daemon.getStatus();
       void vscode.window.showInformationMessage(`dsh daemon: ${s.status}\n${s.detail}`);
     }),
+    // 受限模式的唯一出口：状态栏 / 面板横幅 / 命令面板三处都走它。
+    // package.json 里带 enablement: !isWorkspaceTrusted —— 已信任时不该出现在命令面板。
+    vscode.commands.registerCommand('dsh.trustWorkspace', () => openTrustManagement()),
     statusBar
   );
 
@@ -141,7 +174,19 @@ export function activate(context: vscode.ExtensionContext): DshApi {
   // ---- Diff 提供器
   diff.register(context);
 
-  // ---- 启动 daemon（探测 / 拉起 / 连接）
+  // ---- 工作区信任变化
+  // 受限模式是"未启动"而不是"启动失败"：用户点了信任之后没有任何东西会自动补上这一步，
+  // 所以必须显式接住 —— 否则信任完还得手动重启窗口，观感像"信任了也没用"。
+  context.subscriptions.push(
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      logger.info('工作区已被信任：撤下受限模式提示并启动 daemon');
+      panel.notifyTrustChange();
+      applyTrustAppearance();
+      void daemon.start();
+    })
+  );
+
+  // ---- 启动 daemon（探测 / 拉起 / 连接；未受信任时由 DaemonManager 拦为 restricted）
   void daemon.start();
 
   // 集成测试钩子：暴露运行时实例（经 vscode.extensions.getExtension(...).exports 读取）

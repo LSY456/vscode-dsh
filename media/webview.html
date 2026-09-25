@@ -61,11 +61,13 @@
     </div>
   </header>
 
-  <div id="demo-banner" class="demo-banner" role="alert" hidden>
-    <span class="demo-tag">演示模式</span>
-    <span id="demo-banner-text" class="demo-text"></span>
+  <!-- 状态横幅：一块 UI 承载两种"当前为什么不好用" —— 受限模式（工作区未被信任，daemon 未启动）
+       与演示模式（未配 Key）。谁更严重谁优先，判定与切换见 media/webview.js 的 renderStateBanner()。 -->
+  <div id="state-banner" class="state-banner" role="alert" hidden>
+    <span id="state-banner-tag" class="state-tag"></span>
+    <span id="state-banner-text" class="state-text"></span>
     <span class="grow"></span>
-    <button id="btn-demo-config" class="btn-sm" type="button">配置模型</button>
+    <button id="btn-state-action" class="btn-sm" type="button"></button>
   </div>
 
   <main id="main">
