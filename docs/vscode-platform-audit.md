@@ -10,7 +10,16 @@
 > P0-2 / P0-3 / P2-3 见 0.5.1。**未做**：验收里提到的集成测试 T6（Restricted Mode）——它需要再起一个
 > **不带** `--disable-workspace-trust` 的 Extension Host 进程（现有 `scripts/runIntegrationTests.js`
 > 固定传该参数以保证 T1~T5 的 `isTrusted === true`），本机无法验证，留待有 CI 环境时补。
-> Batch B / C 未动。
+>
+> **实施状态（2026-09-26）**：Batch B 的 1~4 项已落地（0.6.0）。
+> - P1-1 声明 `extensionKind: ["workspace"]`（README 说明已写）。
+>   **第 5 项「P4a 真实 Remote 实测」仍未做** —— 需要有 WSL / Dev Containers 环境，且属于人工清单。
+>   按本文档「不建议做的事」的口径：声明已下，但**不要**在没有真实 Remote 环境时继续猜着改路径逻辑。
+> - P1-2 采取的是「保留 `dsh.apiKey` + 加 `deprecationMessage`」：该 key 还要被一次性迁移读取，
+>   直接删属性会让旧配置的明文 Key 静默失效。**`dsh.daemon.token` 未改走 SecretStorage** —— 它目前
+>   没有写入入口（面板设置里没有该项），搬到密钥库反而会让 external 模式用户无法再配置，
+>   属于"先补设置入口再迁移"的连带改动，本轮有意不动。
+> - P1-3 落在 `src/statusLabel.ts`，P1-4 落在 `dsh.history.maxSessions`。Batch C 未动。
 
 ---
 

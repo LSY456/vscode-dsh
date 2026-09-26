@@ -20,6 +20,7 @@ import { ERROR_CODES, InitializeResult, METHODS, SessionResumeResult } from '../
 import { VSD_DSH_VERSION } from '../shared/version';
 import type { ConfigAccessor } from './configAccessor';
 import { logger } from './logger';
+import { DaemonState } from './statusLabel';
 import { DshClient } from './wsClient';
 import { resolveWorkspaceRoot } from './workspaceRoot';
 import { resolveTrustGate } from './workspaceTrust';
@@ -28,15 +29,11 @@ import { resolveTrustGate } from './workspaceTrust';
  * daemon 状态机。
  * `restricted` 是安全态而非故障：工作区未被信任时**连子进程都不拉起**，
  * 因为要执行的命令来自配置项（见 src/workspaceTrust.ts 的三层防护说明）。
+ *
+ * 取值与中文文案的唯一来源是 `src/statusLabel.ts`（那里刻意不 import vscode，
+ * 所以扩展侧与 webview 能共用一份，不会两处漂移）。
  */
-export type DaemonStatus =
-  | 'stopped'
-  | 'starting'
-  | 'connecting'
-  | 'connected'
-  | 'error'
-  | 'disabled'
-  | 'restricted';
+export type DaemonStatus = DaemonState;
 
 export interface StatusInfo {
   status: DaemonStatus;

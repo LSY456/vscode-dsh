@@ -14,6 +14,7 @@ import { DaemonManager, DaemonStatus } from './daemonManager';
 import { DshDiffManager } from './diffProvider';
 import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
+import { daemonStateLabel } from './statusLabel';
 import { openTrustManagement } from './trustCommands';
 import { WebviewPanelHost } from './webviewPanel';
 import { resolveTrustGate } from './workspaceTrust';
@@ -99,8 +100,10 @@ export function activate(context: vscode.ExtensionContext): DshApi {
   }
 
   daemon.onStatus((info) => {
-    statusBar.text = `${STATUS_ICONS[info.status] ?? '$(circle-outline)'} dsh: ${info.status}`;
-    statusBar.tooltip = `dsh daemon\n状态: ${info.status}\n详情: ${info.detail}`;
+    // 正文只给用户看得懂的文案（旧实现在界面上直接显示 `dsh: connected` 这类内部枚举）；
+    // 原始枚举留在 tooltip 里，排障时仍可看到
+    statusBar.text = `${STATUS_ICONS[info.status] ?? '$(circle-outline)'} dsh: ${daemonStateLabel(info.status)}`;
+    statusBar.tooltip = `dsh daemon\n状态: ${daemonStateLabel(info.status)}（${info.status}）\n详情: ${info.detail}`;
     applyTrustAppearance();
     statusBar.show();
   });
@@ -148,12 +151,12 @@ export function activate(context: vscode.ExtensionContext): DshApi {
       if (s.status === 'connected') {
         void vscode.window.showInformationMessage(`dsh daemon 已连接: ${s.detail}`);
       } else {
-        void vscode.window.showErrorMessage(`dsh daemon 状态: ${s.status} — ${s.detail}`);
+        void vscode.window.showErrorMessage(`dsh daemon ${daemonStateLabel(s.status)}: ${s.detail}`);
       }
     }),
     vscode.commands.registerCommand('dsh.daemon.status', () => {
       const s = daemon.getStatus();
-      void vscode.window.showInformationMessage(`dsh daemon: ${s.status}\n${s.detail}`);
+      void vscode.window.showInformationMessage(`dsh daemon: ${daemonStateLabel(s.status)}\n${s.detail}`);
     }),
     // 受限模式的唯一出口：状态栏 / 面板横幅 / 命令面板三处都走它。
     // package.json 里带 enablement: !isWorkspaceTrusted —— 已信任时不该出现在命令面板。

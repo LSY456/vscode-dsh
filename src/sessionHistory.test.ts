@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { FileMemento, MAX_SESSIONS, MementoLike, SessionHistoryStore } from './sessionHistory';
+import { DEFAULT_MAX_SESSIONS, FileMemento, MementoLike, SessionHistoryStore } from './sessionHistory';
 
 /** 内存假体：模拟 vscode.Memento（workspaceState）的同步读写语义。 */
 class FakeMemento implements MementoLike {
@@ -125,17 +125,80 @@ describe('SessionHistoryStore：存储上限与兜底', () => {
     expect(store.get('s1')!.messages[1].text).toBe('话没说完就结束了');
   });
 
-  it('超过 MAX_SESSIONS 裁剪最旧会话，最新会话保留', () => {
+  it('超过缺省上限裁剪最旧会话，最新会话保留', () => {
     const store = new SessionHistoryStore(new FakeMemento(), makeClock());
-    const total = MAX_SESSIONS + 5;
+    const total = DEFAULT_MAX_SESSIONS + 5;
     for (let i = 0; i < total; i++) {
       store.appendUser('s' + i, 'msg ' + i);
       store.persist();
     }
     const list = store.list();
-    expect(list.length).toBeLessThanOrEqual(MAX_SESSIONS);
+    expect(list.length).toBeLessThanOrEqual(DEFAULT_MAX_SESSIONS);
     expect(store.get('s0')).toBeUndefined(); // 最旧被裁剪
     expect(store.get('s' + (total - 1))).toBeDefined(); // 最新保留
+  });
+});
+
+describe('SessionHistoryStore：保留条数可配置（dsh.history.maxSessions）', () => {
+  /** 逐条写入 n 个会话（每次写入即触发一次裁剪） */
+  function fill(store: SessionHistoryStore, n: number): void {
+    for (let i = 0; i < n; i++) {
+      store.appendUser('s' + i, 'msg ' + i);
+      store.persist();
+    }
+  }
+
+  it('上限 10 + 写入 60 条 → 恰留最新 10 条（旧的全裁掉）', () => {
+    const store = new SessionHistoryStore(new FakeMemento(), makeClock(), { maxSessions: () => 10 });
+    fill(store, 60);
+
+    expect(store.list()).toHaveLength(10);
+    expect(store.get('s59')).toBeDefined(); // 最新保留
+    expect(store.get('s50')).toBeDefined(); // 恰好第 10 新
+    expect(store.get('s49')).toBeUndefined(); // 刚好被裁
+    expect(store.get('s0')).toBeUndefined();
+  });
+
+  it('0 = 不限制：写入 60 条一条不裁', () => {
+    const store = new SessionHistoryStore(new FakeMemento(), makeClock(), { maxSessions: () => 0 });
+    fill(store, 60);
+
+    expect(store.list()).toHaveLength(60);
+    expect(store.get('s0')).toBeDefined();
+  });
+
+  it('上限调小后立刻生效（getter 现读，无需重建实例）', () => {
+    let limit = 50;
+    const store = new SessionHistoryStore(new FakeMemento(), makeClock(), { maxSessions: () => limit });
+    fill(store, 50);
+    expect(store.list()).toHaveLength(50);
+
+    limit = 5; // 模拟用户在设置里改小
+    store.persist();
+    expect(store.list()).toHaveLength(5);
+    expect(store.get('s49')).toBeDefined();
+  });
+
+  it('非法值（NaN / 负数）回退到缺省，不会把历史清空', () => {
+    const nan = new SessionHistoryStore(new FakeMemento(), makeClock(), { maxSessions: () => NaN });
+    fill(nan, 5);
+    expect(nan.list()).toHaveLength(5); // 5 < 50，不应被裁
+
+    // 负数归一化为"不限"，同样不清空
+    const neg = new SessionHistoryStore(new FakeMemento(), makeClock(), { maxSessions: () => -3 });
+    fill(neg, 5);
+    expect(neg.list()).toHaveLength(5);
+  });
+
+  it('读取时也裁剪：文件里已有超限历史，构造后就应收缩', () => {
+    const memento = new FakeMemento();
+    // 先按"不限"写入 60 条，模拟旧版本留下的超大历史
+    fill(new SessionHistoryStore(memento, makeClock(), { maxSessions: () => 0 }), 60);
+
+    // 新实例按上限 10 读取 → 构造即裁剪（不必等到下一次写入）
+    const reopened = new SessionHistoryStore(memento, makeClock(), { maxSessions: () => 10 });
+    expect(reopened.list()).toHaveLength(10);
+    expect(reopened.get('s59')).toBeDefined();
   });
 });
 

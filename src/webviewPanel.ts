@@ -49,7 +49,7 @@ import { renderWebviewHtml } from './webviewHtml';
 import { DshDiffManager } from './diffProvider';
 import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
-import { FileMemento, SessionHistoryStore, SessionSummary } from './sessionHistory';
+import { DEFAULT_MAX_SESSIONS, FileMemento, SessionHistoryStore, SessionSummary } from './sessionHistory';
 import { openTrustManagement } from './trustCommands';
 import { resolveWorkspaceRoot } from './workspaceRoot';
 import { resolveTrustGate, TrustGate } from './workspaceTrust';
@@ -134,7 +134,11 @@ export class WebviewPanelHost {
     /** P0-1：发消息前冲刷脏文档快照，确保 daemon 看到的是此刻的缓冲区 */
     private readonly dirty?: DirtyTracker
   ) {
-    this.history = new SessionHistoryStore(new FileMemento(this.resolveHistoryFile()));
+    this.history = new SessionHistoryStore(new FileMemento(this.resolveHistoryFile()), Date.now, {
+      // 保留条数每次裁剪时现读配置：用户在设置里改动后立刻生效，无需重开面板
+      maxSessions: () =>
+        vscode.workspace.getConfiguration('dsh').get<number>('history.maxSessions', DEFAULT_MAX_SESSIONS),
+    });
 
     // 订阅 daemon 事件：补丁事件先交给 Diff 管理器，再登记挂起项、回写历史并广播给所有 surface
     this.daemon.client.onEvent((n) => {

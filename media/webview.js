@@ -11,6 +11,8 @@ import { renderMarkdown } from '../src/webview/render.js';
 import { createBatcher } from '../src/webview/streamBatcher.js';
 import { streamRenderIntervalMs } from '../src/webview/streamRenderPolicy.js';
 import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from '../src/webview/suggestions.js';
+// 状态文案与扩展侧共用同一份（src/statusLabel.ts 不 import vscode，故可被 webview 内联）
+import { daemonStateLabel } from '../src/statusLabel.ts';
 
 (function () {
   'use strict';
@@ -206,21 +208,11 @@ import { SUGGESTION_POOL, SUGGEST_ICONS, pickSuggestions, demoSuggestions } from
     }
   }
 
-  const STATUS_LABEL = {
-    connected: '已连接',
-    connecting: '连接中…',
-    starting: '启动中…',
-    stopped: '未启动',
-    disabled: '仅 UI 模式',
-    // 受限模式：工作区未被信任，daemon 刻意不启动（它不是故障，而是缺一个前置条件）
-    restricted: '受限模式',
-    error: '错误',
-  };
-
   function setStatus(status, detail) {
     statusEl.className = 'status ' + (status || '');
     connDot.className = 'dot ' + (status || '');
-    const label = STATUS_LABEL[status] || status || '未知';
+    // 文案走共享模块（src/statusLabel.ts）：状态栏与面板不会各写一份、也不会漂移
+    const label = daemonStateLabel(status);
     statusEl.textContent = detail ? label + ' — ' + detail : label;
     statusEl.title = detail || '';
   }

@@ -8,7 +8,8 @@
  *  - 依赖注入 MementoLike（只声明 get/update），生产用 FileMemento（文件后端，工作区
  *    .dsh/history.json，跨 daemon 重启/换机持久），测试用内存假体或临时文件做确定性验证，
  *    不依赖 vscode 运行时；
- *  - 每次追加即持久化（用户量级小、写频繁但代价可接受），并统一裁剪到最近 MAX_SESSIONS 个会话、
+ *  - 每次追加即持久化（用户量级小、写频繁但代价可接受），并统一裁剪到最近 N 个会话
+ *    （N 来自 `dsh.history.maxSessions`，缺省 50、0 = 不限）、
  *    单条消息截断到 MAX_MESSAGE_LEN，避免存储无限膨胀；
  *  - 流式回答以「内存暂挂 delta + finishAssistant 落盘」的方式累积，避免每个 token 都写存储；
  *    endSession 兜底调 finishAssistant，保证异常中断时最后一段回答也不丢。
@@ -99,7 +100,8 @@ export interface SessionSummary {
 }
 
 const STORAGE_KEY = 'dsh.sessionHistory.v1';
-export const MAX_SESSIONS = 50;
+/** 缺省保留条数；可经 `dsh.history.maxSessions` 覆盖（0 = 不限） */
+export const DEFAULT_MAX_SESSIONS = 50;
 const MAX_MESSAGE_LEN = 40_000;
 const TITLE_LEN = 40;
 
@@ -114,13 +116,30 @@ function truncate(text: string): string {
     : (text ?? '');
 }
 
+export interface SessionHistoryOptions {
+  /**
+   * 保留条数上限（`0` / 负数 = 不限；缺省 `DEFAULT_MAX_SESSIONS`）。
+   *
+   * 做成 **getter 而不是值**：配置随时可能被改，而 store 实例是随面板创建的，
+   * 把当时的配置固化下来会出现"改了设置要重开面板才生效"的错觉。
+   */
+  maxSessions?: () => number;
+}
+
 export class SessionHistoryStore {
   private readonly sessions = new Map<string, SessionRecord>();
   /** sessionId -> 该会话尚未落盘的流式回答累积文本 */
   private readonly pending = new Map<string, string>();
 
-  constructor(private readonly memento: MementoLike, private readonly now: () => number = Date.now) {
+  constructor(
+    private readonly memento: MementoLike,
+    private readonly now: () => number = Date.now,
+    private readonly opts: SessionHistoryOptions = {}
+  ) {
     this.load();
+    // 读取时就裁一次：文件可能来自旧版本（那时上限更长）或被手工改过，
+    // 不能等下一次写入才收缩。
+    this.prune();
   }
 
   private load(): void {
@@ -131,15 +150,38 @@ export class SessionHistoryStore {
     }
   }
 
-  /** 写回存储（并裁剪到最近 MAX_SESSIONS 个会话）。 */
-  persist(): void {
+  /** 解析上限：未配置用缺省；非法值回退缺省；`<= 0` 归一化为 0（不限）。 */
+  private resolveLimit(): number {
+    const raw = this.opts.maxSessions ? this.opts.maxSessions() : DEFAULT_MAX_SESSIONS;
+    if (!Number.isFinite(raw)) return DEFAULT_MAX_SESSIONS;
+    const n = Math.floor(raw);
+    return n > 0 ? n : 0;
+  }
+
+  /**
+   * 按 `createdAt` 裁掉最旧的会话，返回移除条数。
+   * 被裁会话的流式缓冲（pending）一并清掉，不留悬挂引用。
+   */
+  private prune(): number {
+    const limit = this.resolveLimit();
+    if (limit === 0) return 0;
     const sorted = [...this.sessions.values()].sort((a, b) => b.createdAt - a.createdAt);
-    if (sorted.length > MAX_SESSIONS) {
-      const keep = new Set(sorted.slice(0, MAX_SESSIONS).map((r) => r.sessionId));
-      for (const id of [...this.sessions.keys()]) {
-        if (!keep.has(id)) this.sessions.delete(id);
+    if (sorted.length <= limit) return 0;
+    const keep = new Set(sorted.slice(0, limit).map((r) => r.sessionId));
+    let removed = 0;
+    for (const id of [...this.sessions.keys()]) {
+      if (!keep.has(id)) {
+        this.sessions.delete(id);
+        this.pending.delete(id);
+        removed++;
       }
     }
+    return removed;
+  }
+
+  /** 写回存储（写之前先按上限裁剪）。 */
+  persist(): void {
+    this.prune();
     void this.memento.update(STORAGE_KEY, [...this.sessions.values()]);
   }
 

@@ -2,7 +2,7 @@
   "name": "vscode-dsh",
   "displayName": "dsh · DeepSeek Harness Agent for VSCode",
   "description": "VSCode 与 dsh Agent Daemon 的联动：上下文捕获、流式推理、工具审批与原生 Diff 审查。",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "publisher": "deepseek-ai",
   "license": "MIT",
   "repository": {
@@ -12,6 +12,9 @@
   "engines": {
     "vscode": "^1.85.0"
   },
+  "extensionKind": [
+    "workspace"
+  ],
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
@@ -22,7 +25,8 @@
         "dsh.daemon.port",
         "dsh.daemon.token",
         "dsh.capabilities.allowedTools",
-        "dsh.model.baseURL"
+        "dsh.model.baseURL",
+        "dsh.apiKey"
       ]
     },
     "virtualWorkspaces": {
@@ -195,7 +199,8 @@
         "dsh.apiKey": {
           "type": "string",
           "default": "",
-          "description": "传给 daemon 的模型 API Key（daemon 端可忽略）。"
+          "description": "【已弃用】模型 API Key 的旧明文存放位置。",
+          "deprecationMessage": "请勿在此填写：模型 Key 现存放于系统密钥库（SecretStorage），通过面板「设置」写入。保留此项仅用于首次启动时把旧明文自动迁移一次（迁移后会被清除）；机器作用域之外的工作区设置一律不被接受。"
         },
         "dsh.preset": {
           "type": "string",
@@ -273,6 +278,13 @@
           "minimum": 10,
           "maximum": 3600,
           "description": "工具审批 / 文件补丁挂起的超时秒数：超过该时间未响应按拒绝处理。修改后需重启 daemon 生效。"
+        },
+        "dsh.history.maxSessions": {
+          "type": "number",
+          "default": 50,
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "会话历史保留条数（面板「历史」列表与 .dsh/history.json）：超出后按创建时间裁剪最旧的；0 = 不限制。历史含对话全文，长期使用会持续增长，故设缺省上限。"
         }
       }
     }

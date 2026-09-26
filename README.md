@@ -74,6 +74,9 @@
 - **双向事件流**：daemon 侧 `reasoning.delta / message.delta / tool.* / approval.request /
   file.patch.pending / trajectory.record` 增量下发；扩展侧 `approval.respond / file.patch.respond /
   session.cancel` 回传决策。协议契约见 [PROTOCOL.md](PROTOCOL.md)。
+- **扩展运行在工作区侧（`extensionKind: ["workspace"]`）**：daemon 由扩展宿主 `spawn`、工作区根取自
+  `workspaceFolders`，所以 Remote-SSH / WSL / Dev Containers 场景下扩展必须加载在**远端工作区侧**
+  才能拿到真实路径与进程环境（否则会在 UI 侧启动一个进程、拿着远端不存在的本地路径干活）。
 - **原生 Diff 审查**：补丁不直接落盘，先以虚拟文档（scheme `dsh-patch`）打开 `vscode.diff`
   并排视图，用户确认后才回传 `file.patch.respond(accept)` 由 daemon 写盘。
 
@@ -142,6 +145,7 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
 | `dsh.context.maxFileBytes` | `200000` | 附件内联内容阈值；超出改为 `contentOmitted` 按需 `file.read` |
 | `dsh.diff.autoOpen` | `true` | 补丁到达时自动打开 Diff 视图 |
+| `dsh.history.maxSessions` | `50` | 会话历史保留条数（0–10000，0 = 不限）；超出按创建时间裁剪最旧的 |
 | `dsh.capabilities.allowedTools` | `[]` | 工具白名单（空 = 全部允许），如 `["bash_execute"]` |
 | `dsh.capabilities.maxConcurrency` | `0` | daemon 全局并发会话上限（0 = 不限） |
 | `dsh.approval.ttlSeconds` | `60` | 审批 / 补丁挂起的超时秒数（10–3600，到点按拒绝处理；改后重启 daemon 生效） |
@@ -200,9 +204,9 @@ vscode-dsh/
 ## 安全设计
 
 - **工作区信任门禁（P0-1）**：未受信任的工作区（受限模式）**不启动 daemon** —— 它会读写工作区文件、
-  执行命令、并在 `.dsh/` 下落盘会话记录。同时把会执行代码 / 触及网络 / 放开工具白名单的配置项
-  （`dsh.daemon.command`、`dsh.daemon.mode`、`dsh.daemon.port`、`dsh.daemon.token`、
-  `dsh.capabilities.allowedTools`、`dsh.model.baseURL`）声明为受限配置，并把其中会执行进程的钉成
+  执行命令、并在 `.dsh/` 下落盘会话记录。同时把会执行代码 / 触及网络 / 放开工具白名单 / 携带凭据的
+  配置项（`dsh.daemon.command`、`dsh.daemon.mode`、`dsh.daemon.port`、`dsh.daemon.token`、
+  `dsh.capabilities.allowedTools`、`dsh.model.baseURL`、`dsh.apiKey`）声明为受限配置，并把其中会执行进程的钉成
   **机器作用域**（工作区设置无法改写）—— 否则仓库里放一份 `.vscode/settings.json` 就能在用户点开面板时
   执行任意进程。受限时面板横幅与状态栏会说明原因并提供「信任此工作区」入口（命令 `dsh: 信任此工作区`）；
   信任后自动补齐启动，无需重启窗口。
@@ -229,7 +233,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，416 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，429 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
   Webview Markdown 渲染与净化（XSS 安全）、以及面板 DOM 契约（jsdom 载入真实 `media/webview.html`）。
@@ -248,7 +252,7 @@ vscode-dsh/
   typecheck → build → unit → smoke → 协议第二实现（win/ubuntu，显式 setup-python）、
   integration（vscode extension host，ubuntu）；main 分支额外产出 VSIX 构件。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
-- **打包**：`npm run package` 产出约 243KB 的 VSIX（`dist/`，38 文件）。
+- **打包**：`npm run package` 产出约 248KB 的 VSIX（`dist/`，38 文件）。
 
 ## 迹线（Trajectory）数据映射
 
