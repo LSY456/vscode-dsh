@@ -57,7 +57,7 @@ describe('OpenAICompatibleModel', () => {
     const model = new OpenAICompatibleModel({ apiKey: 'k' });
     await model.chat([{ role: 'user', content: 'x' }]);
     expect(calls[0].url).toBe('https://api.deepseek.com/v1/chat/completions');
-    expect(calls[0].body.model).toBe('deepseek-chat');
+    expect(calls[0].body.model).toBe('deepseek-flash');
   });
 
   it('非 2xx 抛错并携带状态码', async () => {

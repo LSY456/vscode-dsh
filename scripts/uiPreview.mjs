@@ -158,7 +158,7 @@ const conversationDom = await renderScenario(({ emit, emitRaw }) => {
       sessionId: 'sess_preview_9f3a1c7e',
       connected: true,
       agent: 'real',
-      model: 'deepseek-chat',
+      model: 'deepseek-flash',
       history: [],
     },
   });
@@ -225,7 +225,7 @@ const emptyDom = await renderScenario(({ emitRaw }) => {
       connected: true,
       agent: 'mock',
       agentReason: 'no-api-key',
-      model: 'deepseek-chat',
+      model: 'deepseek-flash',
       history: [],
     },
   });
@@ -241,7 +241,7 @@ const decidedDom = await renderScenario(({ emit, emitRaw }) => {
       sessionId: 'sess_preview_decided',
       connected: true,
       agent: 'real',
-      model: 'deepseek-chat',
+      model: 'deepseek-flash',
       history: [],
     },
   });
@@ -292,7 +292,7 @@ const newSessionDom = await renderScenario(({ emit, emitRaw }) => {
       sessionId: 'sess_preview_before',
       connected: true,
       agent: 'real',
-      model: 'deepseek-chat',
+      model: 'deepseek-flash',
       history: [],
     },
   });
@@ -332,6 +332,43 @@ const restrictedDom = await renderScenario(({ emitRaw }) => {
     kind: 'status',
     status: 'restricted',
     detail: '当前工作区未被信任（受限模式），Agent 未启动：它需要读写工作区文件、执行命令。',
+  });
+});
+
+// ---- 场景七：模型设置（模型名走下拉，并说清列表从哪来）----
+// 模型名是"外部事实"：手写容易错，官方改名用户也不会知道（`deepseek-chat` 已于
+// 2026/07/24 弃用）。所以模型名只提供下拉选择；列表来源与失败原因由扩展算好后
+// 经 modelsHint 下发（面板打开时先用缓存/内置快照渲染，在线列表随后以
+// settings.models 事件补上）。这里画的是"在线列表已回来"的最终态。
+const settingsDom = await renderScenario(({ emitRaw }) => {
+  emitRaw({
+    kind: 'init',
+    state: {
+      sessionId: 'sess_preview_settings',
+      connected: true,
+      agent: 'real',
+      model: 'deepseek-flash',
+      history: [],
+    },
+  });
+  globalThis.document.getElementById('btn-settings').click();
+  emitRaw({
+    kind: 'event',
+    method: 'settings.loaded',
+    params: {
+      config: {
+        baseURL: 'https://api.deepseek.com/v1',
+        model: 'deepseek-flash',
+        preset: 'default',
+        provider: 'auto',
+      },
+      hasApiKey: true,
+      models: [
+        { id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' },
+        { id: 'deepseek-v4-pro', label: 'deepseek-v4-pro（强推理）', source: 'live' },
+      ],
+      modelsHint: '已从 api.deepseek.com 在线更新模型列表（2 个可选）',
+    },
   });
 });
 
@@ -396,6 +433,10 @@ const preview = `<!DOCTYPE html>
       <figcaption>⑥ 侧边栏 340px · 受限模式：工作区未被信任，daemon 未启动（浅色主题）</figcaption>
       <div class="frame narrow"><iframe id="f-narrow-restricted"></iframe></div>
     </figure>
+    <figure>
+      <figcaption>⑦ 侧边栏 340px · 模型设置：模型名下拉 + 列表来源说明（浅色主题）</figcaption>
+      <div class="frame narrow"><iframe id="f-narrow-settings"></iframe></div>
+    </figure>
   </div>
 
 <script type="text/plain" id="panel-css">${esc(PANEL_CSS)}</script>
@@ -406,6 +447,7 @@ const preview = `<!DOCTYPE html>
 <script type="text/plain" id="dom-decided">${esc(decidedDom)}</script>
 <script type="text/plain" id="dom-newsession">${esc(newSessionDom)}</script>
 <script type="text/plain" id="dom-restricted">${esc(restrictedDom)}</script>
+<script type="text/plain" id="dom-settings">${esc(settingsDom)}</script>
 <script>
   const txt = (id) => document.getElementById(id).textContent;
   const panelCss = txt('panel-css');
@@ -418,12 +460,14 @@ const preview = `<!DOCTYPE html>
   const decided = txt('dom-decided');
   const newsession = txt('dom-newsession');
   const restricted = txt('dom-restricted');
+  const settings = txt('dom-settings');
   document.getElementById('f-narrow-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-wide-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-narrow-dark').srcdoc = build(empty, 'theme-dark');
   document.getElementById('f-narrow-decided').srcdoc = build(decided, 'theme-light');
   document.getElementById('f-narrow-newsession').srcdoc = build(newsession, 'theme-light');
   document.getElementById('f-narrow-restricted').srcdoc = build(restricted, 'theme-light');
+  document.getElementById('f-narrow-settings').srcdoc = build(settings, 'theme-light');
 </script>
 </body>
 </html>

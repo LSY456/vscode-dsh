@@ -102,12 +102,13 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test                    # 单元测试（vitest，429 用例）
+npm test                    # 单元测试（vitest，466 用例）
 npm run smoke               # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemon 跑通同一份协议
                             #（缺 Python 3 时优雅跳过；`npm run smoke:protocol -- --require` 则判失败）
 
-# 4. 配置真实模型（可选）：打开面板 → 设置，填写 API Key（SecretStorage 安全存储）与模型名；
+# 4. 配置真实模型（可选）：打开面板 → 设置，只需填 API Key（SecretStorage 安全存储）；
+#    模型名从下拉里选（列表自动跟随 DeepSeek 官方更新，无需手写）；
 #    或直接配置 dsh.model.model / dsh.model.baseURL（旧 dsh.apiKey 明文配置会自动回迁到
 #    SecretStorage 并清除，不再落盘 settings.json）
 
@@ -140,7 +141,7 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.apiKey`（已弃用） | `""` | 旧版明文 API Key；首次读取自动回迁到 SecretStorage 并清除，推荐改用「面板 → 设置」 |
 | `dsh.preset` | `default` | 握手时传给 daemon 的 Agent 预设 |
 | `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
-| `dsh.model.model` | `deepseek-chat` | 模型名（如 `deepseek-chat` / `deepseek-reasoner`） |
+| `dsh.model.model` | `deepseek-flash` | 模型名。建议在侧边栏「模型设置」里从下拉选择（列表自动跟随 DeepSeek 官方更新） |
 | `dsh.model.idleTimeoutSeconds` | `60` | 模型请求空闲超时秒数（0–1800，0 = 关闭）；距上一个流式增量超时即中断，防会话永久挂起 |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
 | `dsh.context.maxFileBytes` | `200000` | 附件内联内容阈值；超出改为 `contentOmitted` 按需 `file.read` |
@@ -233,7 +234,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，429 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，466 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
   Webview Markdown 渲染与净化（XSS 安全）、以及面板 DOM 契约（jsdom 载入真实 `media/webview.html`）。
@@ -293,7 +294,7 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
 - [x] **P0 一致性加固**：脏文档一致性（未保存缓冲区优先读取 + 补丁改走编辑器，避免覆盖用户编辑）、
       补丁乐观并发校验（防静默覆盖并发修改）、取消可中断在途模型请求 + 模型请求空闲超时、
       能力/运行时配置与脏文档覆盖层下沉到**连接**作用域（多窗口复用 daemon 互不污染）
-- [x] **P0 工程质量**：vitest 单元测试（429 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **P0 工程质量**：vitest 单元测试（466 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
 - [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳

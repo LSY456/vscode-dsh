@@ -79,7 +79,7 @@ function resolveTargets() {
       provider: 'openai',
       apiKey: process.env.DSH_OPENAI_API_KEY,
       baseURL: process.env.DSH_OPENAI_BASE_URL || 'https://api.deepseek.com/v1',
-      model: process.env.DSH_OPENAI_MODEL || 'deepseek-chat',
+      model: process.env.DSH_OPENAI_MODEL || 'deepseek-flash',
     });
   }
   if (process.env.DSH_ANTHROPIC_API_KEY) {

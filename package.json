@@ -2,7 +2,7 @@
   "name": "vscode-dsh",
   "displayName": "dsh · DeepSeek Harness Agent for VSCode",
   "description": "VSCode 与 dsh Agent Daemon 的联动：上下文捕获、流式推理、工具审批与原生 Diff 审查。",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "deepseek-ai",
   "license": "MIT",
   "repository": {
@@ -214,8 +214,8 @@
         },
         "dsh.model.model": {
           "type": "string",
-          "default": "deepseek-chat",
-          "description": "模型名（如 deepseek-chat / deepseek-reasoner）。"
+          "default": "deepseek-flash",
+          "description": "模型名。推荐在侧边栏「模型设置」里从下拉选择（列表会自动跟随 DeepSeek 官方更新）；手写请注意旧名 deepseek-chat / deepseek-reasoner 已于 2026/07/24 弃用。"
         },
         "dsh.model.provider": {
           "type": "string",

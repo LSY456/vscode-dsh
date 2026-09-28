@@ -99,7 +99,7 @@ export const EVENTS = {
 export interface ModelConfig {
   /** API 端点 base，如 https://api.deepseek.com/v1 */
   baseURL?: string;
-  /** 模型名，如 deepseek-chat */
+  /** 模型名，如 deepseek-flash */
   model?: string;
   /** 模型 API Key（优先于 InitializeParams.apiKey） */
   apiKey?: string;

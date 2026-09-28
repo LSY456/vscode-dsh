@@ -49,6 +49,22 @@ import { renderWebviewHtml } from './webviewHtml';
 import { DshDiffManager } from './diffProvider';
 import { DirtyTracker } from './dirtyTracker';
 import { logger } from './logger';
+import {
+  type ModelCatalogCache,
+  type ModelCatalogMeta,
+  type ModelFetchFailure,
+  type ModelOption,
+  MODEL_CATALOG_TTL_MS,
+  buildModelCatalog,
+  endpointHostOf,
+  isModelCatalogCacheFresh,
+  isOfficialDeepSeekEndpoint,
+  modelEndpointCandidates,
+  normalizeModelBaseUrl,
+  shouldAttemptModelFetch,
+  describeFetchFailure,
+} from './modelCatalog';
+import { fetchModelIds } from './modelCatalogFetch';
 import { DEFAULT_MAX_SESSIONS, FileMemento, SessionHistoryStore, SessionSummary } from './sessionHistory';
 import { openTrustManagement } from './trustCommands';
 import { resolveWorkspaceRoot } from './workspaceRoot';
@@ -125,6 +141,10 @@ export class WebviewPanelHost {
   private readonly pendingPatches = new Map<string, PendingPatch>();
   /** 正在重放的会话（断线重连 / 切换会话）：重放事件不回写历史，避免重复落库 */
   private replayingSessionId = '';
+  /** 模型目录缓存（在线模型列表）：内存 + globalState 双写，避免每次打开设置面板都打网络 */
+  private catalogCache: ModelCatalogCache | undefined;
+  /** 进行中的目录刷新：多个 surface 同时打开设置时只打一次网络 */
+  private catalogRefresh: Promise<void> | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -230,6 +250,155 @@ export class WebviewPanelHost {
     const ws = resolveWorkspaceRoot(vscode.workspace.workspaceFolders);
     if (ws.ok) return path.join(ws.root, '.dsh', 'history.json');
     return path.join(this.context.globalStorageUri.fsPath, 'history.json');
+  }
+
+  // -------------------------------------------------------------------------
+  // 模型目录（模型设置面板「模型名」下拉的数据源）
+  // -------------------------------------------------------------------------
+
+  /** globalState 里的缓存 key。放全局而非工作区：模型列表属于**端点**，不随工作区变。 */
+  private static readonly CATALOG_STATE_KEY = 'dsh.modelCatalog';
+
+  /**
+   * 读缓存：首次从 globalState 载入，之后走内存。
+   * 不额外设"已载入"标志位 —— globalState.get 是同步内存查表，面板打开频率下无成本。
+   */
+  private getCatalogCache(): ModelCatalogCache | undefined {
+    if (this.catalogCache === undefined) {
+      const raw = this.context.globalState.get<ModelCatalogCache>(WebviewPanelHost.CATALOG_STATE_KEY);
+      if (raw && typeof raw === 'object' && Array.isArray(raw.models)) this.catalogCache = raw;
+    }
+    return this.catalogCache;
+  }
+
+  private async writeCatalogCache(cache: ModelCatalogCache): Promise<void> {
+    this.catalogCache = cache;
+    try {
+      await this.context.globalState.update(WebviewPanelHost.CATALOG_STATE_KEY, cache);
+    } catch (err) {
+      // 写不进缓存不是故障：只是下次打开设置面板会再拉一次网络
+      logger.warn(`模型目录缓存写入失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async clearCatalogCache(): Promise<void> {
+    this.catalogCache = undefined;
+    try {
+      await this.context.globalState.update(WebviewPanelHost.CATALOG_STATE_KEY, undefined);
+    } catch (err) {
+      logger.warn(`模型目录缓存清理失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 组装给面板的载荷（列表一律经 buildModelCatalog，保证"当前配置项永远在列表里"）。
+   * 「列表从哪来」只经 modelsHint 这一条通道告诉用户 —— 不另发一个机器可读的字段，
+   * 免得两处来源说明各自表述、日后对不上。
+   */
+  private buildCatalogPayload(
+    currentModel: string,
+    live: string[] | undefined,
+    meta: ModelCatalogMeta
+  ): { models: ModelOption[]; modelsHint: string } {
+    const { models, hint } = buildModelCatalog({ current: currentModel, live, meta });
+    return { models, modelsHint: hint };
+  }
+
+  /**
+   * 面板打开时**立即**返回的目录：有新鲜缓存就用缓存里的在线列表，否则用内置快照。
+   * 之所以不等网络：设置面板要秒开，在线列表随后由 settings.models 事件补上。
+   */
+  private modelCatalogPayload(
+    currentModel: string,
+    baseURL: string,
+    hasApiKey: boolean
+  ): { models: ModelOption[]; modelsHint: string } {
+    const endpoints = modelEndpointCandidates(baseURL);
+    const cache = this.getCatalogCache();
+    const fresh = isModelCatalogCacheFresh(cache, baseURL, Date.now());
+    const canFetch = shouldAttemptModelFetch({ hasApiKey, officialBase: isOfficialDeepSeekEndpoint(baseURL) });
+    return this.buildCatalogPayload(currentModel, fresh ? cache?.models : undefined, {
+      source: fresh ? 'cache' : 'builtin',
+      endpointHost: endpointHostOf(endpoints[0]),
+      fetchedAt: cache?.fetchedAt,
+      hasApiKey,
+      // 还没发请求，就已经能说清"为什么拿不到在线列表"
+      failure: !fresh && !canFetch ? 'no-key' : undefined,
+    });
+  }
+
+  /**
+   * 后台刷新在线模型列表。TTL 内命中缓存直接跳过；
+   * 结果（成功或失败原因）都经 settings.models 推给已打开的面板。
+   */
+  private refreshModelCatalog(
+    config: { baseURL: string; model: string },
+    hasApiKey: boolean
+  ): Promise<void> {
+    // 多个 surface 同时打开设置时只打一次网络
+    if (this.catalogRefresh) return this.catalogRefresh;
+
+    const baseURL = normalizeModelBaseUrl(config.baseURL);
+    if (isModelCatalogCacheFresh(this.getCatalogCache(), baseURL, Date.now())) return Promise.resolve();
+
+    const endpointHost = endpointHostOf(modelEndpointCandidates(baseURL)[0]);
+    if (!shouldAttemptModelFetch({ hasApiKey, officialBase: isOfficialDeepSeekEndpoint(baseURL) })) {
+      // 没配 Key + 官方端点：/models 必然 401，不发。把原因直接说给用户听。
+      this.pushCatalog(config.model, undefined, {
+        source: 'builtin',
+        endpointHost,
+        hasApiKey,
+        failure: 'no-key',
+      });
+      return Promise.resolve();
+    }
+
+    this.catalogRefresh = this.runCatalogRefresh(config.model, baseURL, endpointHost).finally(() => {
+      this.catalogRefresh = undefined;
+    });
+    return this.catalogRefresh;
+  }
+
+  /** 真正发请求的那一段：成功写缓存；失败只记日志 + 把具体原因推给面板（下次打开会重试）。 */
+  private async runCatalogRefresh(currentModel: string, baseURL: string, endpointHost: string): Promise<void> {
+    const candidates = modelEndpointCandidates(baseURL);
+    const apiKey = await this.configAccessor.getApiKey().catch(() => '');
+    const result = await fetchModelIds({ candidates, apiKey });
+    const host = endpointHostOf(result.endpoint ?? candidates[0]);
+
+    if (result.ok) {
+      const fetchedAt = Date.now();
+      await this.writeCatalogCache({ baseURL, fetchedAt, models: result.ids, endpoint: result.endpoint });
+      this.pushCatalog(currentModel, result.ids, {
+        source: 'live',
+        endpointHost: host,
+        fetchedAt,
+        hasApiKey: !!apiKey,
+      });
+      logger.info(`在线模型列表已更新：${result.ids.length} 个（${host}）`);
+      return;
+    }
+
+    const failure: ModelFetchFailure = result.failure ?? 'network';
+    logger.info(
+      `在线模型列表获取失败：${describeFetchFailure(failure, result.detail)}（端点 ${host || endpointHost}）`
+    );
+    this.pushCatalog(currentModel, undefined, {
+      source: 'builtin',
+      endpointHost: host || endpointHost,
+      hasApiKey: !!apiKey,
+      failure,
+      failureDetail: result.detail,
+    });
+  }
+
+  /** 推送出口：只换下拉选项与来源说明，不动用户此刻的选择（保留逻辑在 webview 侧）。 */
+  private pushCatalog(currentModel: string, live: string[] | undefined, meta: ModelCatalogMeta): void {
+    this.post({
+      kind: 'event',
+      method: 'settings.models',
+      params: this.buildCatalogPayload(currentModel, live, meta),
+    });
   }
 
   /** 打开/聚焦侧边栏视图（常驻入口）；已开编辑器面板则优先聚焦面板。 */
@@ -439,13 +608,27 @@ export class WebviewPanelHost {
       case 'settings.get': {
         const config = this.configAccessor.getPanelConfig();
         const hasApiKey = await this.configAccessor.hasApiKey();
-        this.post({ kind: 'event', method: 'settings.loaded', params: { config, hasApiKey } });
+        this.post({
+          kind: 'event',
+          method: 'settings.loaded',
+          params: { config, hasApiKey, ...this.modelCatalogPayload(config.model, config.baseURL, hasApiKey) },
+        });
+        // 在线列表在后台刷新（面板先渲染，拿到新列表再推 settings.models）：
+        // 用户打开设置面板，不该为了一个下拉等一次网络往返。
+        void this.refreshModelCatalog(config, hasApiKey);
         return;
       }
       case 'settings.apply': {
         const s = msg.settings ?? {};
         if (s.apiKey !== undefined) await this.configAccessor.setApiKey(s.apiKey);
         await this.configAccessor.applyPanelConfig(s);
+        // 端点或 Key 变了 → 缓存的列表不再代表当前端点。清掉并立刻重拉，
+        // 让还开着面板的用户当场看到"新 Key 能用、这个端点有哪些模型"。
+        if (s.baseURL !== undefined || s.apiKey) {
+          await this.clearCatalogCache();
+          const next = this.configAccessor.getPanelConfig();
+          void this.refreshModelCatalog(next, await this.configAccessor.hasApiKey());
+        }
         this.post({ kind: 'event', method: 'settings.applied', params: { restartNeeded: true } });
         return;
       }

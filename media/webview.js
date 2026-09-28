@@ -47,6 +47,7 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   const settingsForm = $('settings-form');
   const inpApiKey = $('inp-apikey');
   const inpModel = $('inp-model');
+  const modelHintEl = $('model-catalog-hint');
   const inpBaseURL = $('inp-baseurl');
   const inpProvider = $('inp-provider');
   const inpPreset = $('inp-preset');
@@ -1282,10 +1283,48 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     trajectoryBox.hidden = true;
   }
 
+  /**
+   * 模型下拉：选项由扩展给出（唯一数据源，来源可能是在线列表 / 内置快照 / 当前配置项），
+   * 这里只负责渲染，不猜模型名。
+   *
+   * 两条必须守住的行为：
+   *  ① 打开面板时传 `selected`（= 当前配置值）；异步刷新推来的列表不带 `selected`
+   *     → 保留用户此刻的选择，后台刷新不会把用户刚点的选项弹回上一个；
+   *  ② 列表为空时**什么都不做** —— 宁可留着旧列表，也不要把字段清空（空值提交会改坏配置）。
+   */
+  function applyModelOptions(params) {
+    const models = (params && params.models) || [];
+    const prev = inpModel.value;
+    const ids = [];
+    // 先构建到游离 fragment 里，**最后**才提交到 DOM：
+    // 空列表那条提前返回必须发生在"清空现有选项"之前，否则失败一次就变成空下拉。
+    const frag = document.createDocumentFragment();
+    for (const m of models) {
+      const id = m && typeof m.id === 'string' ? m.id : '';
+      if (!id || ids.indexOf(id) >= 0) continue; // 去重 + 挡脏数据
+      ids.push(id);
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = (m && m.label) || id;
+      frag.appendChild(opt);
+    }
+    if (ids.length === 0) return;
+    inpModel.textContent = '';
+    inpModel.appendChild(frag);
+    const want = (params && params.selected) || prev;
+    inpModel.value = ids.indexOf(want) >= 0 ? want : ids[0];
+    modelHintEl.textContent = (params && params.modelsHint) || '';
+  }
+
   function fillSettings(params) {
     const cfg = (params && params.config) || {};
     inpApiKey.placeholder = params && params.hasApiKey ? '已设置（留空不修改）' : '未设置';
-    inpModel.value = cfg.model || '';
+    // 顺序要紧：先建 option 再设值 —— <select> 的 value 只在对应 option 存在时才生效
+    applyModelOptions({
+      models: params && params.models,
+      modelsHint: params && params.modelsHint,
+      selected: cfg.model,
+    });
     inpBaseURL.value = cfg.baseURL || '';
     inpProvider.value = cfg.provider || 'auto';
     inpPreset.value = cfg.preset || '';
@@ -1386,6 +1425,10 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
         break;
       case 'settings.loaded':
         fillSettings(params);
+        break;
+      case 'settings.models':
+        // 后台刷新回来的在线模型列表：只换选项，不动用户此刻的选择（见 applyModelOptions）
+        applyModelOptions(params);
         break;
       case 'settings.applied':
         settingsMsg.textContent = '已保存，重启 daemon 后生效。';
@@ -1499,12 +1542,13 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     const baseURL = inpBaseURL.value.trim();
     const provider = inpProvider.value.trim() || 'auto';
     const preset = inpPreset.value.trim();
-    // apiKey 留空表示不修改（不上报空串，避免误删已存凭据）
+    // apiKey 留空表示不修改（不上报空串，避免误删已存凭据）；
+    // 模型名同理：下拉还没填充/异常为空时，宁可什么都不提交，也不要把已配好的模型名清空。
     vscode.postMessage({
       kind: 'settings.apply',
       settings: {
         ...(apiKey ? { apiKey } : {}),
-        model,
+        ...(model ? { model } : {}),
         baseURL,
         provider,
         preset,

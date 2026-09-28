@@ -159,7 +159,9 @@ export interface AnthropicModelOptions {
 }
 
 const DEFAULT_BASE_URL = 'https://api.deepseek.com/v1';
-const DEFAULT_MODEL = 'deepseek-chat';
+// 2026/07/24 起 `deepseek-chat` / `deepseek-reasoner` 已弃用（用旧名会直接报错），
+// 缺省名改为官方现行的 `deepseek-flash`（DeepSeek-V4.1-Flash）。
+const DEFAULT_MODEL = 'deepseek-flash';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 const DEFAULT_ANTHROPIC_MODEL = 'claude-3-5-sonnet-latest';
 

@@ -796,3 +796,130 @@ describe('面板：会话结束原因必须说人话', () => {
     expect(lastSystem()).toContain('weird_reason');
   });
 });
+
+describe('模型设置：模型名是下拉，不是自由输入', () => {
+  const modelSelect = () => document.getElementById('inp-model');
+  const optionValues = (sel) => [...sel.querySelectorAll('option')].map((o) => o.value);
+  const hintText = () => document.getElementById('model-catalog-hint').textContent;
+
+  /** 打开设置面板并投递一次 settings.loaded（面板的真实入口：点按钮 → 扩展回 settings.loaded） */
+  const loadSettings = (params) => {
+    document.getElementById('btn-settings').click();
+    emitEvent('settings.loaded', params);
+  };
+
+  const baseConfig = (model) => ({
+    config: { model, baseURL: 'https://api.deepseek.com/v1', provider: 'auto', preset: 'default' },
+    hasApiKey: true,
+  });
+
+  it('模型名渲染成 <select>，选项与选中值都来自扩展下发的列表', () => {
+    loadSettings({
+      ...baseConfig('deepseek-v4-pro'),
+      models: [
+        { id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' },
+        { id: 'deepseek-v4-pro', label: 'deepseek-v4-pro（强推理）', source: 'live' },
+      ],
+      modelsHint: '已从 api.deepseek.com 在线更新模型列表（2 个可选）',
+    });
+
+    const sel = modelSelect();
+    // 契约：这里必须是下拉 —— 手写模型名正是本需求要消灭的出错来源
+    expect(sel.tagName).toBe('SELECT');
+    expect(optionValues(sel)).toEqual(['deepseek-flash', 'deepseek-v4-pro']);
+    expect(sel.value).toBe('deepseek-v4-pro');
+    expect(hintText()).toContain('在线更新');
+  });
+
+  it('扩展把「当前配置」也下发成选项时，下拉选中它而不是列表第一项', () => {
+    // 模型名不在已知列表里（例如老配置里的 deepseek-chat）时，由**扩展**把它作为
+    // 「当前配置」项追加进 models（见 src/modelCatalog.ts 的 buildModelCatalog）。
+    // 这里验证 webview 会真的选中它，而不是默认跳到列表第一项。
+    loadSettings({
+      ...baseConfig('deepseek-chat'),
+      models: [
+        { id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'builtin' },
+        { id: 'deepseek-chat', label: 'deepseek-chat（当前配置，不在已知列表中）', source: 'current' },
+      ],
+      modelsHint: '内置快照（2026-09-28）；已保留当前配置的 deepseek-chat',
+    });
+
+    const sel = modelSelect();
+    expect(optionValues(sel)).toEqual(['deepseek-flash', 'deepseek-chat']);
+    expect(sel.value).toBe('deepseek-chat');
+    expect(hintText()).toContain('已保留当前配置');
+  });
+
+  it('后台刷新回来的在线列表：只换选项，不把用户刚选的模型弹回去', () => {
+    loadSettings({
+      ...baseConfig('deepseek-flash'),
+      models: [
+        { id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'builtin' },
+        { id: 'deepseek-v4-pro', label: 'deepseek-v4-pro（强推理）', source: 'builtin' },
+      ],
+      modelsHint: '内置快照（2026-09-28）',
+    });
+
+    const sel = modelSelect();
+    sel.value = 'deepseek-v4-pro'; // 用户此刻的选择
+    emitEvent('settings.models', {
+      models: [
+        { id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' },
+        { id: 'deepseek-v4-pro', label: 'deepseek-v4-pro（强推理）', source: 'live' },
+        { id: 'deepseek-v5-preview', label: 'deepseek-v5-preview', source: 'live' },
+      ],
+      modelsHint: '已从 api.deepseek.com 在线更新模型列表（3 个可选）',
+    });
+
+    expect(optionValues(sel)).toEqual(['deepseek-flash', 'deepseek-v4-pro', 'deepseek-v5-preview']);
+    expect(sel.value).toBe('deepseek-v4-pro');
+    expect(hintText()).toContain('3 个可选');
+  });
+
+  it('刷新回来是空列表时保持原样（清空字段 + 误点保存 = 配置被改坏）', () => {
+    loadSettings({
+      ...baseConfig('deepseek-flash'),
+      models: [{ id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'builtin' }],
+      modelsHint: '内置快照（2026-09-28）',
+    });
+
+    const sel = modelSelect();
+    const before = optionValues(sel);
+    emitEvent('settings.models', { models: [], modelsHint: '未能获取在线模型列表：请求超时' });
+
+    expect(optionValues(sel)).toEqual(before);
+    expect(sel.value).toBe('deepseek-flash');
+  });
+
+  it('提交回传选中的模型名；下拉为空时不回传 model（不覆盖已存配置）', () => {
+    const submit = () => {
+      document
+        .getElementById('settings-form')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      return lastMessageOfKind('settings.apply').settings;
+    };
+
+    loadSettings({
+      ...baseConfig('deepseek-flash'),
+      models: [
+        { id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' },
+        { id: 'deepseek-v4-pro', label: 'deepseek-v4-pro（强推理）', source: 'live' },
+      ],
+      modelsHint: '已从 api.deepseek.com 在线更新模型列表（2 个可选）',
+    });
+    document.getElementById('inp-apikey').value = '';
+
+    const sel = modelSelect();
+    sel.value = 'deepseek-v4-pro';
+    const sent = submit();
+    expect(sent.model).toBe('deepseek-v4-pro');
+    // apiKey 留空 = 不修改，不能上报空串把已存凭据删掉
+    expect(sent.apiKey).toBeUndefined();
+
+    // 异常情形（列表渲染失败导致下拉为空）：宁可不提交 model，也不要把配置清空
+    sel.textContent = '';
+    expect(submit().model).toBeUndefined();
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+});

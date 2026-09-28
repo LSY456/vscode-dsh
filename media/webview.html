@@ -173,8 +173,9 @@
             <input id="inp-apikey" type="password" placeholder="留空则不修改" spellcheck="false" />
           </label>
           <label class="settings-field">
-            <span>模型名</span>
-            <input id="inp-model" placeholder="deepseek-chat" spellcheck="false" />
+            <span>模型名 <em class="muted">（从下拉选择，避免手写错名字）</em></span>
+            <select id="inp-model"></select>
+            <span id="model-catalog-hint" class="muted"></span>
           </label>
           <label class="settings-field">
             <span>模型 Provider <em class="muted">（OpenAI 兼容 / Anthropic）</em></span>

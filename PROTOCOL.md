@@ -68,7 +68,7 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
 `initialize.model` 声明模型底座，daemon 端据此构建真实 Agent：
 
 - `baseURL?: string` —— OpenAI 兼容端点 base，缺省 `https://api.deepseek.com/v1`
-- `model?: string` —— 模型名，缺省 `deepseek-chat`（DeepSeek Reasoner 会流式返回 `reasoning_content`，投影为 `reasoning.delta`）
+- `model?: string` —— 模型名，缺省 `deepseek-flash`（DeepSeek 思考模式会流式返回 `reasoning_content`，投影为 `reasoning.delta`）
 - `apiKey?: string` —— 优先于顶层 `initialize.apiKey`
 - `agent?: 'mock' | 'real' | 'auto'` —— 实现选择；缺省 `auto` = 有 apiKey 则 real，否则 mock
 - `idleTimeoutMs?: number` —— **模型请求空闲超时**（P0-3）：距上一个流式增量超过该时长即以
