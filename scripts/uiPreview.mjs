@@ -164,6 +164,13 @@ const conversationDom = await renderScenario(({ emit, emitRaw }) => {
   });
   emitRaw({ kind: 'session.reset', sessionId: 'sess_preview_9f3a1c7e', reason: 'new' });
   emit('session.started', { sessionId: 'sess_preview_9f3a1c7e', title: '给 tools.ts 补路径护栏' });
+  // 状态行的余额 chip（扩展本地事件；文案由 src/accountBalance.ts 统一组装）
+  emit('balance.info', {
+    available: true,
+    text: '余额 ¥110.00',
+    title: 'API 余额 ¥110.00｜赠金 10.00 · 充值 100.00｜更新于 22:50:01｜点击刷新',
+    insufficient: false,
+  });
 
   emit('user.message', {
     text: '看下 `src/daemon/tools.ts` 的 `resolveInWorkspace`，**越界路径**处理得对吗？',

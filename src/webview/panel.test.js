@@ -923,3 +923,62 @@ describe('模型设置：模型名是下拉，不是自由输入', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 });
+
+/**
+ * 状态行上的账户余额 chip。
+ *
+ * 关键取舍：**未知就整块隐藏**，不显示 0 或 `--` —— 0 余额是很重的结论，
+ * 不能靠兜底值给出（拿不到必然有原因：未配 Key / 非官方端点 / 上游没这个接口）。
+ */
+describe('状态行：账户余额 chip', () => {
+  const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+  const chip = () => document.getElementById('balance-chip');
+
+  it('扩展没推过余额时保持隐藏，拿到后才出现、且与模型名同一行', () => {
+    expect(chip().hidden).toBe(true);
+
+    emitEvent('balance.info', {
+      available: true,
+      text: '余额 ¥110.00',
+      title: 'API 余额 ¥110.00｜赠金 10.00 · 充值 100.00｜更新于 22:50:01｜点击刷新',
+      insufficient: false,
+    });
+
+    expect(chip().hidden).toBe(false);
+    expect(chip().textContent).toBe('余额 ¥110.00');
+    expect(chip().className).toBe('meta-chip'); // 余额充足：不加警示色
+    expect(chip().title).toContain('赠金 10.00');
+    expect(chip().parentElement.id).toBe('meta-bar');
+  });
+
+  it('余额不足复用既有的警示 chip 样式，而不是另造一套', () => {
+    emitEvent('balance.info', {
+      available: true,
+      text: '余额 ¥0.00',
+      title: 'API 余额 ¥0.00｜余额不足，API 调用可能失败｜点击刷新',
+      insufficient: true,
+    });
+    expect(chip().className).toContain('meta-chip');
+    expect(chip().className).toContain('warn');
+    expect(chip().title).toContain('余额不足');
+  });
+
+  it('不可用时整块隐藏并清空（未配 Key / 非官方端点 / 换了账号）', () => {
+    emitEvent('balance.info', { available: false });
+    expect(chip().hidden).toBe(true);
+    expect(chip().textContent).toBe('');
+    expect(chip().title).toBe('');
+  });
+
+  it('点击 chip 请求扩展重取余额', () => {
+    const before = posted.filter((m) => m.kind === 'balance.refresh').length;
+    chip().click();
+    expect(posted.filter((m) => m.kind === 'balance.refresh').length).toBe(before + 1);
+  });
+
+  it('DOM ↔ CSS 契约：可点手势与警示色规则都在样式表里', () => {
+    expect(css).toMatch(/#balance-chip\s*\{[^}]*cursor:\s*pointer/);
+    expect(css).toMatch(/\.meta-chip\.warn\s*\{[^}]*border-color/);
+    expect(chip().matches('#meta-bar > .meta-chip')).toBe(true);
+  });
+});
