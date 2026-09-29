@@ -28,6 +28,7 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   const statusEl = $('status');
   const connDot = $('conn-dot');
   const agentModeEl = $('agent-mode');
+  const balanceEl = $('balance-chip');
   const metaBar = $('meta-bar');
   const inputEl = $('input');
   const btnSend = $('btn-send');
@@ -322,6 +323,28 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     const reason = (state && state.agentReason) || '';
     demoBannerMessage = isMock ? DEMO_REASON_TEXT[reason] || DEMO_FALLBACK_TEXT : null;
     renderStateBanner();
+  }
+
+  /**
+   * 账户余额 chip（状态行，模型名右侧）。
+   *
+   * **只在"可用"时显示**：拿不到（未配 Key / 非 DeepSeek 官方端点 / 上游没这个接口）
+   * 就整块隐藏，而不是显示 `0` 或 `--` —— 0 余额是个很重的结论，不能靠兜底值给出。
+   * 文案、警示色与悬停提示都由扩展算好（唯一出口在 `src/accountBalance.ts`），这里只渲染。
+   */
+  function setBalance(params) {
+    const p = params || {};
+    if (!p.available || !p.text) {
+      balanceEl.hidden = true;
+      balanceEl.textContent = '';
+      balanceEl.title = '';
+      return;
+    }
+    balanceEl.hidden = false;
+    balanceEl.textContent = p.text;
+    // 余额不足用既有的警示色（复用 .meta-chip.warn，不另造一套）
+    balanceEl.className = 'meta-chip' + (p.insufficient ? ' warn' : '');
+    balanceEl.title = p.title || '';
   }
 
   /**
@@ -1430,6 +1453,10 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
         // 后台刷新回来的在线模型列表：只换选项，不动用户此刻的选择（见 applyModelOptions）
         applyModelOptions(params);
         break;
+      case 'balance.info':
+        // 扩展本地事件：账户余额（状态行）。不可用时隐藏整块 chip
+        setBalance(params);
+        break;
       case 'settings.applied':
         settingsMsg.textContent = '已保存，重启 daemon 后生效。';
         btnSettingsRestart.hidden = false;
@@ -1524,6 +1551,8 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     if (bannerAction === 'trust') vscode.postMessage({ kind: 'trust.manage' });
     else if (bannerAction === 'settings') openSheet('settings');
   });
+  // 余额 chip：点了就立刻重取（自动刷新的时机与节流见 webviewPanel.refreshBalance）
+  balanceEl.addEventListener('click', () => vscode.postMessage({ kind: 'balance.refresh' }));
   for (const backdrop of document.querySelectorAll('.sheet-backdrop')) {
     backdrop.addEventListener('click', () => {
       const sheet = backdrop.parentElement;

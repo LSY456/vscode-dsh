@@ -15,6 +15,8 @@
  *         驱动「演示模式」横幅与模式 chip（配好 Key 重启后据此撤下横幅）
  *       - method='trust.info' 为扩展本地事件：工作区信任状态（受限模式横幅）。未信任时 daemon
  *         不会启动，所以这是撤下横幅的唯一来源，与 agent.info 同一套本地事件机制
+ *       - method='balance.info' 为扩展本地事件：账户余额（状态行 chip）。走独立事件而不进 init 快照，
+ *         因为它带 TTL 缓存且有"不适用"这种状态，需要在 surface 就绪之后随时补推
  *     { kind: 'session.reset', sessionId }   // 清空视图（新建会话 / 切换会话 / 断线重放前）
  *     { kind: 'init', state }                // 某个 surface 就绪后的初始状态（含挂起项快照 + trust）
  *   webview -> extension:
@@ -24,6 +26,7 @@
  *     { kind: 'patch.accept'|'patch.reject'|'patch.openDiff'|'patch.applyEdited', patchId }
  *     { kind: 'settings.get'|'settings.apply' } { kind: 'daemon.restart' }
  *     { kind: 'trust.list'|'trust.clear' } { kind: 'trust.manage' }
+ *     { kind: 'balance.refresh' }            // 点余额 chip 手动重取
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -44,6 +47,14 @@ import {
 } from '../shared/protocol';
 import { captureContext } from './contextCapture';
 import { ConfigAccessor } from './configAccessor';
+import {
+  BALANCE_TTL_MS,
+  type BalancePayload,
+  balanceEndpointCandidates,
+  buildBalancePayload,
+  describeBalanceEndpoint,
+  fetchBalance,
+} from './accountBalance';
 import { DaemonManager } from './daemonManager';
 import { renderWebviewHtml } from './webviewHtml';
 import { DshDiffManager } from './diffProvider';
@@ -117,7 +128,8 @@ interface FromWebview {
     | 'daemon.restart'
     | 'trust.list'
     | 'trust.clear'
-    | 'trust.manage';
+    | 'trust.manage'
+    | 'balance.refresh';
   prompt?: string;
   approvalId?: string;
   approved?: boolean;
@@ -176,6 +188,8 @@ export class WebviewPanelHost {
       } else if (n.method === EVENTS.SessionEnded) {
         // 会话结束：挂起项已被 daemon 按拒绝解除
         this.clearPending();
+        // 这一轮把 token 用掉了 → 余额可能变了。TTL 会自动把重连重放等重复触发挡掉
+        void this.refreshBalance();
       }
       this.recordEvent(n.method, n.params);
       this.post({ kind: 'event', method: n.method, params: n.params });
@@ -191,6 +205,8 @@ export class WebviewPanelHost {
     // 每次握手成功后同步「当前 Agent 实现」：用户配好 Key 重启后要能撤下"演示模式"横幅
     this.daemon.onAgentInfo((info) => {
       this.post({ kind: 'event', method: 'agent.info', params: info });
+      // 握手成功说明凭据是通的 → 顺手把余额补上（无 Key / 非官方端点会在内部被挡掉）
+      void this.refreshBalance();
     });
   }
 
@@ -401,6 +417,95 @@ export class WebviewPanelHost {
     });
   }
 
+  // -------------------------------------------------------------------------
+  // 账户余额（状态行上的余额 chip）
+  // -------------------------------------------------------------------------
+
+  /** 最近一次读到的余额（推给面板的形态；`{available:false}` = 明确不可用） */
+  private balancePayload: BalancePayload | undefined;
+  /** 最近一次**尝试**的时间（成功/失败都算）：把网络请求节流到一个 TTL 一次 */
+  private balanceAttemptAt = 0;
+  /** 配置代次：换 Key / 换端点时自增，用来丢弃"属于旧配置"的迟到结果 */
+  private balanceEpoch = 0;
+  /** 在飞的余额请求（并发去重） */
+  private balanceRefreshInFlight: Promise<void> | undefined;
+
+  /**
+   * 刷新账户余额并推给面板。
+   *
+   * 触发点：surface 就绪、握手成功、会话结束（token 用掉了）、用户点击、改了 Key/端点。
+   * `force` 的含义是"绕过 TTL 且作废在飞结果的落地"（换 Key 后必须重取、用户点了要立刻重取），
+   * **它不清空当前显示**：手动刷新失败时，屏幕上那笔已知余额比一片空白有用
+   * （真要撤下旧账号的数字时，由调用方先 `clearBalance()`）。
+   */
+  private refreshBalance(force = false): Promise<void> {
+    if (force) {
+      this.balanceEpoch += 1;
+      this.balanceAttemptAt = 0;
+    }
+    if (this.balanceRefreshInFlight) {
+      // 在飞的那次收尾后按当前配置再来一次；在飞那次的结果会被 epoch 检查丢弃
+      return force ? this.balanceRefreshInFlight.then(() => this.refreshBalance()) : this.balanceRefreshInFlight;
+    }
+    if (this.balancePayload !== undefined && Date.now() - this.balanceAttemptAt < BALANCE_TTL_MS) {
+      // 命中 TTL 也仍然重推一次：新开的 surface 要能立刻拿到，而不是等下一次刷新
+      this.pushBalance(this.balancePayload);
+      return Promise.resolve();
+    }
+    this.balanceRefreshInFlight = this.runBalanceRefresh().finally(() => {
+      this.balanceRefreshInFlight = undefined;
+    });
+    return this.balanceRefreshInFlight;
+  }
+
+  private async runBalanceRefresh(): Promise<void> {
+    const epoch = this.balanceEpoch;
+    const baseURL = normalizeModelBaseUrl(this.configAccessor.getPanelConfig().baseURL);
+
+    // `/user/balance` 是 DeepSeek 的**账户级**接口：非官方端点直接视为"不适用"。
+    // 既不会产生必然的 404，也不必为"锦上添花的展示"把 API Key 送到用户自配的第三方网关去。
+    if (!isOfficialDeepSeekEndpoint(baseURL)) {
+      this.clearBalance(epoch);
+      return;
+    }
+
+    const apiKey = await this.configAccessor.getApiKey().catch(() => '');
+    if (epoch !== this.balanceEpoch) return;
+    if (!apiKey) {
+      this.clearBalance(epoch); // 没配 Key：明确撤下，而不是留一个空壳 chip
+      return;
+    }
+
+    const result = await fetchBalance({ candidates: balanceEndpointCandidates(baseURL), apiKey });
+    this.balanceAttemptAt = Date.now(); // 失败也记：把重试节流到一个 TTL 一次
+    if (epoch !== this.balanceEpoch) return; // 配置已变：这次结果作废，别把旧账号的余额写上去
+
+    if (!result.ok) {
+      // 失败**保留上一次已知值**：一次网络抖动就显示"没有余额"，比显示一个稍旧的数字更误导。
+      // 具体原因进 `dsh` 输出通道；界面上的数字旁边始终带"更新于"，新旧可自行判断。
+      logger.info(
+        `API 余额获取失败：${result.detail}（${describeBalanceEndpoint(balanceEndpointCandidates(baseURL)[0])}）`
+      );
+      return;
+    }
+
+    this.pushBalance(buildBalancePayload(result.info, new Date(this.balanceAttemptAt).toLocaleTimeString()));
+  }
+
+  /**
+   * 撤下余额 chip（不适用 / 未配置 / 换了账号）：推一个明确的"不可用"。
+   * 不碰"最近一次尝试时间"—— 这条路径不发网络，让下一次触发重新判断的代价可忽略。
+   */
+  private clearBalance(epoch = this.balanceEpoch): void {
+    if (epoch !== this.balanceEpoch) return;
+    this.pushBalance({ available: false });
+  }
+
+  private pushBalance(payload: BalancePayload): void {
+    this.balancePayload = payload;
+    this.post({ kind: 'event', method: 'balance.info', params: payload });
+  }
+
   /** 打开/聚焦侧边栏视图（常驻入口）；已开编辑器面板则优先聚焦面板。 */
   async reveal(): Promise<void> {
     if (this.panel) {
@@ -537,6 +642,9 @@ export class WebviewPanelHost {
         this.readyWebviews.add(webview);
         this.readyWaiters.splice(0).forEach((r) => r());
         void webview.postMessage({ kind: 'init', state: this.buildInitState() });
+        // 余额不放进 init 快照：它是"外部事实 + 带 TTL 的缓存"，走独立的本地事件，
+        // 这样命中缓存时也能立刻补上（init 只在 surface 就绪时推一次）
+        void this.refreshBalance();
         return;
       case 'send':
         await this.doSend((msg.prompt ?? '').trim());
@@ -628,10 +736,18 @@ export class WebviewPanelHost {
           await this.clearCatalogCache();
           const next = this.configAccessor.getPanelConfig();
           void this.refreshModelCatalog(next, await this.configAccessor.hasApiKey());
+          // 余额属于**账号**：换了 Key / 端点，旧数字必须立刻撤下再重取
+          // （注意与手动刷新的差别：手动刷新不清空当前数字，见 refreshBalance）
+          this.clearBalance();
+          void this.refreshBalance(true);
         }
         this.post({ kind: 'event', method: 'settings.applied', params: { restartNeeded: true } });
         return;
       }
+      case 'balance.refresh':
+        // 点余额 chip：立刻重取（不撤下当前数字 —— 刷新失败时旧的已知值比一片空白有用）
+        void this.refreshBalance(true);
+        return;
       case 'daemon.restart':
         await this.daemon.restart();
         this.post({ kind: 'event', method: 'daemon.restarted', params: {} });

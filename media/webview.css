@@ -190,6 +190,13 @@ body {
   border-color: var(--dsh-warn);
   color: var(--dsh-warn);
 }
+/* 余额 chip：可点手动刷新（自动刷新见 webviewPanel 的 TTL），故给可点手势 */
+#balance-chip {
+  cursor: pointer;
+}
+#balance-chip:hover {
+  border-color: var(--dsh-fg-dim);
+}
 
 /* =======================================================================
  * 对话流（唯一滚动区）
