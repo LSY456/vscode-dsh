@@ -12,6 +12,9 @@
  * 普通 const 在工厂执行时还处于 TDZ。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 const h = vi.hoisted(() => {
   /** getConfiguration 假体：记录被读过的键，便于断言"门禁在读配置之前" */
@@ -40,7 +43,7 @@ vi.mock('vscode', () => ({
   commands: { executeCommand: async () => undefined },
 }));
 
-import { DaemonManager } from './daemonManager';
+import { DaemonManager, isDshDaemonCommandLine, readProcessCommandLine, splitCommandLine } from './daemonManager';
 
 const ONE_FOLDER = [{ uri: { fsPath: '/repo' } }];
 
@@ -143,5 +146,164 @@ describe('DaemonManager：无工作区门禁（P0-2）', () => {
     const read = await startWith(m);
     expect(m.getStatus().status).not.toBe('disabled');
     expect(read).toContain('daemon.mode');
+  });
+});
+
+describe('splitCommandLine：解析用户配置的外部 daemon 启动命令', () => {
+  it('按空白切分，引号内的空格被保留', () => {
+    expect(splitCommandLine('node /a/b.js --port 0')).toEqual(['node', '/a/b.js', '--port', '0']);
+    expect(splitCommandLine('"C:\\Program Files\\node.exe" /a/b.js')).toEqual([
+      'C:\\Program Files\\node.exe',
+      '/a/b.js',
+    ]);
+  });
+
+  it('反斜杠**不是**转义符（Windows 路径原样保留）', () => {
+    // 回归：若把 `\` 当转义符，`"C:\Program Files\app.exe"` 会被吃成 `C:Program Filesapp.exe`
+    expect(splitCommandLine('"C:\\Program Files\\app.exe"')).toEqual(['C:\\Program Files\\app.exe']);
+    // 未加引号时反斜杠照样不参与解析，只按空白切
+    expect(splitCommandLine('C:\\Program Files\\app.exe')).toEqual(['C:\\Program', 'Files\\app.exe']);
+  });
+
+  it('单引号同样成对；空参数 `""` 不被丢掉', () => {
+    expect(splitCommandLine("node 'a b.js'")).toEqual(['node', 'a b.js']);
+    expect(splitCommandLine('node ""')).toEqual(['node', '']);
+  });
+
+  it('未闭合引号宽松处理（延续到结尾），不抛错', () => {
+    expect(splitCommandLine('node "a b.js')).toEqual(['node', 'a b.js']);
+  });
+
+  it('多余空白 / 制表符 / 换行不产生空参数', () => {
+    expect(splitCommandLine('  node   \t a.js \n')).toEqual(['node', 'a.js']);
+    expect(splitCommandLine('   ')).toEqual([]);
+  });
+});
+
+describe('isDshDaemonCommandLine：回收陈旧 daemon 前的身份核对', () => {
+  const EXT = '/ext';
+
+  it('认出本扩展的内置 daemon（含升级后仍跑在旧目录里的那个）', () => {
+    expect(isDshDaemonCommandLine('/usr/bin/node /ext/out/daemon/index.js --port 0', EXT)).toBe(true);
+    // 扩展升级后目录名会变（…-0.7.0 → …-0.8.0），而"陈旧 daemon"恰恰跑在旧目录里：
+    // 只比完整路径会漏掉它，所以匹配的是入口脚本名
+    expect(
+      isDshDaemonCommandLine('/usr/bin/node /home/u/.vscode/extensions/pub.dsh-0.7.0/out/daemon/index.js', EXT)
+    ).toBe(true);
+  });
+
+  it('Windows 反斜杠路径同样识别（大小写与分隔符统一归一化）', () => {
+    expect(isDshDaemonCommandLine('node.exe C:\\Ext\\out\\daemon\\index.js', 'C:\\ext')).toBe(true);
+  });
+
+  it('无关进程一律不认 —— 这条判断决定"要不要 kill"', () => {
+    expect(isDshDaemonCommandLine('/usr/bin/node /home/u/server.js', EXT)).toBe(false);
+    expect(isDshDaemonCommandLine('explorer.exe', EXT)).toBe(false);
+    expect(isDshDaemonCommandLine('', EXT)).toBe(false);
+  });
+
+  it('读不到命令行（undefined）= 身份不明 = 不认（失败关闭）', () => {
+    expect(isDshDaemonCommandLine(undefined, EXT)).toBe(false);
+  });
+});
+
+describe('recycleStaleDaemon：杀进程前先验身份（失败关闭）', () => {
+  /** 直接驱动 private 方法：要验的是"kill 与否"的决策本身，不该为此真去 spawn 一个 daemon */
+  interface RecycleHost {
+    workspaceRoot: string;
+    recycleStaleDaemon(): Promise<void>;
+  }
+
+  function makeRecycler(probe: (pid: number) => string | undefined, dir: string): RecycleHost {
+    const m = new DaemonManager({
+      extensionPath: '/ext',
+      isTrusted: () => true,
+      readProcessCommandLine: probe,
+    });
+    (m as unknown as RecycleHost).workspaceRoot = dir;
+    return m as unknown as RecycleHost;
+  }
+
+  function writePortFile(dir: string, pid: number): string {
+    const dsh = path.join(dir, '.dsh');
+    fs.mkdirSync(dsh, { recursive: true });
+    const file = path.join(dsh, 'daemon.json');
+    fs.writeFileSync(file, JSON.stringify({ port: 12345, pid }), 'utf8');
+    return file;
+  }
+
+  function withTmpDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-recycle-'));
+    return fn(dir).finally(() => {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+
+  it('pid 指向无关进程：只移除端口文件，绝不动手 kill', async () => {
+    await withTmpDir(async (dir) => {
+      const portFile = writePortFile(dir, 4242);
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      try {
+        await makeRecycler(() => 'C:\\Windows\\explorer.exe', dir).recycleStaleDaemon();
+        expect(kill).not.toHaveBeenCalled();
+        // 不杀的代价很小：端口文件照样清掉，新 daemon 会在新端口拉起
+        expect(fs.existsSync(portFile)).toBe(false);
+      } finally {
+        kill.mockRestore();
+      }
+    });
+  });
+
+  it('探针读不到命令行（抛错 / 权限不足）：同样不 kill（宁可不杀，不误杀）', async () => {
+    await withTmpDir(async (dir) => {
+      writePortFile(dir, 4243);
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      try {
+        await makeRecycler(() => {
+          throw new Error('EACCES');
+        }, dir).recycleStaleDaemon();
+        expect(kill).not.toHaveBeenCalled();
+      } finally {
+        kill.mockRestore();
+      }
+    });
+  });
+
+  it('确认为 dsh daemon 进程：才真的结束它', async () => {
+    await withTmpDir(async (dir) => {
+      writePortFile(dir, 4244);
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      try {
+        await makeRecycler(() => 'node /ext/out/daemon/index.js --port 0', dir).recycleStaleDaemon();
+        expect(kill).toHaveBeenCalledWith(4244);
+      } finally {
+        kill.mockRestore();
+      }
+    });
+  });
+
+  it('端口文件缺失或损坏：不抛错、不 kill', async () => {
+    await withTmpDir(async (dir) => {
+      const dsh = path.join(dir, '.dsh');
+      fs.mkdirSync(dsh, { recursive: true });
+      fs.writeFileSync(path.join(dsh, 'daemon.json'), 'not json', 'utf8');
+      const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+      try {
+        await makeRecycler(() => 'node /ext/out/daemon/index.js', dir).recycleStaleDaemon();
+        expect(kill).not.toHaveBeenCalled();
+      } finally {
+        kill.mockRestore();
+      }
+    });
+  });
+
+  it('readProcessCommandLine 的契约：拿不到就返回 undefined，绝不抛错', () => {
+    const pid = 0x7fffffff; // 必然不存在
+    expect(() => readProcessCommandLine(pid)).not.toThrow();
+    expect(readProcessCommandLine(pid)).toBeUndefined();
   });
 });

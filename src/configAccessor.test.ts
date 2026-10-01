@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { API_KEY_SECRET, ConfigAccessor, ConfigSectionLike, SecretStore } from './configAccessor';
+import { DEFAULT_MAX_CONTEXT_TOKENS, DEFAULT_MAX_TOOL_ROUNDS } from '../shared/protocol';
 
 /** 内存假体：可记录调用轨迹（验证「只迁移一次」等真实行为）。 */
 function makeSecrets(init: Record<string, string> = {}) {
@@ -99,6 +100,8 @@ describe('ConfigAccessor：面板配置读写（非凭据项）', () => {
       model: '',
       preset: 'coder',
       provider: 'auto',
+      maxToolRounds: DEFAULT_MAX_TOOL_ROUNDS,
+      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
     });
   });
 
@@ -117,5 +120,53 @@ describe('ConfigAccessor：面板配置读写（非凭据项）', () => {
     expect(map.get('model.provider')).toBe('anthropic');
     // 只写普通项，apiKey 走 SecretStorage 单独入口
     expect(updates.some(([k]) => k === 'apiKey')).toBe(false);
+  });
+});
+
+describe('ConfigAccessor：Agent 预算（此前的"死配置"——用户改不到）', () => {
+  it('未配置时回落到协议共享的缺省值（扩展与 daemon 不再各写一份）', () => {
+    const cfg = new ConfigAccessor(makeSecrets().secrets, makeConfig().config).getPanelConfig();
+    expect(cfg.maxToolRounds).toBe(DEFAULT_MAX_TOOL_ROUNDS);
+    expect(cfg.maxContextTokens).toBe(DEFAULT_MAX_CONTEXT_TOKENS);
+  });
+
+  it('已配置时原样读出（用户显式设过的值不被缺省覆盖）', () => {
+    const cfg = new ConfigAccessor(
+      makeSecrets().secrets,
+      makeConfig({ 'agent.maxToolRounds': 12, 'agent.maxContextTokens': 128_000 }).config
+    ).getPanelConfig();
+    expect(cfg.maxToolRounds).toBe(12);
+    expect(cfg.maxContextTokens).toBe(128_000);
+  });
+
+  it('写入侧钳制：面板输入可被绕过，越界值不能进配置', async () => {
+    const { config, map } = makeConfig();
+    const acc = new ConfigAccessor(makeSecrets().secrets, config);
+
+    await acc.applyPanelConfig({ maxToolRounds: 999, maxContextTokens: 1 });
+    expect(map.get('agent.maxToolRounds')).toBe(50);
+    expect(map.get('agent.maxContextTokens')).toBe(4_000);
+
+    await acc.applyPanelConfig({ maxToolRounds: -3, maxContextTokens: 10 ** 9 });
+    expect(map.get('agent.maxToolRounds')).toBe(1);
+    expect(map.get('agent.maxContextTokens')).toBe(1_000_000);
+  });
+
+  it('非数字回落到缺省，绝不写进 0（0 会让上下文预算当场失效）', async () => {
+    const { config, map } = makeConfig();
+    const acc = new ConfigAccessor(makeSecrets().secrets, config);
+    await acc.applyPanelConfig({
+      maxToolRounds: Number.NaN,
+      maxContextTokens: Number.POSITIVE_INFINITY,
+    });
+    expect(map.get('agent.maxToolRounds')).toBe(DEFAULT_MAX_TOOL_ROUNDS);
+    expect(map.get('agent.maxContextTokens')).toBe(DEFAULT_MAX_CONTEXT_TOKENS);
+  });
+
+  it('未提交的字段不写（留空 = 不修改）', async () => {
+    const { config, updates } = makeConfig();
+    const acc = new ConfigAccessor(makeSecrets().secrets, config);
+    await acc.applyPanelConfig({ model: 'deepseek-flash' });
+    expect(updates.some(([k]) => k.startsWith('agent.'))).toBe(false);
   });
 });

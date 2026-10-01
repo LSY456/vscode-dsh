@@ -96,6 +96,14 @@ export const EVENTS = {
 // ---------------------------------------------------------------------------
 
 /** 模型调用配置（P3：真实 daemon） */
+/**
+ * Agent 循环预算的缺省值。放在协议里由两侧共用 ——
+ * 这两个值此前是 daemon 侧的**死配置**：`RealAgentConfig` 有字段、`realAgent` 会读，
+ * 但扩展从不下发、`package.json` 也没有对应项，用户根本改不到（而文档却写着"可配"）。
+ */
+export const DEFAULT_MAX_TOOL_ROUNDS = 8;
+export const DEFAULT_MAX_CONTEXT_TOKENS = 48 * 1024;
+
 export interface ModelConfig {
   /** API 端点 base，如 https://api.deepseek.com/v1 */
   baseURL?: string;
@@ -112,6 +120,16 @@ export interface ModelConfig {
    * 避免模型端静默时会话永久挂起。缺省 60000；<= 0 关闭。
    */
   idleTimeoutMs?: number;
+  /**
+   * 工具调用轮数上限（防止模型反复试探耗尽预算）。
+   * 缺省 `DEFAULT_MAX_TOOL_ROUNDS`；跑满后 Agent 会收束成一次不带工具定义的最终回答。
+   */
+  maxToolRounds?: number;
+  /**
+   * 上下文 token 预算：发送前按此估算并裁剪历史（超预算时整轮丢弃最旧的工具轮）。
+   * 缺省 `DEFAULT_MAX_CONTEXT_TOKENS`。
+   */
+  maxContextTokens?: number;
 }
 
 export interface InitializeParams {

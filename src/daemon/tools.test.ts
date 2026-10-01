@@ -4,6 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   checkPatchConflict,
+  createWalkState,
+  DEFAULT_WALK_LIMITS,
   evaluateCommandPolicy,
   executeCommand,
   globFiles,
@@ -15,7 +17,9 @@ import {
   resolveTarget,
   sliceLines,
   tryReadFile,
+  walkFiles,
   writeTextFile,
+  type WalkLimits,
 } from './tools';
 import { ProcessSandbox } from './sandbox';
 
@@ -364,5 +368,125 @@ describe('命令策略与执行', () => {
     expect(seen[0].cwd).toBe(root);
     expect(seen[0].env.DSH_DAEMON_TOKEN).toBeUndefined();
     expect(seen[0].env.PATH).toBeDefined();
+  });
+});
+
+describe('walkFiles 预算与去重（P1-2：别让一次搜索卡死事件循环）', () => {
+  /** 宽而平：一层 40 个文件 —— 用来触发「条目数」上限 */
+  let wide: string;
+  /** 深而窄：a/b/c/leaf.txt —— 用来触发「深度」上限 */
+  let deepDir: string;
+  let wideCanon: string;
+  let deepCanon: string;
+
+  const limits = (over: Partial<WalkLimits>): WalkLimits => ({ ...DEFAULT_WALK_LIMITS, ...over });
+
+  beforeAll(() => {
+    wide = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-walk-wide-'));
+    for (let i = 0; i < 40; i += 1) fs.writeFileSync(path.join(wide, `w${i}.txt`), 'x', 'utf8');
+    wideCanon = fs.realpathSync(wide);
+
+    deepDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-walk-deep-'));
+    let cur = deepDir;
+    for (const name of ['a', 'b', 'c']) {
+      cur = path.join(cur, name);
+      fs.mkdirSync(cur);
+    }
+    fs.writeFileSync(path.join(cur, 'leaf.txt'), 'x', 'utf8');
+    deepCanon = fs.realpathSync(deepDir);
+  });
+
+  afterAll(() => {
+    for (const dir of [wide, deepDir]) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  it('缺省预算：完整走完，不发 exhausted 信号', () => {
+    const state = createWalkState();
+    const files = [...walkFiles(wide, wideCanon, DEFAULT_WALK_LIMITS, state)];
+    expect(files).toHaveLength(40);
+    expect(state.exhausted).toBe(false);
+  });
+
+  it('条目数上限：到点即停并置 exhausted（宽目录不再拖死整轮）', () => {
+    const l = limits({ maxEntries: 5 });
+    const state = createWalkState(l);
+    const files = [...walkFiles(wide, wideCanon, l, state)];
+    expect(state.exhausted).toBe(true);
+    expect(files).toHaveLength(5);
+  });
+
+  it('深度上限：到点即停并置 exhausted（深目录树不会走到天涯）', () => {
+    const l = limits({ maxDepth: 1 });
+    const state = createWalkState(l);
+    const files = [...walkFiles(deepDir, deepCanon, l, state)];
+    expect(state.exhausted).toBe(true);
+    // leaf.txt 位于第 3 层，被深度预算挡在外面 —— 这正是"没有静默给半份结果"的反面：
+    // 调用方拿到的是 exhausted=true，可以如实告诉模型"没搜完"
+    expect(files).toEqual([]);
+  });
+
+  it('时间预算用尽：立刻停止并不产出（墙钟是最后一道保险）', () => {
+    const l = limits({ timeBudgetMs: -1 }); // deadline 落在过去，等价于"预算已耗尽"
+    const state = createWalkState(l);
+    const files = [...walkFiles(wide, wideCanon, l, state)];
+    expect(files).toEqual([]);
+    expect(state.exhausted).toBe(true);
+  });
+
+  it('共享 state 的多次调用：第一次耗尽后第二次直接返回（预算不被重置）', () => {
+    const l = limits({ maxEntries: 3 });
+    const state = createWalkState(l);
+    expect([...walkFiles(wide, wideCanon, l, state)]).toHaveLength(3);
+    expect(state.exhausted).toBe(true);
+    // 同一个 state 再走：不再产出，也不会"续着走"绕开预算
+    expect([...walkFiles(wide, wideCanon, l, state)]).toEqual([]);
+  });
+
+  it('符号链接自指不造成无限递归（realpath 去重切断环）', () => {
+    const cycle = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-walk-cycle-'));
+    const canon = fs.realpathSync(cycle);
+    fs.writeFileSync(path.join(cycle, 'a.txt'), 'x', 'utf8');
+    try {
+      // 指向自身的 junction：没有 visited 去重的话这里会无限递归
+      fs.symlinkSync(cycle, path.join(cycle, 'loop'), process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      fs.rmSync(cycle, { recursive: true, force: true });
+      return; // 环境不允许建链接（无权限）时跳过，不制造假失败
+    }
+    try {
+      const state = createWalkState();
+      const files = [...walkFiles(cycle, canon, DEFAULT_WALK_LIMITS, state)];
+      // 环只被忽略，不产出额外项，也不触发 exhausted（它是"已访问"，不是"超预算"）
+      expect(files.map((f) => path.basename(f))).toEqual(['a.txt']);
+      expect(state.exhausted).toBe(false);
+    } finally {
+      try {
+        fs.rmSync(path.join(cycle, 'loop'), { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+      fs.rmSync(cycle, { recursive: true, force: true });
+    }
+  });
+
+  it('grep / glob 把遍历状态带出来（walkExhausted 恒为布尔，不再是 undefined）', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-walk-out-'));
+    fs.writeFileSync(path.join(base, 'x.ts'), 'needle\n', 'utf8');
+    try {
+      const g = grepFiles(base, [], 'needle');
+      expect(g.walkExhausted).toBe(false);
+      expect(typeof g.walkExhausted).toBe('boolean');
+      const gl = globFiles(base, [], '*.ts');
+      expect(gl.walkExhausted).toBe(false);
+      expect(typeof gl.walkExhausted).toBe('boolean');
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
   });
 });

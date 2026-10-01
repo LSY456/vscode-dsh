@@ -16,7 +16,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { isStaleDaemon, readBuildId } from '../shared/buildId';
-import { ERROR_CODES, InitializeResult, METHODS, SessionResumeResult } from '../shared/protocol';
+import {
+  DEFAULT_MAX_CONTEXT_TOKENS,
+  DEFAULT_MAX_TOOL_ROUNDS,
+  ERROR_CODES,
+  InitializeResult,
+  METHODS,
+  SessionResumeResult,
+} from '../shared/protocol';
 import { VSD_DSH_VERSION } from '../shared/version';
 import type { ConfigAccessor } from './configAccessor';
 import { logger } from './logger';
@@ -51,6 +58,13 @@ export interface DaemonManagerOptions {
    * 于是命令、状态栏、面板「重启 daemon」、断线重连全都被同一道门覆盖，不会有绕行路径。
    */
   isTrusted?: () => boolean;
+  /**
+   * 进程身份探针（`recycleStaleDaemon` 回收前校验用）。
+   *
+   * 可注入的原因：缺省实现要 spawn 一个查询进程（Windows 走 PowerShell/CIM、POSIX 走 ps），
+   * 而单测环境不允许同步 spawn —— 注入假探针才能把"身份不匹配就不杀"这条逻辑测成断言。
+   */
+  readProcessCommandLine?: (pid: number) => string | undefined;
 }
 
 /** 握手后 daemon 回报的运行信息（UI 用：当前是 mock 还是真实模型）。 */
@@ -63,6 +77,107 @@ export interface AgentInfo {
 }
 
 const PORT_FILE_REL = path.join('.dsh', 'daemon.json');
+
+/**
+ * 把命令模板切分为 `[可执行文件, ...参数]`，识别单/双引号。
+ *
+ * 为什么不按空白 split：`dsh.daemon.command` 里带空格的可执行路径或参数是常见写法
+ * （`"C:\Program Files\nodejs\node.exe" out/daemon/index.js`），`split(/\s+/)` 会把它切成两段，
+ * `spawn` 随即 ENOENT —— 而报错只会说"找不到 C:\Program"，用户根本看不出是切分出了问题。
+ *
+ * 两条刻意的取舍：
+ * ① **反斜杠不当转义符**：Windows 路径里 `\` 是分隔符，当转义符会吃掉一层目录
+ *    （`C:\Program Files` → `C:Program Files`）。
+ * ② 引号只做成对切换；**未闭合的引号**按"延续到结尾"处理（宽松而非抛错）—— 这是用户配置项，
+ *    能跑起来比给出精确的语法错误更有用。
+ */
+export function splitCommandLine(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: '"' | "'" | null = null;
+  let started = false;
+  for (const ch of cmd) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true; // `""` 是合法的空参数，不能被丢掉
+      continue;
+    }
+    if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') {
+      if (started) {
+        out.push(cur);
+        cur = '';
+        started = false;
+      }
+      continue;
+    }
+    cur += ch;
+    started = true;
+  }
+  if (started) out.push(cur);
+  return out;
+}
+
+/**
+ * 读取指定进程的命令行；拿不到一律返回 `undefined`（**不抛错**）。
+ *
+ * Linux 走 `/proc`（最可靠）；Windows 走 CIM（`wmic` 在新系统上已移除）；
+ * 其余 POSIX 走 `ps`。任何失败都归一到 `undefined`，由调用方按"身份不明"处理。
+ */
+export function readProcessCommandLine(pid: number): string | undefined {
+  try {
+    if (process.platform === 'linux') {
+      const text = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\u0000/g, ' ').trim();
+      return text || undefined;
+    }
+    if (process.platform === 'win32') {
+      const out = cp.execFileSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+        ],
+        { encoding: 'utf8', windowsHide: true, timeout: 3000 }
+      );
+      const text = String(out).trim();
+      return text || undefined;
+    }
+    const out = cp.execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      timeout: 3000,
+    });
+    const text = String(out).trim();
+    return text || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 判定某进程命令行是否确实是"本扩展拉起的 dsh daemon"。
+ *
+ * 为什么需要它：`recycleStaleDaemon` 会 `process.kill(pid)`，而 pid 的唯一来源是
+ * `<workspace>/.dsh/daemon.json` —— 一个**本机任意进程都能写**的文件。pid 复用（旧 pid 已被
+ * 无关进程占用）或该文件被篡改，都会让"回收陈旧 daemon"变成"杀掉别人的进程"。
+ * `SECURITY.md` 的威胁模型明确把"同机其他进程"算进攻击面，所以这里必须校验身份。
+ *
+ * 匹配入口脚本名而非完整路径：扩展升级后目录名会变（`…-0.7.0` → `…-0.8.0`），
+ * 而"陈旧 daemon"恰恰就是那种跑在旧目录里的进程 —— 只比完整路径会漏掉它。
+ * 配合"pid 取自我们自己写的端口文件"这一前提，`daemon/index.js` 已足以排除无关进程。
+ */
+export function isDshDaemonCommandLine(cmdline: string | undefined, extensionPath: string): boolean {
+  if (!cmdline) return false;
+  const norm = cmdline.replace(/\\/g, '/').toLowerCase();
+  const ext = extensionPath.replace(/\\/g, '/').toLowerCase().replace(/\/+$/, '');
+  if (ext && norm.includes(`${ext}/out/daemon/index.js`)) return true;
+  return norm.includes('daemon/index.js');
+}
 
 export class DaemonManager {
   readonly client = new DshClient({ url: '', token: '' });
@@ -234,6 +349,10 @@ export class DaemonManager {
           provider: cfg.get<string>('model.provider', 'auto') as 'openai' | 'anthropic' | 'auto',
           // P0-3 空闲超时：秒 -> 毫秒；0 透传为"关闭"，daemon 侧据此不再兜底中断
           idleTimeoutMs: Math.round(cfg.get<number>('model.idleTimeoutSeconds', 60) * 1000),
+          // Agent 循环预算（P2-2）：这两个值此前只有 daemon 侧读得到 —— 扩展不下发、设置里也没有，
+          // 于是"最多 8 轮工具 / 48K 上下文"用户永远改不动，而 CHANGELOG 却写着"可配"。
+          maxToolRounds: cfg.get<number>('agent.maxToolRounds', DEFAULT_MAX_TOOL_ROUNDS),
+          maxContextTokens: cfg.get<number>('agent.maxContextTokens', DEFAULT_MAX_CONTEXT_TOKENS),
         },
         capabilities: {
           allowedTools: cfg.get<string[]>('capabilities.allowedTools', []),
@@ -449,14 +568,20 @@ export class DaemonManager {
     workspaceRoot: string
   ): Promise<{ port: number; token: string }> {
     const portFile = path.join(workspaceRoot, PORT_FILE_REL);
+    // 三处都必须是 replaceAll：同一占位符可能在模板里出现多次（如既给 --port-file 又给日志路径），
+    // 而 `String.replace(string, …)` **只替换第一处**，剩下的会以字面量 `{token}` 进入 argv。
+    // 替换值用函数形式（而非字符串）：`replaceAll` 对字符串替换值会解释 `$&`/`$1` 这类模式，
+    // 路径或 token 里一旦出现 `$` 就会被静默改写。
+    //
+    // 路径用**普通引号**包而非 `JSON.stringify`：后者会把 `\` 转义成 `\\`，而 splitCommandLine
+    // 刻意不把反斜杠当转义符（Windows 路径里它是分隔符），转义码会原样留在参数里。
+    const quote = (s: string) => `"${s}"`;
     const cmd = template
-      .replace('{portFile}', JSON.stringify(portFile))
-      .replace('{workspace}', JSON.stringify(workspaceRoot))
-      .replace('{token}', token);
-    // 简单拆分：第一个空格前为可执行文件，其余为参数
-    const idx = cmd.indexOf(' ');
-    const exe = idx === -1 ? cmd : cmd.slice(0, idx);
-    const args = idx === -1 ? [] : cmd.slice(idx + 1).split(/\s+/).filter(Boolean);
+      .replaceAll('{portFile}', () => quote(portFile))
+      .replaceAll('{workspace}', () => quote(workspaceRoot))
+      .replaceAll('{token}', () => token);
+    const [exe, ...args] = splitCommandLine(cmd);
+    if (!exe) throw new Error('dsh.daemon.command 未解析出可执行文件（检查该配置是否为空）');
     return await new Promise<{ port: number; token: string }>((resolve, reject) => {
       const child = cp.spawn(exe, args, {
         env: { ...process.env, DSH_DAEMON_TOKEN: token },
@@ -526,12 +651,31 @@ export class DaemonManager {
     this.client.close(); // status 已是 starting，onClose 不会触发重连
 
     if (pid) {
+      // 身份校验（失败关闭）：pid 取自 `.dsh/daemon.json`，而这个文件本机任意进程都能写 ——
+      // pid 复用或文件被篡改时，无条件 kill 会杀掉无关进程。核对命令行里确有 dsh daemon 的
+      // 入口脚本才动手；读不到命令行（探针不可用/权限不足）同样按"身份不明"处理，宁可不杀。
+      // 不杀的代价很小：端口文件随即被删除，新的 daemon 会在新端口上照常拉起，
+      // 只是那个旧进程变成孤儿（会随其自身空闲逻辑退出），远比误杀别人的进程可接受。
+      const probe = this.opts.readProcessCommandLine ?? readProcessCommandLine;
+      let cmdline: string | undefined;
       try {
-        // Windows 下 process.kill 直接终止进程（无优雅信号）
-        process.kill(pid);
-        logger.info(`已结束陈旧 daemon 进程 pid=${pid}`);
-      } catch (e) {
-        logger.warn(`结束陈旧 daemon 失败（可能已退出）: ${e instanceof Error ? e.message : String(e)}`);
+        cmdline = probe(pid);
+      } catch {
+        cmdline = undefined;
+      }
+      if (!isDshDaemonCommandLine(cmdline, this.opts.extensionPath)) {
+        logger.warn(
+          `跳过回收 pid=${pid}：无法确认为 dsh daemon 进程` +
+            (cmdline ? `（实际命令行：${cmdline.slice(0, 200)}）` : '（读不到该进程的命令行）')
+        );
+      } else {
+        try {
+          // Windows 下 process.kill 直接终止进程（无优雅信号）
+          process.kill(pid);
+          logger.info(`已结束陈旧 daemon 进程 pid=${pid}`);
+        } catch (e) {
+          logger.warn(`结束陈旧 daemon 失败（可能已退出）: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     }
     try {

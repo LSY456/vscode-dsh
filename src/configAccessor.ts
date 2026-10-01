@@ -13,6 +13,8 @@
  * 依赖（SecretStore / ConfigSectionLike）以接口注入，便于用内存假体做
  * 确定性测试，不依赖 vscode 运行时。
  */
+import { DEFAULT_MAX_CONTEXT_TOKENS, DEFAULT_MAX_TOOL_ROUNDS } from '../shared/protocol';
+
 export const API_KEY_SECRET = 'dsh.apiKey';
 
 /** 用 PromiseLike 而非 Promise：兼容 vscode.Thenable 返回值 */
@@ -64,12 +66,23 @@ export class ConfigAccessor {
   }
 
   /** 面板可编辑的普通配置项（不含凭据项）。 */
-  getPanelConfig(): { baseURL: string; model: string; preset: string; provider: string } {
+  getPanelConfig(): {
+    baseURL: string;
+    model: string;
+    preset: string;
+    provider: string;
+    maxToolRounds: number;
+    maxContextTokens: number;
+  } {
     return {
       baseURL: this.config.get('model.baseURL', ''),
       model: this.config.get('model.model', ''),
       preset: this.config.get('preset', 'default'),
       provider: this.config.get('model.provider', 'auto'),
+      // Agent 循环预算：此前只有 daemon 侧读得到、扩展从不下发，用户改不到（死配置）。
+      // 缺省值与协议共用，避免两侧各写一份而漂移。
+      maxToolRounds: this.config.get('agent.maxToolRounds', DEFAULT_MAX_TOOL_ROUNDS),
+      maxContextTokens: this.config.get('agent.maxContextTokens', DEFAULT_MAX_CONTEXT_TOKENS),
     };
   }
 
@@ -79,10 +92,34 @@ export class ConfigAccessor {
     model?: string;
     preset?: string;
     provider?: string;
+    maxToolRounds?: number;
+    maxContextTokens?: number;
   }): Promise<void> {
     if (values.baseURL !== undefined) await this.config.update('model.baseURL', values.baseURL || '');
     if (values.model !== undefined) await this.config.update('model.model', values.model || '');
     if (values.preset !== undefined) await this.config.update('preset', values.preset || 'default');
     if (values.provider !== undefined) await this.config.update('model.provider', values.provider || 'auto');
+    if (values.maxToolRounds !== undefined) {
+      await this.config.update('agent.maxToolRounds', clampInt(values.maxToolRounds, 1, 50, DEFAULT_MAX_TOOL_ROUNDS));
+    }
+    if (values.maxContextTokens !== undefined) {
+      await this.config.update(
+        'agent.maxContextTokens',
+        clampInt(values.maxContextTokens, 4_000, 1_000_000, DEFAULT_MAX_CONTEXT_TOKENS)
+      );
+    }
   }
+}
+
+/**
+ * 收敛面板提交的数值：非数字回落到缺省，越界钳制到 [min, max]。
+ *
+ * 为什么要在写入侧钳制而不只靠 `minimum`/`maximum` 声明：面板输入框可以被绕过
+ * （浏览器开发者工具改 value 后照样提交），而这两个值直接决定"一轮能跑多少工具、上下文多大"，
+ * 写进配置后会被 daemon 无条件采用。
+ */
+function clampInt(value: number, min: number, max: number, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
 }

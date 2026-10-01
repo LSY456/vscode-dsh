@@ -368,6 +368,9 @@ const settingsDom = await renderScenario(({ emitRaw }) => {
         model: 'deepseek-flash',
         preset: 'default',
         provider: 'auto',
+        // Agent 预算（此前的"死配置"）：面板里可改、可留空，留空即不修改
+        maxToolRounds: 8,
+        maxContextTokens: 49152,
       },
       hasApiKey: true,
       models: [

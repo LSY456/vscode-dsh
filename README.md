@@ -102,7 +102,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test                    # 单元测试（vitest，489 用例）
+npm test                    # 单元测试（vitest，533 用例）
 npm run smoke               # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemon 跑通同一份协议
                             #（缺 Python 3 时优雅跳过；`npm run smoke:protocol -- --require` 则判失败）
@@ -144,6 +144,8 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
 | `dsh.model.model` | `deepseek-flash` | 模型名。建议在侧边栏「模型设置」里从下拉选择（列表自动跟随 DeepSeek 官方更新） |
 | `dsh.model.idleTimeoutSeconds` | `60` | 模型请求空闲超时秒数（0–1800，0 = 关闭）；距上一个流式增量超时即中断，防会话永久挂起 |
+| `dsh.agent.maxToolRounds` | `8` | 单轮会话最多工具调用轮次（1–50）；跑满后强制收束（`requestFinalAnswer`），不带工具再问一次给出正文 |
+| `dsh.agent.maxContextTokens` | `49152` | 上下文预算 token 数（4000–1000000）；超出后按滑动窗口丢弃最旧的工具轮次（保留系统提示与用户原始消息） |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
 | `dsh.context.maxFileBytes` | `200000` | 附件内联内容阈值；超出改为 `contentOmitted` 按需 `file.read` |
 | `dsh.diff.autoOpen` | `true` | 补丁到达时自动打开 Diff 视图 |
@@ -218,7 +220,12 @@ vscode-dsh/
 - **`.dsh/` 自守（P0-3）**：首次创建 `.dsh/` 时自动写入 `.gitignore`（内容 `*`）—— 目录里是对话全文
   （`history.json`）、工具输入输出（`trajectory/*.jsonl`）、日志与信任规则，不该出现在你的 `git status`
   里，更不该被 `git add -A` 带进仓库。已存在的 `.gitignore` 不会被覆盖。
-- **端口**：daemon 仅监听 `127.0.0.1` 随机端口；端口经 stdout/端口文件上报，不暴露公网。
+- **端口**：daemon 仅监听 `127.0.0.1` 随机端口；端口经 stdout/端口文件上报，不暴露公网；
+  对非 WebSocket 升级请求返回 **404 空响应**（不回 426，那等于告诉探测者"这里有个 WS 端点"）。
+- **回收陈旧 daemon 前核对进程身份**：pid 取自 `<workspace>/.dsh/daemon.json` —— 一个本机任意进程
+  都能写的文件。pid 复用或文件被篡改时，无条件 `process.kill` 就是**杀别人的进程**。现在先读该进程的
+  命令行，确认它确实是本扩展拉起的 daemon 入口脚本才动手；读不到命令行（权限不足 / 探针不可用）
+  同样按"身份不明"处理 —— **失败关闭，宁可不杀**（代价只是留一个会自行退出的孤儿进程）。
 - **一次性 Token**：扩展生成 24 字节随机 token，经环境变量传给 daemon 子进程；WS 打开握手必须
   携带 `Authorization: Bearer <token>`；拒绝任何带浏览器 `Origin` 的连接（防跨站 WebSocket 劫持）。
 - **能力分级**：握手时声明 `allowedTools / allowedDirs / maxConcurrency`，越权工具直接禁用
@@ -238,7 +245,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，489 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，533 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
   Webview Markdown 渲染与净化（XSS 安全）、以及面板 DOM 契约（jsdom 载入真实 `media/webview.html`）。
@@ -298,7 +305,7 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
 - [x] **P0 一致性加固**：脏文档一致性（未保存缓冲区优先读取 + 补丁改走编辑器，避免覆盖用户编辑）、
       补丁乐观并发校验（防静默覆盖并发修改）、取消可中断在途模型请求 + 模型请求空闲超时、
       能力/运行时配置与脏文档覆盖层下沉到**连接**作用域（多窗口复用 daemon 互不污染）
-- [x] **P0 工程质量**：vitest 单元测试（489 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **P0 工程质量**：vitest 单元测试（533 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
 - [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
@@ -330,6 +337,15 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
       把"后端可换"从文档承诺变成可执行断言；mock 关键字教学移出主路径（见 [docs/mock-agent.md](docs/mock-agent.md)）
 - [x] **UI 缺陷修复**：`[hidden]` 属性被 `.sheet` / `.pending-bar` 自带的 `display: flex` 覆盖
       （作者样式优先级高于 UA 样式表），导致覆盖式面板与待办条可能常显；补全局 `[hidden]` 兜底规则
+- [x] **健壮性加固（P1）**：目录遍历加预算（条目/深度/墙钟三道上限 + realpath 去重断环）——
+      此前大仓库上 grep 一次就会占满事件循环，心跳发不出去，用户看到的是"连接断开"而非"搜索太慢"，
+      且 symlink 环会让递归永不终止；超限时结果带 `walkExhausted`，把"没搜完"与"确实无匹配"分开；
+      `recycleStaleDaemon` **kill 前先核对进程身份**（pid 取自本机任意进程可写的 `.dsh/daemon.json`，
+      无条件 kill 会误杀无关进程，现读不到命令行即放弃 kill）；外部 daemon 启动命令改引号感知解析
+      （反斜杠不当转义符，Windows 路径不再被吃掉一层目录）；daemon 的 HTTP 端点对非升级请求返回 404 空体
+      （不再回带 `Upgrade` 的 426 变相指路）；空闲会话按 TTL/LRU 回收（`running`/`pending_*` 永不回收）、
+      过期挂起项在下次登记时清扫；迹线步号改为**会话内**递增；webview 遇未知协议事件或渲染抛错上报诊断
+      （不再静默成"界面没反应"），新一轮开始前强制收尾上一轮（缺 `message.done` 时回答不再续写进旧气泡）
 
 ### 待办
 - [ ] P4a：Remote-SSH / WSL / Containers 场景实测（核心链路已由 CI Linux 拓扑覆盖，待真实环境确认 drvfs 路径 / remote server 环境 / 容器网络等边界）
