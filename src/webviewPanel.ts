@@ -129,7 +129,10 @@ interface FromWebview {
     | 'trust.list'
     | 'trust.clear'
     | 'trust.manage'
-    | 'balance.refresh';
+    | 'balance.refresh'
+    | 'ui.diag';
+  /** webview 侧诊断（事件渲染抛错 / 未知事件）：只落 OutputChannel，不改变产品行为 */
+  diag?: { level: 'warn' | 'debug'; method?: string; message?: string };
   prompt?: string;
   approvalId?: string;
   approved?: boolean;
@@ -138,7 +141,16 @@ interface FromWebview {
   patchId?: string;
   sessionId?: string;
   /** 设置面板提交项；apiKey 留空表示不修改 */
-  settings?: { apiKey?: string; model?: string; baseURL?: string; preset?: string; provider?: string };
+  settings?: {
+    apiKey?: string;
+    model?: string;
+    baseURL?: string;
+    preset?: string;
+    provider?: string;
+    /** Agent 循环预算（P2-2）：面板里的两个数字输入；区间在 ConfigAccessor 侧收敛 */
+    maxToolRounds?: number;
+    maxContextTokens?: number;
+  };
 }
 
 export class WebviewPanelHost {
@@ -747,6 +759,13 @@ export class WebviewPanelHost {
       case 'balance.refresh':
         // 点余额 chip：立刻重取（不撤下当前数字 —— 刷新失败时旧的已知值比一片空白有用）
         void this.refreshBalance(true);
+        return;
+      case 'ui.diag':
+        // 前端渲染诊断（单条事件抛错 / 收到未知事件）。只记日志：
+        // 它的价值在于"把静默失败变成可查的线索"，不该反过来打扰用户。
+        logger[msg.diag?.level === 'debug' ? 'debug' : 'warn'](
+          `[webview] ${msg.diag?.method ?? '(unknown)'}: ${msg.diag?.message ?? '未知事件'}`
+        );
         return;
       case 'daemon.restart':
         await this.daemon.restart();

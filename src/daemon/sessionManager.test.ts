@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   clampApprovalTtlMs,
   DEFAULT_APPROVAL_TTL_MS,
+  DEFAULT_IDLE_SESSION_TTL_MS,
+  DEFAULT_MAX_IDLE_SESSIONS,
   MAX_APPROVAL_TTL_MS,
   MIN_APPROVAL_TTL_MS,
   Session,
@@ -294,5 +296,127 @@ describe('SessionManager 注册表', () => {
     sm.delete(a.id);
     expect(sm.get(a.id)).toBeUndefined();
     expect(sm.runningCount()).toBe(1);
+  });
+});
+
+describe('Session.nextStep：步号是**会话内**单调（P1-8）', () => {
+  it('同一会话内 1、2、3 递增', () => {
+    const s = new Session('s1', '/ws');
+    expect(s.nextStep()).toBe(1);
+    expect(s.nextStep()).toBe(2);
+    expect(s.nextStep()).toBe(3);
+  });
+
+  it('多会话并发时各自从 1 开始，互不干扰（不再全局漂移）', () => {
+    const a = new Session('a', '/ws');
+    const b = new Session('b', '/ws');
+    expect(a.nextStep()).toBe(1);
+    expect(a.nextStep()).toBe(2);
+    expect(b.nextStep()).toBe(1);
+    expect(a.nextStep()).toBe(3);
+  });
+});
+
+describe('挂起项清扫：只清已过期条目，语义窗口优先（P1-7）', () => {
+  it('到点未响应先保留（respond 报 expired），下一次登记时才被清掉', async () => {
+    const s = new Session('s1', '/ws');
+    s.begin();
+
+    // ① 语义窗口：到点后 respond 必须还能区分"你点晚了一步"，而不是 not_found
+    const p1 = s.registerApproval({ ...makeApprovalParams('ap1'), expiresAt: Date.now() + 20 }, 20);
+    expect(await p1).toBe(false);
+    expect(s.respondApproval('ap1', true)).toBe('expired');
+
+    // ② 清扫：又登记新条目时，同类型的**已过期**条目被顺手删掉（内存才真正有界）
+    const p2 = s.registerApproval({ ...makeApprovalParams('ap2'), expiresAt: Date.now() + 20 }, 20);
+    expect(await p2).toBe(false);
+    s.registerApproval(makeApprovalParams('ap3')); // 这一刻触发清扫
+    expect(s.respondApproval('ap2', true)).toBe('not_found');
+
+    expect(s.respondApproval('ap3', false)).toBe('ok');
+  });
+
+  it('未到期的挂起项不受清扫影响', () => {
+    const s = new Session('s1', '/ws');
+    const p1 = s.registerApproval(makeApprovalParams('ap1'));
+    s.registerApproval(makeApprovalParams('ap2')); // 触发一次清扫
+    expect(s.respondApproval('ap1', true)).toBe('ok');
+    expect(s.respondApproval('ap2', true)).toBe('ok');
+    void p1;
+  });
+});
+
+describe('SessionManager.prune：空闲会话回收（P1-1 内存有界）', () => {
+  const TTL = 1000;
+
+  it('缺省保留窗口与上限是"够用又不无界"的两条线', () => {
+    expect(DEFAULT_IDLE_SESSION_TTL_MS).toBe(10 * 60_000);
+    expect(DEFAULT_MAX_IDLE_SESSIONS).toBe(50);
+  });
+
+  it('空闲超时被回收，窗口内的保留', () => {
+    const sm = new SessionManager('/ws', { idleTtlMs: TTL, maxIdle: 0 });
+    // 先建满再改时间戳：create() 自己会调 prune()，边建边改会让内部回收提前动手
+    const old = sm.create('old');
+    const fresh = sm.create('fresh');
+    old.lastActivityAt = 0;
+    fresh.lastActivityAt = TTL;
+
+    const r = sm.prune(TTL + 1);
+    expect(r.expired).toEqual(['old']);
+    expect(sm.get('old')).toBeUndefined();
+    expect(sm.get('fresh')).toBe(fresh);
+    expect(sm.size()).toBe(1);
+  });
+
+  it('running / pending_* 会话永不回收（有在途调用或待用户决策）', () => {
+    const sm = new SessionManager('/ws', { idleTtlMs: TTL, maxIdle: 0 });
+    const running = sm.create('running');
+    running.begin();
+    const pending = sm.create('pending');
+    pending.begin();
+    pending.registerApproval(makeApprovalParams('ap1'));
+    const idle = sm.create('idle');
+
+    running.lastActivityAt = 0;
+    pending.lastActivityAt = 0;
+    idle.lastActivityAt = 0;
+
+    const r = sm.prune(TTL + 1);
+    expect(r.expired).toEqual(['idle']);
+    expect(sm.get('running')).toBe(running);
+    expect(sm.get('pending')).toBe(pending);
+  });
+
+  it('数量超上限时按最久未活动 LRU 淘汰', () => {
+    const sm = new SessionManager('/ws', { idleTtlMs: 0, maxIdle: 2 });
+    // 建的时候先保持 running：否则第 3 次 create() 的内部 prune 会提前淘汰掉一个
+    const mk = (id: string, t: number) => {
+      const s = sm.create(id);
+      s.begin();
+      s.lastActivityAt = t;
+      return s;
+    };
+    const a = mk('a', 100);
+    const b = mk('b', 200);
+    const c = mk('c', 300);
+    a.end();
+    b.end();
+    c.end();
+
+    const r = sm.prune(1000);
+    expect(r.evicted).toEqual(['a']); // 最久未活动者
+    expect(sm.size()).toBe(2);
+    expect(sm.get('a')).toBeUndefined();
+    expect(sm.get('b')).toBe(b);
+    expect(sm.get('c')).toBe(c);
+  });
+
+  it('idleTtlMs / maxIdle 为 0 表示该维度关闭（不误伤）', () => {
+    const sm = new SessionManager('/ws', { idleTtlMs: 0, maxIdle: 0 });
+    const s = sm.create('s');
+    s.lastActivityAt = 0;
+    expect(sm.prune(999_999_999)).toEqual({ expired: [], evicted: [] });
+    expect(sm.get('s')).toBe(s);
   });
 });

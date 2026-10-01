@@ -41,6 +41,14 @@ export interface AgentContext {
   ): Promise<boolean>;
   isCanceled(): boolean;
   /**
+   * 迹线步号（P1-8）。`PROTOCOL.md` 把 `step` 定义为**会话内**单调递增，
+   * 而它此前是 realAgent 的模块级全局变量 —— 多会话并发时步号互相穿插，
+   * UI 的「执行迹线」看起来就是跳号、不连续。
+   *
+   * 由 server 绑定到会话计数器；未提供（测试里的裸 context）时 agent 退化为进程内计数。
+   */
+  nextStep?(): number;
+  /**
    * P0-3 取消订阅：注册一个「会话被取消」回调，由 server 在 `session.cancel()` 时同步触发。
    *
    * 仅轮询 `isCanceled()` 不足以中断**在途**的网络请求——若模型端不吐增量（首字节未到或

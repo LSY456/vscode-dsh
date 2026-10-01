@@ -52,6 +52,8 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   const inpBaseURL = $('inp-baseurl');
   const inpProvider = $('inp-provider');
   const inpPreset = $('inp-preset');
+  const inpMaxRounds = $('inp-max-rounds');
+  const inpMaxContext = $('inp-max-context');
   const btnSettingsRestart = $('btn-settings-restart');
   const btnSettingsClose = $('btn-settings-close');
   const settingsMsg = $('settings-msg');
@@ -697,6 +699,15 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   }
 
   function resetTurn() {
+    // 先收尾上一轮，且必须**放在第一行**。
+    //
+    // 正常路径下 `message.done` 已经调过 finishAssistant（它自身幂等，这里等于空操作）；
+    // 真正的目标是异常路径：上一轮若既没收到 `message.done`、也没收到 `session.ended`
+    // （daemon 在流式中崩溃、事件丢失、连接中断），`answerEl` 会一直挂着 ——
+    // 随后 `ensureAnswer()` 直接 early-return，**新一轮的回答就被续写进上一轮的气泡里**。
+    // 放在最前面，后面任何 early-return 都跳不过它。（finishReasoning/stopActivityTimer
+    // 与 finishAssistant 内部重复是有意的：不依赖它的实现细节。）
+    finishAssistant();
     finishReasoning();
     stopActivityTimer();
     activityEl = null;
@@ -1351,6 +1362,9 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     inpBaseURL.value = cfg.baseURL || '';
     inpProvider.value = cfg.provider || 'auto';
     inpPreset.value = cfg.preset || '';
+    // 数值字段：缺失时留空，**不要写 0** —— 输入框显示 "0" 会让用户以为上限就是 0。
+    inpMaxRounds.value = cfg.maxToolRounds == null ? '' : String(cfg.maxToolRounds);
+    inpMaxContext.value = cfg.maxContextTokens == null ? '' : String(cfg.maxContextTokens);
   }
 
   // ---- B1 信任记忆：设置面板中的免审批白名单管理
@@ -1375,6 +1389,20 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   // -------------------------------------------------------------------------
   // 事件分发（extension -> webview）
   // -------------------------------------------------------------------------
+
+  /**
+   * 前端渲染诊断上报（走扩展的日志通道）。
+   *
+   * 用途只有两个：某条事件渲染时抛错、或收到前端不认识的事件（协议多了新东西而前端没跟上）。
+   * 这两种情况此前都是**彻底静默**的 —— 界面上只表现为"没反应"，而没有任何线索能区分
+   * "协议漂移"与"UI 坏了"。只上报，不改任何产品行为，也不向用户弹窗。
+   */
+  function reportDiag(level, method, message) {
+    vscode.postMessage({
+      kind: 'ui.diag',
+      diag: { level, method: method ? String(method) : undefined, message: message ? String(message) : undefined },
+    });
+  }
 
   function handleEvent(method, params) {
     switch (method) {
@@ -1474,6 +1502,8 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
         addError(params.message);
         break;
       default:
+        // 未知事件不静默：协议新增了事件而前端没跟上时，这条是唯一的线索（debug 级，不打扰用户）
+        reportDiag('debug', method, '前端未实现的协议事件');
         break;
     }
   }
@@ -1496,7 +1526,14 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
         resetForSession(msg.sessionId, msg.reason);
         break;
       case 'event':
-        handleEvent(msg.method, msg.params);
+        // 单条事件抛错**绝不能静默吞掉**：此前异常直接冒泡出 message 回调，被浏览器丢掉，
+        // 表现是"某条事件之后界面就没反应了"——协议漂移被掩盖成"UI 坏了"，无从归因。
+        // 这里兜住并把方法名 + 错误回报扩展侧（落 OutputChannel），排障才有线索。
+        try {
+          handleEvent(msg.method, msg.params);
+        } catch (err) {
+          reportDiag('warn', msg.method, err && err.message ? String(err.message) : String(err));
+        }
         break;
       default:
         break;
@@ -1571,6 +1608,16 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     const baseURL = inpBaseURL.value.trim();
     const provider = inpProvider.value.trim() || 'auto';
     const preset = inpPreset.value.trim();
+    // 数值字段：**留空 = 不修改**（与 apiKey 同理）。不要用 Number('')（=0）提交，
+    // 那会把"没填"变成"把上限设成 0"；非数字同样按未填写处理，交给扩展侧的缺省。
+    const numOrUndefined = (raw) => {
+      const text = String(raw == null ? '' : raw).trim();
+      if (!text) return undefined;
+      const n = Number(text);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    const maxToolRounds = numOrUndefined(inpMaxRounds.value);
+    const maxContextTokens = numOrUndefined(inpMaxContext.value);
     // apiKey 留空表示不修改（不上报空串，避免误删已存凭据）；
     // 模型名同理：下拉还没填充/异常为空时，宁可什么都不提交，也不要把已配好的模型名清空。
     vscode.postMessage({
@@ -1581,6 +1628,8 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
         baseURL,
         provider,
         preset,
+        ...(maxToolRounds !== undefined ? { maxToolRounds } : {}),
+        ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
       },
     });
     settingsMsg.textContent = '保存中…';

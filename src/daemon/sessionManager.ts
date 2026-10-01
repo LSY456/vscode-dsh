@@ -79,6 +79,18 @@ export class Session {
   /** P0-3 取消订阅者：Agent 注册的在途请求中断回调（如 abort 在途 fetch） */
   private cancelHooks = new Set<() => void>();
 
+  /**
+   * 最近一次活动时刻（空闲回收依据）。
+   *
+   * 只在 `emit()` 里推进：一次运行的每一步都会产生事件，收尾必然发出 `session.ended`，
+   * 所以"最后一个事件的时间"就等于"这个会话最后一次真正干活的时间"。
+   * 挂起中的会话（等审批）虽然可能长时间没有新事件，但它 state ≠ idle，本就不参与回收。
+   */
+  lastActivityAt = Date.now();
+
+  /** 迹线步号序列（`nextStep` 自增）。随会话一起被回收，正是"会话内递增"想要的语义。 */
+  private stepSeq = 0;
+
   /** 事件投递钩子：由 server 绑定到当前连接的 ws；断线时不投递但缓冲仍记录 */
   deliver: (method: string, params: unknown) => void = () => {};
 
@@ -91,6 +103,7 @@ export class Session {
   // ------------------------------------------------------------------ 事件
 
   emit(method: string, params: unknown): void {
+    this.lastActivityAt = Date.now();
     this.buffer.push({ method, params, ts: Date.now() });
     if (this.buffer.length > this.maxBuffer) {
       this.buffer.splice(0, this.buffer.length - this.maxBuffer);
@@ -195,6 +208,11 @@ export class Session {
     return this.canceled;
   }
 
+  /** 取下一个迹线步号。**会话内**单调递增（PROTOCOL §6），多会话并发时互不干扰。 */
+  nextStep(): number {
+    return ++this.stepSeq;
+  }
+
   // ------------------------------------------------------------------ 审批
 
   registerApproval(params: EventApprovalRequest, ttlMs = DEFAULT_APPROVAL_TTL_MS): Promise<boolean> {
@@ -283,6 +301,17 @@ export class Session {
     id: string,
     expiresAt: number
   ): Promise<boolean> {
+    const map = kind === 'approval' ? this.pendingApproval : this.pendingPatch;
+    // 每次登记新条目时顺手扫掉同类型的**已过期**条目（P1-7 的最小修法）。
+    //
+    // 不变量：到点未响应的条目要保留一小会儿 —— 此时 `respond` 必须还能回 `expired`（而不是
+    // `not_found`），前端才知道自己点晚了一步。清扫只发生在"又登记了新条目"这一刻，
+    // 上面那个语义窗口因此完整保留；而被清掉的条目此后 respond 得到 `not_found`，同样可解释。
+    //
+    // 刻意**不加第二个定时器**做延迟清理：一个悬着的 setTimeout 会把测试进程拖住
+    // （真实定时器环境下 vitest 会因此迟迟不退出），而不清理的代价只是几十字节。
+    // 真正让内存有界的是会话级回收（见 SessionManager.prune），不是这里。
+    this.sweepExpiredPending(map);
     return new Promise<boolean>((resolve) => {
       const entry: PendingItem = {
         id,
@@ -299,9 +328,15 @@ export class Session {
           }
         }, Math.max(0, expiresAt - Date.now())),
       };
-      const map = kind === 'approval' ? this.pendingApproval : this.pendingPatch;
       map.set(id, entry);
     });
+  }
+
+  /** 清掉同类型中已过期（定时器已触发并解析）的挂起项；未到期的原样保留。 */
+  private sweepExpiredPending(map: Map<string, PendingItem>): void {
+    for (const [key, item] of [...map]) {
+      if (item.expired) map.delete(key);
+    }
   }
 
   private respondPending(
@@ -335,16 +370,42 @@ export class Session {
   }
 }
 
+/**
+ * 空闲会话保留窗口（P1-1）。
+ *
+ * 为什么不能"会话一结束就删"：断线重连要靠 `session.resume` 拿回事件缓冲与挂起快照，
+ * 窗口重载 / 网络抖动 / 短暂合盖都可能发生在这个窗口内。10 分钟足够覆盖这些场景，
+ * 又不至于让内存无界增长。会话历史另有落盘（`.dsh/history.json`），回收的只是内存态。
+ */
+export const DEFAULT_IDLE_SESSION_TTL_MS = 10 * 60_000;
+
+/** 空闲会话数量上限：超出时按闲置时间从久到近淘汰。 */
+export const DEFAULT_MAX_IDLE_SESSIONS = 50;
+
+export interface PruneResult {
+  /** 因空闲超时被回收的会话 id */
+  expired: string[];
+  /** 因超出数量上限被 LRU 淘汰的会话 id */
+  evicted: string[];
+}
+
 /** 会话注册表：id -> Session。 */
 export class SessionManager {
   private sessions = new Map<string, Session>();
 
-  constructor(private readonly defaultWorkspaceRoot: string) {}
+  constructor(
+    private readonly defaultWorkspaceRoot: string,
+    private readonly retention: { idleTtlMs?: number; maxIdle?: number } = {}
+  ) {}
 
   create(id?: string): Session {
     const sid = id ?? `sess_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     const session = new Session(sid, this.defaultWorkspaceRoot);
     this.sessions.set(sid, session);
+    // 会话只增不减是"内存单调增长"的根源，而**新建正发生在增长的那一刻** ——
+    // 所以把回收挂在这里：不需要额外定时器（定时器要管生命周期、还会拖住测试进程），
+    // 也不依赖调用方记得调 prune。
+    this.prune();
     return session;
   }
 
@@ -354,6 +415,54 @@ export class SessionManager {
 
   delete(id: string): void {
     this.sessions.delete(id);
+  }
+
+  /**
+   * 回收空闲会话（P1-1）。
+   *
+   * 背景：`Session` 每个常驻 ≤2000 条事件缓冲 + patchContent 快照，而 `delete()` 此前
+   * **从未被调用过**，daemon 跨天长跑时内存单调增长。
+   *
+   * 两条**永不回收**的红线：`running` 与 `pending_*`（等审批 / 等补丁）的会话 ——
+   * 它们有在途工具调用或待用户决策的挂起项，删掉就是丢用户的操作。故只淘汰 `idle` 的。
+   *
+   * @param now 注入"当前时刻"便于单测直接构造时间差，不必 sleep
+   * @returns 被回收的会话 id（供日志与断言）
+   */
+  prune(now = Date.now()): PruneResult {
+    const ttl = this.retention.idleTtlMs ?? DEFAULT_IDLE_SESSION_TTL_MS;
+    const maxIdle = this.retention.maxIdle ?? DEFAULT_MAX_IDLE_SESSIONS;
+
+    const expired: string[] = [];
+    if (ttl > 0) {
+      for (const s of [...this.sessions.values()]) {
+        if (s.state !== 'idle') continue;
+        if (now - s.lastActivityAt > ttl) {
+          this.sessions.delete(s.id);
+          expired.push(s.id);
+        }
+      }
+    }
+
+    const evicted: string[] = [];
+    if (maxIdle > 0) {
+      const idle = [...this.sessions.values()]
+        .filter((s) => s.state === 'idle')
+        .sort((a, b) => a.lastActivityAt - b.lastActivityAt); // 最久未活动的排最前
+      while (idle.length > maxIdle) {
+        const victim = idle.shift();
+        if (!victim) break;
+        this.sessions.delete(victim.id);
+        evicted.push(victim.id);
+      }
+    }
+
+    return { expired, evicted };
+  }
+
+  /** 当前会话总数（回收效果的观测点）。 */
+  size(): number {
+    return this.sessions.size;
   }
 
   /** 当前处于运行/挂起状态的会话数（maxConcurrency 判定用）。 */

@@ -80,6 +80,9 @@ export interface RuntimeConfig {
   provider: 'openai' | 'anthropic' | 'auto';
   /** 模型请求空闲超时（ms，P0-3）；undefined = 用模型层缺省（60s）；<= 0 关闭 */
   idleTimeoutMs?: number;
+  /** Agent 循环预算（P2-2）：工具调用轮数上限 / 上下文 token 预算；undefined = 用协议缺省 */
+  maxToolRounds?: number;
+  maxContextTokens?: number;
 }
 
 /**
@@ -163,8 +166,15 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
   }
 
   const server = http.createServer((_req, res) => {
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('dsh daemon (reference implementation)\n');
+    // 非升级（非 WebSocket）请求一律拒绝，且**不回任何可识别内容**。
+    //
+    // 此前这里对任意 GET 都回 `200 dsh daemon (reference implementation)` —— 等于给了本机
+    // 任意进程一个"这个端口上跑着 dsh daemon、版本几何"的确认信号（端口探测/指纹识别）。
+    // 该端口只为 WS 升级存在，没有任何合法的普通 HTTP 用途，故直接 404 + 空正文：
+    // 用 404 而非 426 是有意的 —— 426 会带上 `Upgrade: websocket`，仍然确认了"这是个 WS 端点"，
+    // 而这里要的正是"什么都别泄露"。
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', connection: 'close' });
+    res.end();
   });
 
   const wss = new WebSocketServer({
@@ -326,6 +336,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           if (p.model?.agent) rt.agent = p.model.agent;
           if (p.model?.provider) rt.provider = p.model.provider;
           if (p.model?.idleTimeoutMs !== undefined) rt.idleTimeoutMs = p.model.idleTimeoutMs;
+          // Agent 循环预算（P2-2）：区间合法性在扩展侧写入配置时就已收敛，这里只做透传
+          if (p.model?.maxToolRounds !== undefined) rt.maxToolRounds = p.model.maxToolRounds;
+          if (p.model?.maxContextTokens !== undefined) rt.maxContextTokens = p.model.maxContextTokens;
           const session = sessions.create();
           attach(conn, session);
           // 显式回报「为什么是 mock」，让前端能提示"演示模式"而不是静默降级
@@ -406,6 +419,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               return session.registerPatch(snapshot as EventFilePatchPending, conn.approvalTtlMs);
             },
             isCanceled: () => session.isCanceled(),
+            // P1-8：步号来自会话而不是模块级全局，多会话并发时迹线步号才连续
+            nextStep: () => session.nextStep(),
             // P0-3：把「会话被取消」同步转达给 Agent，使在途模型请求能被立即 abort，
             // 而不是等下一个 onChunk 才察觉（模型静默时 onChunk 永不触发）。
             onCancel: (fn) => session.onCancel(fn),
@@ -431,7 +446,15 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           const agentMode = resolveAgentMode(conn.runtime);
           if (agentMode === 'real') {
             const model = createModel(conn.runtime);
-            const agentConfig: RealAgentConfig = { model, sandbox, idleTimeoutMs: conn.runtime.idleTimeoutMs };
+            const agentConfig: RealAgentConfig = {
+              model,
+              sandbox,
+              idleTimeoutMs: conn.runtime.idleTimeoutMs,
+              // P2-2：轮次与上下文预算来自连接级运行时配置（扩展经 initialize 下发）；
+              // 未配置时留 undefined，由 realAgent 用协议缺省兜底。
+              maxToolRounds: conn.runtime.maxToolRounds,
+              maxContextTokens: conn.runtime.maxContextTokens,
+            };
             void runRealAgent(ctx, p, agentConfig).finally(() => {
               session.end();
               // 会话结束时立即落盘轨迹缓冲（审计完整性，不等定时器）

@@ -150,11 +150,21 @@ export interface GrepMatch {
 export interface GrepResult {
   matches: GrepMatch[];
   truncated: boolean;
+  /**
+   * 遍历是否因预算（深度 / 条目 / 时间）提前中止。
+   *
+   * 与 `truncated` 分开表达的原因：`truncated` 只说明"结果被裁过"，而本字段说明**搜索本身没跑完** ——
+   * 此时"无匹配"是不可断言的结论。调用方必须据此换一套文案，否则模型会把"没搜完"读成
+   * "代码里没有这个符号"，接着反复换模式重试。
+   */
+  walkExhausted: boolean;
 }
 
 export interface GlobResult {
   files: string[];
   truncated: boolean;
+  /** 同 `GrepResult.walkExhausted`：遍历被预算截断时"无匹配文件"不可断言 */
+  walkExhausted: boolean;
 }
 
 const SKIP_DIRS = new Set(['.git', 'node_modules']);
@@ -195,11 +205,69 @@ function compilePattern(needle: string): RegExp | null {
 }
 
 /**
- * 递归遍历目录下所有文件，惰性产出绝对路径。
+ * 递归遍历的预算上限（P1-2 加固）。
+ *
+ * 为什么必须有预算：`walkFiles` 是**同步**递归，跑在 daemon 的事件循环上。此前它没有任何上限，
+ * 于是"在大仓库上 grep 一次"足以把事件循环占满 —— 心跳 ping 发不出去，客户端判定连接断开并重连，
+ * 用户看到的是"连接断开"，而不是"搜索太慢"，完全无法归因。工作区里若存在 symlink 环，
+ * 递归更是永不终止（`isDirectory()` 为真的链接目录会被反复跟随）。
+ *
+ * 三条上限分别挡住三种失控：条目数（宽而平的大仓库）、深度（深而窄的目录树）、
+ * 墙钟时间（单个超大目录）。超限即停止遍历并置 `exhausted`，调用方据此把 `truncated` 置真 ——
+ * **宁可给"结果不完整"的明确信号，也不要静默返回半份结果**（后者会被模型误读成"确实没有该符号"，
+ * 接着反复换模式重试，把工具预算耗光）。
+ */
+export interface WalkLimits {
+  /** 最大递归深度（搜索根为 0） */
+  maxDepth: number;
+  /** 单次遍历最多检查的目录项数 */
+  maxEntries: number;
+  /** 单次遍历的墙钟时间预算（毫秒） */
+  timeBudgetMs: number;
+}
+
+export const DEFAULT_WALK_LIMITS: WalkLimits = {
+  maxDepth: 24,
+  maxEntries: 30_000,
+  timeBudgetMs: 3_000,
+};
+
+/** 一次遍历的共享状态；调用方持有它，遍历结束后读 `exhausted` 判断是否被预算截断。 */
+export interface WalkState {
+  /** 已进入目录的 canonical（realpath）路径 —— 按它去重，切断 symlink 环 */
+  visited: Set<string>;
+  /** 已检查的目录项计数 */
+  entries: number;
+  /** 是否因深度 / 条目 / 时间上限提前中止 */
+  exhausted: boolean;
+  /** 墙钟截止时刻（由 createWalkState 按预算计算） */
+  deadline: number;
+}
+
+export function createWalkState(limits: WalkLimits = DEFAULT_WALK_LIMITS): WalkState {
+  return { visited: new Set(), entries: 0, exhausted: false, deadline: Date.now() + limits.timeBudgetMs };
+}
+
+/**
+ * 递归遍历目录下所有文件，惰性产出绝对路径；受 `WalkLimits` 预算约束。
+ *
  * 进入每个目录前做 realpath canonical 校验：Windows junction / 符号链接目录可能被 isDirectory()
  * 报告为 true，跟随会逃出搜索根 —— 与 paths.ts 同源的 canonical 护栏必须在此一并拦截。
+ * 同一个 canonical 目录只进入一次（`state.visited`），因此 symlink 环不会造成无限递归。
  */
-function* walkFiles(dir: string, rootCanon: string): Generator<string> {
+export function* walkFiles(
+  dir: string,
+  rootCanon: string,
+  limits: WalkLimits = DEFAULT_WALK_LIMITS,
+  state: WalkState = createWalkState(limits),
+  depth = 0
+): Generator<string> {
+  if (state.exhausted) return;
+  if (depth > limits.maxDepth || state.entries >= limits.maxEntries || Date.now() > state.deadline) {
+    state.exhausted = true;
+    return;
+  }
+
   let real: string;
   try {
     real = fs.realpathSync(dir);
@@ -207,6 +275,8 @@ function* walkFiles(dir: string, rootCanon: string): Generator<string> {
     return;
   }
   if (!isPathInside(rootCanon, real)) return; // 逃逸：拦截
+  if (state.visited.has(real)) return; // symlink 环 / 重复路径：同一个目录只进一次
+  state.visited.add(real);
 
   let entries: fs.Dirent[];
   try {
@@ -215,9 +285,14 @@ function* walkFiles(dir: string, rootCanon: string): Generator<string> {
     return;
   }
   for (const e of entries) {
+    if (state.entries >= limits.maxEntries || Date.now() > state.deadline) {
+      state.exhausted = true;
+      return;
+    }
+    state.entries++;
     if (SKIP_DIRS.has(e.name)) continue;
     const full = path.join(dir, e.name);
-    if (e.isDirectory()) yield* walkFiles(full, rootCanon);
+    if (e.isDirectory()) yield* walkFiles(full, rootCanon, limits, state, depth + 1);
     else if (e.isFile()) yield full;
   }
 }
@@ -267,7 +342,8 @@ export function grepFiles(
   const matches: GrepMatch[] = [];
   let truncated = false;
 
-  for (const file of walkFiles(base, base)) {
+  const walk = createWalkState();
+  for (const file of walkFiles(base, base, DEFAULT_WALK_LIMITS, walk)) {
     if (includeRx && !includeRx.test(path.basename(file))) continue;
     const lines = readLines(file);
     if (lines === null) continue;
@@ -282,7 +358,9 @@ export function grepFiles(
     }
     if (truncated) break;
   }
-  return { matches, truncated };
+  // 遍历被预算截断 → 结果不完整，必须让调用方（模型）看见，而不是静默给半份
+  if (walk.exhausted) truncated = true;
+  return { matches, truncated, walkExhausted: walk.exhausted };
 }
 
 /** 在指定目录（默认工作区根）递归匹配 basename 通配模式的文件，返回绝对路径列表。 */
@@ -300,7 +378,8 @@ export function globFiles(
   const files: string[] = [];
   let truncated = false;
 
-  for (const file of walkFiles(base, base)) {
+  const walk = createWalkState();
+  for (const file of walkFiles(base, base, DEFAULT_WALK_LIMITS, walk)) {
     if (!rx.test(path.basename(file))) continue;
     if (files.length >= maxResults) {
       truncated = true;
@@ -308,7 +387,9 @@ export function globFiles(
     }
     files.push(file);
   }
-  return { files, truncated };
+  // 与 grep 同理：被预算截断的遍历属于"结果不完整"，必须显式回报
+  if (walk.exhausted) truncated = true;
+  return { files, truncated, walkExhausted: walk.exhausted };
 }
 
 export function writeTextFile(root: string, allowedDirs: string[], filePath: string, content: string): void {

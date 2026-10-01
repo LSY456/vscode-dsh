@@ -234,6 +234,20 @@
           "maximum": 1800,
           "description": "模型请求空闲超时（秒）：距上一个流式增量超过该时长即中断本次请求，避免模型端静默时会话永久挂起；0 表示关闭。"
         },
+        "dsh.agent.maxToolRounds": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "工具调用轮数上限：一次对话里最多连续调用多少次工具。用尽后 Agent 会自动收束成一次「不能再调用工具」的最终回答。调大可处理更复杂的任务，但更耗 token。"
+        },
+        "dsh.agent.maxContextTokens": {
+          "type": "number",
+          "default": 49152,
+          "minimum": 4000,
+          "maximum": 1000000,
+          "description": "上下文 token 预算：发送前按此估算并裁剪历史，超出时整轮丢弃最旧的工具轮次。调小可省 token，调大能带上更长的上下文。"
+        },
         "dsh.context.gitStatus": {
           "type": "boolean",
           "default": true,

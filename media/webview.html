@@ -195,6 +195,14 @@
             <span>Agent 预设</span>
             <input id="inp-preset" placeholder="default" spellcheck="false" />
           </label>
+          <label class="settings-field">
+            <span>工具调用轮次上限 <em class="muted">（1–50；用尽后 Agent 收束成结论，不再调工具）</em></span>
+            <input id="inp-max-rounds" type="number" min="1" max="50" step="1" />
+          </label>
+          <label class="settings-field">
+            <span>上下文预算（token） <em class="muted">（4000–1000000；超出按整轮丢弃最旧的工具轮）</em></span>
+            <input id="inp-max-context" type="number" min="4000" max="1000000" step="1000" />
+          </label>
           <div class="settings-actions">
             <button type="submit" class="btn primary">保存</button>
             <button type="button" id="btn-settings-restart" class="btn" hidden>重启 daemon 生效</button>

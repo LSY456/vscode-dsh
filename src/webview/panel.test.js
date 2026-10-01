@@ -982,3 +982,148 @@ describe('状态行：账户余额 chip', () => {
     expect(chip().matches('#meta-bar > .meta-chip')).toBe(true);
   });
 });
+
+/**
+ * 新回合开始前必须强制收尾上一轮。
+ *
+ * 真实缺陷：上一轮若既没收到 `message.done`、也没收到 `session.ended`（daemon 在流式中崩溃、
+ * 事件丢失、连接中断），`answerEl` 会一直挂着；下一轮的 `ensureAnswer()` 直接 early-return，
+ * **新一轮的回答被续写进上一轮的气泡里** —— 用户看到的是"答案接在旧答案后面"。
+ */
+describe('回答流：新回合开始前强制收尾上一轮', () => {
+  it('上一轮缺失 message.done 时，新回答自成一条，不混进旧气泡', async () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_turn_guard', reason: 'new' });
+    expect(document.querySelectorAll('#messages .message').length).toBe(0);
+
+    emitEvent('message.delta', { delta: '第一轮的半截回答' });
+    expect(document.querySelectorAll('.turn.assistant .md.streaming').length).toBe(1);
+
+    // 没有 message.done，也没有 session.ended —— 直接开始新回合
+    emitEvent('user.message', { text: '第二轮的问题' });
+
+    // ① 上一轮被强制收尾：不再挂着流式正文
+    expect(document.querySelectorAll('.turn.assistant .md.streaming').length).toBe(0);
+    expect(document.querySelectorAll('.turn.assistant').length).toBe(1);
+
+    emitEvent('message.delta', { delta: '第二轮的答案' });
+    // 流式渲染是按体量节流的（≤8KB 每 80ms），等一次 flush 再看 DOM
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const turns = document.querySelectorAll('.turn.assistant');
+    expect(turns.length).toBe(2); // 新答案另起一条，而不是续写
+    expect(turns[0].querySelector('.md').textContent).toContain('第一轮的半截回答');
+    expect(turns[1].querySelector('.md').textContent).toContain('第二轮的答案');
+    expect(turns[1].querySelector('.md').textContent).not.toContain('第一轮的半截回答');
+
+    emitEvent('message.done', {});
+  });
+});
+
+/**
+ * 静默失败防线。
+ *
+ * 两类问题此前都是**彻底静默**的：某条事件渲染时抛错、收到前端不认识的事件（协议多了新东西）。
+ * 界面上只表现为"没反应"，没有任何线索能区分"协议漂移"与"UI 坏了"。现在都上报诊断，
+ * 且只上报、不弹窗、不改产品行为。
+ */
+describe('静默失败防线：渲染抛错 / 未知事件都要留下线索', () => {
+  const diagsFor = (method) =>
+    posted.filter((m) => m.kind === 'ui.diag' && m.diag && m.diag.method === method);
+
+  it('前端未实现的协议事件上报 debug 诊断，而不是无声丢弃', () => {
+    emitEvent('brand.new.protocol.event', { whatever: 1 });
+    const hit = diagsFor('brand.new.protocol.event');
+    expect(hit).toHaveLength(1);
+    expect(hit[0].diag.level).toBe('debug');
+  });
+
+  it('某条事件渲染抛错时上报 warn（附错误信息）', () => {
+    // tool.started 缺 params：渲染必抛错，正好用来验证兜底
+    emitEvent('tool.started', null);
+    const hit = diagsFor('tool.started');
+    expect(hit).toHaveLength(1);
+    expect(hit[0].diag.level).toBe('warn');
+    expect(hit[0].diag.message).toBeTruthy();
+  });
+
+  it('上报只走消息通道，不往消息流里插系统行（排障信息不打扰用户）', () => {
+    const before = document.querySelectorAll('#messages .message').length;
+    emitEvent('another.unknown.event', {});
+    expect(document.querySelectorAll('#messages .message').length).toBe(before);
+  });
+});
+
+/**
+ * Agent 预算（工具轮次上限 / 上下文预算）。
+ *
+ * 这两个值此前只有 daemon 侧读得到、扩展从不下发 —— 用户在设置里根本改不到（"死配置"）。
+ * 关键取舍：**留空 = 不修改**，绝不用 `Number('') = 0` 提交空字段，那会把"没填"变成
+ * "把上限设成 0"；加载时缺失也要留空而不是显示 0。
+ */
+describe('设置面板：Agent 预算不再"改不到"', () => {
+  const loadSettings = (config) => {
+    document.getElementById('btn-settings').click();
+    emitEvent('settings.loaded', {
+      config: {
+        model: 'deepseek-flash',
+        baseURL: 'https://api.deepseek.com/v1',
+        provider: 'auto',
+        ...config,
+      },
+      hasApiKey: true,
+      models: [{ id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' }],
+      modelsHint: '已从 api.deepseek.com 在线更新模型列表（1 个可选）',
+    });
+  };
+
+  const submit = () => {
+    document
+      .getElementById('settings-form')
+      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    return lastMessageOfKind('settings.apply').settings;
+  };
+
+  it('两个字段都在表单里，且是带区间的数字输入', () => {
+    const rounds = document.getElementById('inp-max-rounds');
+    const ctx = document.getElementById('inp-max-context');
+    expect(rounds).not.toBeNull();
+    expect(ctx).not.toBeNull();
+    expect(rounds.type).toBe('number');
+    expect(rounds.min).toBe('1');
+    expect(rounds.max).toBe('50');
+    expect(ctx.type).toBe('number');
+    expect(ctx.min).toBe('4000');
+    expect(ctx.max).toBe('1000000');
+  });
+
+  it('settings.loaded 把当前值填进输入框', () => {
+    loadSettings({ maxToolRounds: 12, maxContextTokens: 128000 });
+    expect(document.getElementById('inp-max-rounds').value).toBe('12');
+    expect(document.getElementById('inp-max-context').value).toBe('128000');
+  });
+
+  it('缺失时输入框留空，不显示 0（0 会被误读成"上限就是 0"）', () => {
+    loadSettings({});
+    expect(document.getElementById('inp-max-rounds').value).toBe('');
+    expect(document.getElementById('inp-max-context').value).toBe('');
+  });
+
+  it('填写后随 settings.apply 提交为数字', () => {
+    loadSettings({});
+    document.getElementById('inp-max-rounds').value = '16';
+    document.getElementById('inp-max-context').value = '65536';
+    const sent = submit();
+    expect(sent.maxToolRounds).toBe(16);
+    expect(sent.maxContextTokens).toBe(65536);
+  });
+
+  it('留空 = 不提交该字段（绝不用 Number(\'\') = 0 把上限设成 0）', () => {
+    loadSettings({});
+    document.getElementById('inp-max-rounds').value = '';
+    document.getElementById('inp-max-context').value = '';
+    const sent = submit();
+    expect(sent.maxToolRounds).toBeUndefined();
+    expect(sent.maxContextTokens).toBeUndefined();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+});

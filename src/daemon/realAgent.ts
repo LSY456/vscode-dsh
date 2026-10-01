@@ -52,7 +52,13 @@ export interface RealAgentConfig {
   sandbox?: CommandSandbox;
 }
 
-let stepCounter = 0;
+/**
+ * 无 `ctx.nextStep` 时的兜底计数器（测试里构造的裸 context 才会走到）。
+ *
+ * 生产路径下步号一律由**会话**提供：模块级全局计数在多会话并发时会互相穿插，
+ * 而 PROTOCOL 把 `step` 定义为"会话内单调递增" —— 表现就是 UI 的执行迹线跳号（P1-8）。
+ */
+let fallbackStepCounter = 0;
 
 const SYSTEM_PROMPT = [
   '你是 dsh，运行在 VSCode 扩展中的编程智能体。你通过工具与工作区交互，并遵守以下规则：',
@@ -190,7 +196,8 @@ export async function runRealAgent(
   const trajectory = (kind: string, detail: string) =>
     ctx.notify(EVENTS.Trajectory, {
       sessionId: ctx.sessionId,
-      step: ++stepCounter,
+      // 步号优先取**会话**计数（会话内单调递增）；只有裸 context 才回落到进程内兜底
+      step: ctx.nextStep?.() ?? ++fallbackStepCounter,
       kind,
       detail,
       ts: Date.now(),
@@ -412,7 +419,9 @@ async function dispatchTool(
         });
         output = res.files.length
           ? res.files.join('\n') + (res.truncated ? '\n…（结果过多已截断）' : '')
-          : '(无匹配文件)';
+          : res.walkExhausted
+            ? '(搜索未完成：目录遍历超出预算，无法断言"无匹配文件"，请缩小 path 或缩小通配范围)'
+            : '(无匹配文件)';
       } else if (tool === 'read_file') {
         // P0-1：脏文档优先——命中编辑器未保存缓冲区就返回缓冲区内容，未命中回落磁盘。
         // 若这里读磁盘而模型上下文里是缓冲区，模型会基于"它以为的最新内容"推理、却拿到旧内容。
@@ -584,12 +593,21 @@ function formatFileRange(filePath: string, r: FileRangeResult): string {
 
 function formatGrepResult(res: GrepResult): string {
   if (res.matches.length === 0) {
+    // 遍历被预算截断时，"无匹配"不是一个可以下的结论 —— 必须说清是"没搜完"，
+    // 否则模型会把"搜索被截断"读成"代码里没有这个符号"，接着反复换模式重试。
+    if (res.walkExhausted) {
+      return '(搜索未完成：目录遍历超出预算，无法断言"无匹配"，请缩小 path 或加 include 过滤)';
+    }
     // 把正则语义写进返回值：早期实现只做字面量匹配，模型常因 `a|b|c` 无结果而误判
     // "代码里没有这个符号"，接着连续换模式重试（一轮能连错五次）。这句提示直接掐掉那串重试。
     return '(无匹配：pattern 按正则解析，可用 | 做多选一，或先用 glob 确认文件是否存在)';
   }
   const lines = res.matches.map((m) => `${m.file}:${m.line}: ${m.text}`);
-  if (res.truncated) lines.push('…（匹配过多已截断）');
+  if (res.walkExhausted) {
+    lines.push('…（结果不完整：目录遍历超出预算，请缩小 path 或加 include 过滤）');
+  } else if (res.truncated) {
+    lines.push('…（匹配过多已截断）');
+  }
   return lines.join('\n');
 }
 
