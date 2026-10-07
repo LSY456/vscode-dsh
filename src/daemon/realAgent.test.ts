@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatCompletionResult, ChatMessage, ChatModel, ChatStreamOptions, FakeChatModel, FakeTurn } from './model';
+import { ChatCompletionResult, ChatMessage, ChatModel, ChatStreamOptions, FakeChatModel, FakeTurn, formatToolCallContent } from './model';
 import { applyTokenBudget, estimateTokens, generateTitle, RealAgentConfig, runRealAgent, TITLE_SYSTEM_PROMPT } from './realAgent';
 
 let root = '';
@@ -848,5 +848,82 @@ describe('realAgent：工具轮次耗尽必须收束（不得静默结束）', (
 
     expect(calls.filter((hasTools) => !hasTools)).toHaveLength(0);
     expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('canceled');
+  });
+});
+
+/**
+ * 展示层剥离（回归）。
+ *
+ * 真实缺陷：模型把工具调用写在正文里，`streamChunk` 原样把它当 `message.delta` 推给面板，
+ * 于是每轮调用的原始 JSON 永久留在答案气泡里（还进 `.dsh/history.json`）。
+ * 这里在**事件层**钉住症状：正文照常流式，围栏与原始 JSON 不得出现在 `message.delta` 里。
+ */
+describe('realAgent：工具调用围栏不落进答案区', () => {
+  function deltas(ctx: MockCtx): string {
+    return ctx.events
+      .filter((e) => e.method === EVENTS.MessageDelta)
+      .map((e) => e.params.delta)
+      .join('');
+  }
+
+  /** 逐 4 字符推送（围栏必然被切开，覆盖增量剥离） */
+  function streamingModel(contents: string[]): ChatModel {
+    let i = 0;
+    return {
+      async chat(messages, opts = {}) {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        const content = contents[Math.min(i++, contents.length - 1)];
+        for (let at = 0; at < content.length; at += 4) {
+          opts.onChunk?.({ type: 'content', text: content.slice(at, at + 4) });
+        }
+        return { reasoning: '', content };
+      },
+    };
+  }
+
+  it('正文照常流式，```toolcall 块与其原始 JSON 不出现', async () => {
+    const ctx = makeCtx();
+    const model = streamingModel([
+      `我先读取该文件。\n\n${formatToolCallContent({ tool: 'read_file', input: { path: file } })}`,
+      '最终结论：文件内容已确认。',
+    ]);
+
+    await runRealAgent(ctx, baseParams, { model });
+
+    const text = deltas(ctx);
+    expect(text).toContain('我先读取该文件。');
+    expect(text).toContain('最终结论：文件内容已确认。');
+    expect(text).not.toContain('```');
+    expect(text).not.toContain('"tool"');
+    // 工具确实跑了（只吞展示，不影响分派）
+    expect(ctx.events.some((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')).toBe(true);
+  });
+
+  it('收束请求不剥离：那里没有工具，正文里的围栏是内容', async () => {
+    const ctx = makeCtx();
+    // keepCalling：每轮都带原生工具调用 -> 轮次耗尽后转入收束；收束那轮给出含围栏的正文
+    const finalText = '示例如下：\n```toolcall\n{"tool":"read_file","input":{"path":"/a"}}\n```';
+    let calls = 0;
+    const model: ChatModel = {
+      async chat(messages, opts = {}) {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        const hasTools = !!(opts.tools && opts.tools.length > 0);
+        calls++;
+        if (hasTools) {
+          return {
+            reasoning: '',
+            content: '我先看看目录结构。',
+            toolCalls: [{ id: 'c1', tool: 'list_dir', input: { path: '.' } }],
+          };
+        }
+        opts.onChunk?.({ type: 'content', text: finalText });
+        return { reasoning: '', content: finalText };
+      },
+    };
+
+    await runRealAgent(ctx, baseParams, { model, maxToolRounds: 1 });
+
+    expect(calls).toBe(2); // 1 轮工具 + 1 次收束
+    expect(deltas(ctx)).toContain('```toolcall');
   });
 });

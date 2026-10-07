@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseToolCalls, formatToolCall } from './toolcall';
+import { createToolCallFenceFilter, parseToolCalls, formatToolCall } from './toolcall';
 
 describe('parseToolCalls 真实场景容错', () => {
   it('解析标准 ```toolcall fenced 单对象（向后兼容）', () => {
@@ -86,5 +86,84 @@ describe('parseToolCalls 真实场景容错', () => {
   it('formatToolCall 生成仍为 ```toolcall 约定（与 parse 互逆）', () => {
     const call = { tool: 'bash_execute', input: { command: 'npm test' } };
     expect(parseToolCalls(formatToolCall(call))).toEqual([call]);
+  });
+});
+
+/**
+ * 展示层剥离（回归）。
+ *
+ * 真实缺陷：模型的原始正文里带着工具调用围栏，`realAgent` 把它原样当 `message.delta` 推给面板，
+ * 于是每轮调用的原始 JSON 都固化在答案气泡里，还会被扩展写进 `.dsh/history.json`。
+ * 剥离必须**精准**：只吞"确实解析成工具调用"的块 —— 请求原文就是给用户看的 JSON 示例、
+ * 或代码块里恰好含 `"tool"` 字段的数据，都不能被吞掉。
+ */
+describe('createToolCallFenceFilter：把工具调用围栏从"给人看的正文"里剥离', () => {
+  const BLOCK = '```toolcall\n{"tool":"read_file","input":{"path":"/a"}}\n```';
+  const JSON_BLOCK = '```json\n{"tool":"list_dir","input":{"path":"."}}\n```';
+
+  function feed(chunks: string[]): string {
+    const filter = createToolCallFenceFilter();
+    let out = '';
+    for (const c of chunks) out += filter.push(c);
+    out += filter.flush();
+    return out;
+  }
+  /** 整块喂入 */
+  const single = (text: string) => feed([text]);
+  /** 逐字符喂入 —— 最坏情况：围栏必然被切成多段 */
+  const byChar = (text: string) => feed([...text]);
+
+  it('正文保留，工具调用块被吞掉且不留空行', () => {
+    expect(single(`我先看看目录。\n\n${BLOCK}\n`)).toBe('我先看看目录。\n\n');
+  });
+
+  it('增量把围栏切碎也不影响结果（逐字符 == 整块）', () => {
+    const text = `我先看看。\n\n${BLOCK}\n然后继续说明。`;
+    expect(byChar(text)).toBe('我先看看。\n\n然后继续说明。');
+    expect(byChar(text)).toBe(single(text));
+  });
+
+  it('```json 形式的工具调用同样被吞掉（模型语言标签会漂移）', () => {
+    // 围栏**前面**的换行属于正文段落，保留；围栏**后面**紧跟的换行随块一起吞掉
+    expect(single(`看下目录：\n${JSON_BLOCK}\n后面还有正文。`)).toBe('看下目录：\n后面还有正文。');
+  });
+
+  it('不含工具调用形状的 ```json 块照常显示（用户可能就是要看这段 JSON）', () => {
+    const text = '```json\n{"foo":"bar"}\n```';
+    expect(single(text)).toBe(text);
+    expect(byChar(text)).toBe(text);
+  });
+
+  it('别的语言标签的块一律保留 —— 代码里的 "tool" 字段是数据不是调用', () => {
+    const text = '```python\n{"tool":"read_file","input":{"path":"/a"}}\n```';
+    expect(single(text)).toBe(text);
+  });
+
+  it('未闭合的围栏在流结束时按原样显示（不吞模型的坏输出）', () => {
+    const text = '先说明。\n```toolcall\n{"tool":"read_file"';
+    expect(single(text)).toBe(text);
+  });
+
+  it('多个调用块之间的正文全部保留', () => {
+    expect(single(`A\n${BLOCK}\nB\n${JSON_BLOCK}\nC`)).toBe('A\nB\nC');
+  });
+
+  it('行内单反引号不被误判为围栏', () => {
+    const text = '使用 `code` 标记即可。';
+    expect(single(text)).toBe(text);
+    expect(byChar(text)).toBe(text);
+  });
+
+  it('结尾处不完整的围栏前缀先压住、flush 时再吐出', () => {
+    expect(feed(['abc', '`'])).toBe('abc`');
+    expect(single('abc`')).toBe('abc`');
+  });
+
+  it('整个输出就是一个调用块 -> 展示为空', () => {
+    expect(single(BLOCK)).toBe('');
+  });
+
+  it('空增量不改变状态', () => {
+    expect(feed(['', 'prose', ''])).toBe('prose');
   });
 });
