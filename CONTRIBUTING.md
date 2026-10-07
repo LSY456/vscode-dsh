@@ -47,4 +47,6 @@ CI（`.github/workflows/ci.yml`）会在 push / PR 时自动执行同一套门�
 ## 分支与发布
 
 - `main` 为默认分支，保持可发布状态。
-- 版本号变更请同步更新 `package.json`、`CHANGELOG.md`。
+- 版本号变更请只改 `package.json`（`CHANGELOG.md` 补条目）：daemon 上报的 `daemonVersion`
+  由构建时从 `package.json` 注入，`shared/version.ts` 里**没有**手写版本号可改
+  （曾经两边各写一份，漂移了 5 个小版本才被发现）。

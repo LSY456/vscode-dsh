@@ -216,6 +216,14 @@ async function main() {
   assert(connDisabled.init.sessionId, 'initialize 返回 sessionId');
   assert(connDisabled.init.capabilities.resume === true, '能力声明包含 resume');
   assert(connDisabled.init.capabilities.fileRead === true, '能力声明包含 fileRead');
+  // 版本号单点化（回归守卫）：daemon 上报的版本必须等于构建它的 package.json 版本。
+  // 真实事故：shared/version.ts 手写值停在 0.3.0 而 package.json 已是 0.8.0，状态行显示
+  // 「已连接 daemon v0.3.0」——用户可见、差了 5 个小版本，而没有任何测试发现它。
+  const pkgVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+  assert(
+    connDisabled.init.daemonVersion === pkgVersion,
+    `daemon 上报版本与 package.json 一致（期望 ${pkgVersion}，实际 ${connDisabled.init.daemonVersion}）`
+  );
   connDisabled.rpc.resetEvents();
   await connDisabled.rpc.request('session.send', {
     sessionId: connDisabled.init.sessionId,

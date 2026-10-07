@@ -6,6 +6,8 @@
  * 分派真实工具（路径护栏 + 审批门控）→ 回灌工具结果 → 继续，直至不再调用工具或取消。
  */
 import {
+  DEFAULT_MAX_CONTEXT_TOKENS,
+  DEFAULT_MAX_TOOL_ROUNDS,
   EVENTS,
   ERROR_CODES,
   EventApprovalRequest,
@@ -15,7 +17,7 @@ import {
 import * as path from 'path';
 import { AgentCapabilities, AgentContext } from './agent';
 import { ChatMessage, ChatModel, StreamChunk, ToolDefinition } from './model';
-import { parseToolCalls, ToolCall } from './toolcall';
+import { createToolCallFenceFilter, parseToolCalls, ToolCall, ToolCallFenceFilter } from './toolcall';
 import {
   CommandPolicy,
   CommandRunner,
@@ -188,7 +190,8 @@ export async function runRealAgent(
   config: RealAgentConfig
 ): Promise<void> {
   const { prompt, attachments = [] } = params;
-  const maxRounds = config.maxToolRounds ?? 8;
+  // 缺省值取自协议里的单一来源（此前这里硬写 8，与 shared/protocol 各存一份，属同类漂移隐患）
+  const maxRounds = config.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
   const abort = new AbortController();
   const caps: AgentCapabilities = ctx.capabilities ?? {};
   // P0-3：订阅会话取消，在途模型请求可被立即中断（不必等 onChunk 才察觉取消）
@@ -211,8 +214,20 @@ export async function runRealAgent(
   const maxContextTokens = config.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS;
 
   /**
+   * 展示层围栏过滤器（见下方 streamChunk 的说明）。
+   *
+   * 只影响**推给面板的增量**，不影响回灌给模型的 `content`；`null` = 不过滤
+   * （收束请求不提供工具，此时正文里的围栏是内容而非调用）。
+   */
+  let fenceFilter: ToolCallFenceFilter | null = null;
+
+  /**
    * 每个增量到达时的统一投影（推理 / 正文分流）。
    * 收束请求复用同一条通路，保证流式渲染与结束时的定妆完全一致。
+   *
+   * 正文增量会先过一遍围栏过滤器：模型把工具调用写在正文里（```toolcall / ```json），
+   * 原样推出的话每轮调用的原始 JSON 会永久留在答案气泡里，还会被扩展写进 `.dsh/history.json`。
+   * 过滤器只吞「确实解析成工具调用」的块（见 toolcall.ts），代码块与普通 JSON 不受影响。
    */
   const streamChunk = (c: StreamChunk) => {
     if (ctx.isCanceled() || abort.signal.aborted) {
@@ -223,8 +238,21 @@ export async function runRealAgent(
       ctx.notify(EVENTS.ReasoningDelta, { sessionId: ctx.sessionId, delta: c.text });
       trajectory('reasoning', c.text);
     } else {
-      ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: c.text });
+      const visible = fenceFilter ? fenceFilter.push(c.text) : c.text;
+      if (visible) ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: visible });
     }
+  };
+
+  /**
+   * 把过滤器缓冲里剩下的正文吐出去（轮末调用）。
+   *
+   * 必须显式收尾：未闭合的围栏在流结束时要按原样展示，否则模型的坏输出会被静默吞掉，
+   * 用户只看到半句话，反而更难诊断。`flush` 后再换新过滤器，保证轮与轮之间不串。
+   */
+  const flushVisibleText = () => {
+    if (!fenceFilter) return;
+    const tail = fenceFilter.flush();
+    if (tail) ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: tail });
   };
 
   /** 轮次耗尽时追加的指令：明确"不要再调工具"，逼模型用已收集的信息给结论。 */
@@ -249,6 +277,9 @@ export async function runRealAgent(
    * 也不明确执行到哪一步」的根因。
    */
   const requestFinalAnswer = async (): Promise<boolean> => {
+    // 收束请求刻意不提供工具：此时正文里若出现 fenced 块，它是**内容**（用户可能就是在问
+    // 工具调用格式），而不是一次调用 —— 所以这里必须关掉过滤器。
+    fenceFilter = null;
     trajectory('system', `工具轮次已达上限（${maxRounds} 轮），转为收束回答（不再提供工具）`);
     messages.push({ role: 'user', content: FINAL_ANSWER_INSTRUCTION });
     try {
@@ -289,6 +320,10 @@ export async function runRealAgent(
     let content = '';
     let nativeToolCalls: ToolCall[] | undefined;
     let streamFailed: Error | null = null;
+    // 每轮独立一个过滤器：上一轮的缓冲已在轮末 flush，不跨轮复用（否则上一轮残留的
+    // 半截围栏会吃掉本轮正文）。
+    fenceFilter = createToolCallFenceFilter();
+
     try {
       const trimmed = applyTokenBudget(messages, maxContextTokens);
       if (trimmed.length < messages.length) {
@@ -309,6 +344,9 @@ export async function runRealAgent(
     } catch (err) {
       streamFailed = err instanceof Error ? err : new Error(String(err));
     }
+
+    // 轮末收尾过滤器：先于 message.done（面板据此定妆当前气泡），也覆盖上面的失败分支
+    flushVisibleText();
 
     if (ctx.isCanceled() || abort.signal.aborted) break;
     if (streamFailed) {
@@ -690,8 +728,8 @@ export async function generateTitle(model: ChatModel, prompt: string): Promise<s
 // 上下文 token 预算
 // ---------------------------------------------------------------------------
 
-/** 默认上下文预算（token）：为 DeepSeek 64K 窗口留出输出与余量。 */
-const DEFAULT_MAX_CONTEXT_TOKENS = 48 * 1024;
+// 上下文预算的缺省值收在 `shared/protocol.ts`（扩展与 daemon 共用）——
+// 这里原先还留着一份本地 48K 拷贝，数值虽相同，却是"第二份真相"，一并删掉。
 
 /** 宽字符（CJK 汉字、平/片假名、注音符号、CJK 标点与全角）范围，约 1 token/字。 */
 const CJK_RE = /[\u3040-\u30ff\u3100-\u312f\u31a0-\u31bf\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]/g;

@@ -15,6 +15,11 @@ const path = require('path');
 
 const watch = process.argv.includes('--watch');
 
+// 版本号单点化：`shared/version.ts` 不再手写 semver，改由这里把 package.json 的版本注入进去。
+// 起因是一次真实漂移 —— 该文件停在 0.3.0 而 package.json 已经是 0.8.0，daemonVersion 显示在
+// 状态行上（「已连接 daemon v0.3.0」），差了 5 个小版本却没人发现。手写值必然腐坏，故删掉手写路径。
+const pkgVersion = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version;
+
 const common = {
   bundle: true,
   sourcemap: true,
@@ -23,6 +28,7 @@ const common = {
   external: ['vscode', 'ws'],
   logLevel: 'info',
   legalComments: 'none',
+  define: { __DSH_PKG_VERSION__: JSON.stringify(String(pkgVersion)) },
 };
 
 async function copyMedia() {
@@ -44,7 +50,7 @@ async function main() {
     path.join(__dirname, 'out', 'buildId.json'),
     JSON.stringify({ id: buildId, ts: Date.now() }, null, 2)
   );
-  console.log(`[esbuild] buildId=${buildId}`);
+  console.log(`[esbuild] buildId=${buildId}, version=${pkgVersion}`);
 
   // 扩展宿主 / daemon（node 平台）
   const nodeCtx = await esbuild.context({
