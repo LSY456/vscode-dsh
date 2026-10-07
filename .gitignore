@@ -45,6 +45,7 @@ desktop.ini
 # ================= AI 工作区记忆（本地会话记录，不入库） =================
 .workbuddy/
 
-# ================= UI 预览产物（scripts/uiPreview.mjs 生成，不入库） =================
+# ================= UI 预览产物（scripts/uiPreview.mjs / fencePreview.mjs 生成，不入库） =================
 scripts/ui-preview.html
 scripts/ui-preview*.png
+scripts/fence-preview.html

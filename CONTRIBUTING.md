@@ -50,3 +50,8 @@ CI（`.github/workflows/ci.yml`）会在 push / PR 时自动执行同一套门�
 - 版本号变更请只改 `package.json`（`CHANGELOG.md` 补条目）：daemon 上报的 `daemonVersion`
   由构建时从 `package.json` 注入，`shared/version.ts` 里**没有**手写版本号可改
   （曾经两边各写一份，漂移了 5 个小版本才被发现）。
+- **发布身份三处必须是同一个**：`package.json` 的 `publisher`、`repository.url` 的仓库归属、
+  以及 Marketplace 上的发布者账号。扩展 ID 是 `<publisher>.<name>`（即 `LSY456.vscode-dsh`），
+  **一经发布不可更改** —— 改它等于换一个扩展，已装旧 ID 的用户收不到任何更新。
+- 发布时把 `## [Unreleased]` 切成 `## [x.y.z] - YYYY-MM-DD`（Keep a Changelog 格式），
+  同一版本内的小节按 **新增 / 变更 / 修复** 各留一个（承接多个迭代周期时需合并重复标题）。
