@@ -926,4 +926,24 @@ describe('realAgent：工具调用围栏不落进答案区', () => {
     expect(calls).toBe(2); // 1 轮工具 + 1 次收束
     expect(deltas(ctx)).toContain('```toolcall');
   });
+
+  it('采样参数透传给模型：配了才下发，没配即 undefined（不改动既有行为）', async () => {
+    const seen: Array<{ temperature?: number; maxTokens?: number }> = [];
+    const model: ChatModel = {
+      async chat(messages, opts = {}) {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        seen.push({ temperature: opts.temperature, maxTokens: opts.maxTokens });
+        return { reasoning: '', content: '好的。' };
+      },
+    };
+
+    await runRealAgent(makeCtx(), { prompt: '你好' }, { model, temperature: 0.9, maxTokens: 2048 });
+    expect(seen).toEqual([{ temperature: 0.9, maxTokens: 2048 }]);
+
+    // 未配置时必须是 undefined（而不是被 Agent 层补成 0.2 / 4096）——
+    // 补缺省是模型层的职责，Agent 层一旦补，就会把"没配"和"配成缺省值"混为一谈。
+    seen.length = 0;
+    await runRealAgent(makeCtx(), { prompt: '你好' }, { model });
+    expect(seen).toEqual([{ temperature: undefined, maxTokens: undefined }]);
+  });
 });

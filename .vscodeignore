@@ -26,7 +26,11 @@ vitest.config.ts
 tsconfig.json
 **/*.map
 .gitignore
+.editorconfig
 PROTOCOL.md
 README.md
-docs/project-review.md
-docs/strategy-agent-kernel.md
+# docs/ 改成**白名单**：新增文档默认不进包，要对外可见的必须显式放行。
+# 逐份黑名单的代价是"每写一份内部文档都得记得回来补一条规则"，而漏了不会有任何提示 ——
+# 此前正是这样让两份内部评审文档混进了 VSIX（体积虚涨）。眼下对外可见的只有 mock-agent.md。
+docs/**
+!docs/mock-agent.md

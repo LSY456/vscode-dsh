@@ -13,6 +13,10 @@
  *  - 路径护栏（patch / file.read 目标必须位于工作区 / allowedDirs 内）
  *  - 能力分级（allowedTools / allowedDirs / maxConcurrency）
  *  - 多会话并发（同一会话串行，不同会话并行）
+ *
+ * P2-6 会话级事务回滚：
+ *  - 写盘 / 改编辑器之前留影子快照（`.dsh/snapshots/<会话>/`），`session.rollback` 一键还原
+ *  - 运行中的会话拒绝回滚；编辑器里有未保存改动的文件一律跳过并如实回报
  */
 import * as fs from 'fs';
 import * as http from 'http';
@@ -33,6 +37,8 @@ import {
   EventFilePatchPending,
   EventTrajectory,
   SessionSendParams,
+  SessionRollbackParams,
+  SessionRollbackResult,
   WorkspaceSyncDirtyParams,
 } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
@@ -41,6 +47,7 @@ import { ChatModel, createKeywordFakeModel, createModel as createProviderModel, 
 import { assertPathInside } from './paths';
 import { RealAgentConfig, runRealAgent } from './realAgent';
 import { DEFAULT_APPROVAL_TTL_MS, clampApprovalTtlMs, Session, SessionManager } from './sessionManager';
+import { SessionSnapshotStore } from './sessionSnapshot';
 import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';
 import { readBuildId } from '../../shared/buildId';
@@ -83,6 +90,10 @@ export interface RuntimeConfig {
   /** Agent 循环预算（P2-2）：工具调用轮数上限 / 上下文 token 预算；undefined = 用协议缺省 */
   maxToolRounds?: number;
   maxContextTokens?: number;
+  /** 采样温度（0–2）；undefined = 用模型层缺省（0.2），即不改动既有行为 */
+  temperature?: number;
+  /** 单次输出上限（max_tokens）；undefined / <= 0 = 不发送该字段，由服务端决定 */
+  maxTokens?: number;
 }
 
 /**
@@ -143,6 +154,11 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
   const trajectoryStore = new TrajectoryStore(path.join(opts.workspaceRoot, '.dsh', 'trajectory'));
   // B1 信任记忆：免审批白名单，持久化于 <workspace>/.dsh/trust.json（0600，用户可审阅/删除）
   const trustStore = new TrustStore({ file: path.join(opts.workspaceRoot, '.dsh', 'trust.json') });
+  // P2-6 会话级事务回滚：影子快照落在 <workspace>/.dsh/snapshots/<会话>/（0700 / 0600）
+  const snapshots = new SessionSnapshotStore({
+    root: path.join(opts.workspaceRoot, '.dsh', 'snapshots'),
+    workspaceRoot: opts.workspaceRoot,
+  });
   // P3.5+ 命令沙箱：检测 OS 级后端（Linux bwrap），不可用则应用层兜底；降级原因经 warnings 披露
   const { sandbox, warnings } = detectSandbox(opts.workspaceRoot);
   if (warnings.length > 0) console.warn(`[dsh-daemon] 命令沙箱：${warnings.join('；')}`);
@@ -339,6 +355,10 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           // Agent 循环预算（P2-2）：区间合法性在扩展侧写入配置时就已收敛，这里只做透传
           if (p.model?.maxToolRounds !== undefined) rt.maxToolRounds = p.model.maxToolRounds;
           if (p.model?.maxContextTokens !== undefined) rt.maxContextTokens = p.model.maxContextTokens;
+          // 采样参数（批次 2）：undefined 一律视为"用户没配" —— 温度继续走模型层缺省 0.2，
+          // 上限继续不发送；只有显式配置才改变请求体。
+          if (p.model?.temperature !== undefined) rt.temperature = p.model.temperature;
+          if (p.model?.maxTokens !== undefined) rt.maxTokens = p.model.maxTokens;
           const session = sessions.create();
           attach(conn, session);
           // 显式回报「为什么是 mock」，让前端能提示"演示模式"而不是静默降级
@@ -355,6 +375,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               trajectory: true,
               resume: true,
               fileRead: true,
+              rollback: true,
             },
             sessionId: session.id,
             agent: decision.mode,
@@ -441,6 +462,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             },
             // P0-1：本补丁是否已由客户端应用到编辑器缓冲区（为 true 时 agent 不写盘）
             isPatchAppliedInEditor: (patchId) => session.getPatchApplyInEditor(patchId),
+            // P2-6 会话回滚：改动发生**之前**留一份影子快照（首写优先，实现侧保证不抛）
+            recordSnapshot: (resolvedPath, originalContent) =>
+              snapshots.record(session.id, resolvedPath, originalContent),
           };
           // P3.6：auto 切换 —— 有 apiKey（或显式 real）走真实模型，否则回退内置模拟
           const agentMode = resolveAgentMode(conn.runtime);
@@ -454,6 +478,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               // 未配置时留 undefined，由 realAgent 用协议缺省兜底。
               maxToolRounds: conn.runtime.maxToolRounds,
               maxContextTokens: conn.runtime.maxContextTokens,
+              temperature: conn.runtime.temperature,
+              maxTokens: conn.runtime.maxTokens,
             };
             void runRealAgent(ctx, p, agentConfig).finally(() => {
               session.end();
@@ -486,6 +512,43 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           }
           attach(conn, session);
           const result = session.resume();
+          sendResult(conn.ws, req.id, result);
+          return;
+        }
+        case METHODS.SessionRollback: {
+          // P2-6：把本次会话改动过的文件还原到会话开始前（影子快照见 sessionSnapshot.ts）
+          const p = req.params as SessionRollbackParams | undefined;
+          const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
+          if (!session) {
+            sendError(
+              conn.ws,
+              req.id,
+              ERROR_CODES.NotFound,
+              `session 不存在: ${p?.sessionId ?? conn.currentSessionId}`
+            );
+            return;
+          }
+          // 运行中的会话禁止回滚：Agent 正在写文件，与还原并发只会得到"刚还回去又被改掉"的
+          // 混乱状态。宁可让用户先取消 / 等这轮结束，也不要执行一次语义不完整的回滚。
+          if (!session.canStart()) {
+            sendError(
+              conn.ws,
+              req.id,
+              ERROR_CODES.Busy,
+              `session ${session.id} 正在运行中，请先取消或等待本轮结束后再回滚`
+            );
+            return;
+          }
+          // 脏文档判定走**本连接**的覆盖层（与写盘侧同源）：文件此刻在编辑器里有未保存改动
+          // 就一律跳过，绝不覆盖用户正在编辑的内容。
+          const result: SessionRollbackResult = snapshots.restore(session.id, (resolved) =>
+            conn.dirty.has(resolved)
+          );
+          console.log(
+            `[rollback] 会话 ${session.id}：还原 ${result.restored.length}、删除 ${result.deleted.length}、` +
+              `脏跳过 ${result.skippedDirty.length}、不可还原 ${result.unrestorable.length}、` +
+              `失败 ${result.failed.length}${result.unrecorded > 0 ? `、未记录 ${result.unrecorded}` : ''}`
+          );
           sendResult(conn.ws, req.id, result);
           return;
         }

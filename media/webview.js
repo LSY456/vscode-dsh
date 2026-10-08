@@ -17,7 +17,10 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
 (function () {
   'use strict';
 
-  // eslint-disable-next-line no-undef
+  // acquireVsCodeApi 由 webview 运行时注入，不在任何 import 路径上 —— 用 /* global */ 声明，
+  // 而不是拿 eslint-disable 压检查：在没有接 lint 的文件里后者是**死指令**（此前就是如此），
+  // 等真接上 lint 时它又会把 no-undef 一并掩盖掉。
+  /* global acquireVsCodeApi */
   const vscode = acquireVsCodeApi();
 
   const $ = (id) => document.getElementById(id);
@@ -54,6 +57,8 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   const inpPreset = $('inp-preset');
   const inpMaxRounds = $('inp-max-rounds');
   const inpMaxContext = $('inp-max-context');
+  const inpTemperature = $('inp-temperature');
+  const inpMaxTokens = $('inp-max-tokens');
   const btnSettingsRestart = $('btn-settings-restart');
   const btnSettingsClose = $('btn-settings-close');
   const settingsMsg = $('settings-msg');
@@ -1365,6 +1370,10 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     // 数值字段：缺失时留空，**不要写 0** —— 输入框显示 "0" 会让用户以为上限就是 0。
     inpMaxRounds.value = cfg.maxToolRounds == null ? '' : String(cfg.maxToolRounds);
     inpMaxContext.value = cfg.maxContextTokens == null ? '' : String(cfg.maxContextTokens);
+    // 采样参数：null / undefined = 用户从没配过 → 留空。不要写 0.2 或 0：温度 0 是**合法值**，
+    // maxTokens 0 表示"用服务端默认"，显示成具体数字会让"没配"和"配成了这个数"混为一谈。
+    inpTemperature.value = cfg.temperature == null ? '' : String(cfg.temperature);
+    inpMaxTokens.value = cfg.maxTokens == null ? '' : String(cfg.maxTokens);
   }
 
   // ---- B1 信任记忆：设置面板中的免审批白名单管理
@@ -1618,6 +1627,8 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     };
     const maxToolRounds = numOrUndefined(inpMaxRounds.value);
     const maxContextTokens = numOrUndefined(inpMaxContext.value);
+    const temperature = numOrUndefined(inpTemperature.value);
+    const maxTokens = numOrUndefined(inpMaxTokens.value);
     // apiKey 留空表示不修改（不上报空串，避免误删已存凭据）；
     // 模型名同理：下拉还没填充/异常为空时，宁可什么都不提交，也不要把已配好的模型名清空。
     vscode.postMessage({
@@ -1630,6 +1641,8 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
         preset,
         ...(maxToolRounds !== undefined ? { maxToolRounds } : {}),
         ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
+        ...(temperature !== undefined ? { temperature } : {}),
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
       },
     });
     settingsMsg.textContent = '保存中…';

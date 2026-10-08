@@ -50,6 +50,10 @@ export interface RealAgentConfig {
   maxContextTokens?: number;
   /** 模型请求空闲超时（ms，P0-3）：距上一增量超过该时长即中断；<= 0 关闭。缺省 60s。 */
   idleTimeoutMs?: number;
+  /** 采样温度（0–2）；undefined = 沿用模型层缺省，即不改动既有行为 */
+  temperature?: number;
+  /** 单次输出上限（max_tokens）；undefined / <= 0 = 不发送该字段，由服务端决定 */
+  maxTokens?: number;
   /** 命令沙箱（P3.5+）：可选，缺省 executeCommand 内部兜底 ProcessSandbox */
   sandbox?: CommandSandbox;
 }
@@ -286,6 +290,8 @@ export async function runRealAgent(
       const result = await config.model.chat(messages, {
         signal: abort.signal,
         idleTimeoutMs: config.idleTimeoutMs,
+        temperature: config.temperature,
+        maxTokens: config.maxTokens,
         // 刻意不传 tools：模型无法再发起工具调用，只能作答。
         onChunk: streamChunk,
       });
@@ -335,6 +341,8 @@ export async function runRealAgent(
       const result = await config.model.chat(messages, {
         signal: abort.signal,
         idleTimeoutMs: config.idleTimeoutMs,
+        temperature: config.temperature,
+        maxTokens: config.maxTokens,
         tools: TOOL_DEFINITIONS,
         onChunk: streamChunk,
       });

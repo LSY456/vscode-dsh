@@ -11,6 +11,7 @@
  * 真实 daemon 通过 ChatModel 接口调用模型，替换底座不影响 Agent 循环。
  */
 
+import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_TEMPERATURE } from '../../shared/protocol';
 import { ToolCall } from './toolcall';
 
 /**
@@ -57,7 +58,13 @@ export interface ChatCompletionResult {
 }
 
 export interface ChatStreamOptions {
+  /** 采样温度（0–2）：OpenAI 兼容直传；Anthropic 钳制到 0–1。未设 = DEFAULT_TEMPERATURE。 */
   temperature?: number;
+  /**
+   * 单次输出上限（max_tokens）。未设 / `<= 0` = OpenAI 兼容端点**不发送**该字段
+   * （由服务端决定上限）；Anthropic 必填，故回落 DEFAULT_MAX_OUTPUT_TOKENS。
+   */
+  maxTokens?: number;
   signal?: AbortSignal;
   /** 空闲超时（ms）：距上一个增量超过该时长即以 TimeoutError 中断；<= 0 关闭。缺省 60s。 */
   idleTimeoutMs?: number;
@@ -558,8 +565,13 @@ function toOpenAIBody(model: string, messages: ChatMessage[], opts: ChatStreamOp
     stream: true,
     stream_options: { include_usage: false },
     messages: toOpenAIMessages(messages),
-    temperature: opts.temperature ?? 0.2,
+    temperature: opts.temperature ?? DEFAULT_TEMPERATURE,
   };
+  // 只有**显式配置**了上限才发送：省略该字段时上限由服务端决定，而写死一个值等于替用户
+  // 压低默认输出长度，顺带把"没配"和"配成同一个数"变成无法区分。
+  if (opts.maxTokens !== undefined && opts.maxTokens > 0) {
+    body.max_tokens = Math.round(opts.maxTokens);
+  }
   if (opts.tools && opts.tools.length > 0) {
     body.tools = opts.tools.map((t) => ({
       type: 'function',
@@ -602,7 +614,12 @@ function toAnthropicBody(
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model,
-    max_tokens: 4096,
+    // Anthropic 把 max_tokens 列为必填 —— 不能像 OpenAI 兼容端点那样省略，故未配置时回落缺省值
+    max_tokens:
+      opts.maxTokens !== undefined && opts.maxTokens > 0 ? Math.round(opts.maxTokens) : DEFAULT_MAX_OUTPUT_TOKENS,
+    // 温度区间两家不同（OpenAI 0–2 / Anthropic 0–1）：越界值**钳制**而不是原样发出，
+    // 否则用户只会看到一个与自己的配置无关的上游 400。
+    temperature: Math.min(1, Math.max(0, opts.temperature ?? DEFAULT_TEMPERATURE)),
     stream: true,
     system,
     messages,

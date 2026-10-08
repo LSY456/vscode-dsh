@@ -1127,3 +1127,116 @@ describe('设置面板：Agent 预算不再"改不到"', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 });
+
+/**
+ * 采样参数（温度 / 输出上限）。
+ *
+ * 与上一组的关键差别：这里 `null` 是**有语义**的 —— 它表示"用户从没配过"，面板必须留空、
+ * 提交时也不下发，好让 daemon 侧继续用模型层缺省（温度 0.2、上限不发送）。若在扩展侧
+ * 回落成一个具体数字，就是把"没配"悄悄变成"配成 0.2"，凭空改变请求体。
+ */
+describe('设置面板：采样参数可配（批次 2）', () => {
+  const loadSettings = (config) => {
+    document.getElementById('btn-settings').click();
+    emitEvent('settings.loaded', {
+      config: {
+        model: 'deepseek-flash',
+        baseURL: 'https://api.deepseek.com/v1',
+        provider: 'auto',
+        ...config,
+      },
+      hasApiKey: true,
+      models: [{ id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' }],
+      modelsHint: '',
+    });
+  };
+
+  const submit = () => {
+    document
+      .getElementById('settings-form')
+      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    return lastMessageOfKind('settings.apply').settings;
+  };
+
+  it('两个字段都在表单里，且是带区间的数字输入', () => {
+    const temp = document.getElementById('inp-temperature');
+    const max = document.getElementById('inp-max-tokens');
+    expect(temp).not.toBeNull();
+    expect(max).not.toBeNull();
+    expect(temp.type).toBe('number');
+    expect(temp.min).toBe('0');
+    expect(temp.max).toBe('2');
+    expect(max.type).toBe('number');
+    expect(max.min).toBe('1');
+    expect(max.max).toBe('131072');
+  });
+
+  it('settings.loaded 把当前值填进输入框', () => {
+    loadSettings({ temperature: 0.7, maxTokens: 8192 });
+    expect(document.getElementById('inp-temperature').value).toBe('0.7');
+    expect(document.getElementById('inp-max-tokens').value).toBe('8192');
+  });
+
+  it('null（用户没配过）时留空 —— 显示 0.2 会把"没配"变成"配成 0.2"', () => {
+    loadSettings({ temperature: null, maxTokens: null });
+    expect(document.getElementById('inp-temperature').value).toBe('');
+    expect(document.getElementById('inp-max-tokens').value).toBe('');
+  });
+
+  it('填写后随 settings.apply 提交为数字', () => {
+    loadSettings({});
+    document.getElementById('inp-temperature').value = '1.2';
+    document.getElementById('inp-max-tokens').value = '4096';
+    const sent = submit();
+    expect(sent.temperature).toBe(1.2);
+    expect(sent.maxTokens).toBe(4096);
+  });
+
+  it('留空的判据是"空串"而不是"假值"：显式填 0 必须原样提交', () => {
+    loadSettings({});
+    document.getElementById('inp-temperature').value = '';
+    document.getElementById('inp-max-tokens').value = '';
+    const sent = submit();
+    expect(sent.temperature).toBeUndefined();
+    expect(sent.maxTokens).toBeUndefined();
+
+    // 温度 0 = 最确定，是**合法值**；用 `if (x)` 判断真假会把它当成"没填"而丢掉
+    document.getElementById('inp-temperature').value = '0';
+    expect(submit().temperature).toBe(0);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+});
+
+/**
+ * 会话回滚（P2-6）的结果是**多行**系统消息：分项汇报「还原 / 删除 / 跳过 / 失败」。
+ *
+ * 只断言 JS 写进 DOM 的话，只能证明文本到了 —— 真正决定用户能不能看出分类的是样式表：
+ * `.message.system` 少一条 `white-space: pre-line`，HTML 就会把换行折叠成空格，
+ * 六类信息糊成一整行，而这个功能在 UI 上的**全部价值**就是把它们分清楚。
+ * 所以两半都要钉：CSS 有那条规则 + DOM 真的命中它。
+ */
+describe('会话回滚结果的多行汇报', () => {
+  const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+
+  it('样式表声明了系统消息保留换行', () => {
+    expect(css).toMatch(/\.message\.system\s*\{[^}]*white-space:\s*pre-line/);
+  });
+
+  it('notice 的多行文本原样落到 .message.system 且命中该规则', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_rollback_ui', reason: 'new' });
+    emitEvent('notice', {
+      text:
+        '已回滚 2 处文件改动，另有 1 处未处理\n' +
+        '- 还原为改动前：a.ts、b.ts\n' +
+        '- 跳过 1 个（编辑器里有未保存的改动）：c.ts。请先保存或放弃这些改动后再回滚。',
+    });
+
+    const nodes = [...document.querySelectorAll('.message.system')];
+    const last = nodes[nodes.length - 1];
+    // 换行必须真的在文本里（而不是被谁先做了 replace）
+    expect(last.textContent.split('\n')).toHaveLength(3);
+    expect(last.textContent).toContain('跳过 1 个');
+    expect(last.matches('.message.system')).toBe(true);
+  });
+});

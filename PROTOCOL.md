@@ -44,6 +44,7 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 | `session.send` | `{ sessionId?, prompt, attachments? }` | `{ sessionId, accepted }` |
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
 | `session.resume` | `{ sessionId }` | `{ sessionId, state, pendingApproval?, pendingPatch? }` |
+| `session.rollback` | `{ sessionId? }` | `{ total, restored, deleted, skippedDirty, unrestorable, failed, unrecorded }` |
 | `approval.respond` | `{ sessionId, approvalId, approved, note? }` | `{ ok }` |
 | `file.patch.respond` | `{ sessionId, patchId, accept, content?, applyInEditor? }` | `{ ok }` |
 | `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size, dirty? }` |
@@ -63,6 +64,22 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
 - 落地影响：目标是脏文档时补丁**不写磁盘**——客户端改走编辑器缓冲区并回执 `applyInEditor: true`；
   未带该标记则 daemon 拒绝落盘（安全默认），`file.patch.result` 返回 `applied: false` + 原因。
 
+### 会话级回滚（`session.rollback`，P2-6）
+
+与 Diff 审批互补：**审批是事前拦截，回滚是事后兜底**。
+
+- daemon 在**每个文件第一次被写入之前**把它的当前内容存成影子快照（`.dsh/snapshots/<sessionId>/`），
+  同一文件的后续改动**不再覆盖**——回滚语义是「回到本次会话开始前」，不是「回到上一次修改前」。
+- 落地通路的两条（写盘 / 交由编辑器 `applyInEditor`）都会记录；被拒绝、乐观锁冲突等**没有真正改动**的
+  分支一律不记录。
+- 结果**分列**（不是一句"成功/失败"）：`restored`（还原为改动前）/ `deleted`（本次新建，已删除）/
+  `skippedDirty`（目标此刻在编辑器里有未保存改动，**跳过不覆盖**）/ `unrestorable`（改动前内容未能留存，
+  如文件过大）/ `failed`（写盘或删除失败）/ `unrecorded`（快照条目达上限而未纳入回滚的改动数）。
+- 两条门禁：**运行中的会话拒绝回滚**（返回 `-32009`，避免与写入并发）；**还原前对每条路径重做
+  canonical 越界校验**（`index.json` 是本机可写文件，被篡改时不能让 daemon 写到工作区外）。
+- `initialize` 的 `capabilities.rollback` 声明该实现支持回滚（可选，老客户端忽略即可）。
+- 快照**只增不改**，清理交给用户（`.dsh/` 是旁路目录，可随时删）。
+
 ### `model`（真实模型接入）
 
 `initialize.model` 声明模型底座，daemon 端据此构建真实 Agent：
@@ -75,6 +92,19 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
   `TimeoutError` 中断本次请求，避免模型端静默（网关挂住 / 连接半开 / 服务端排队）时会话永久
   卡在 `running`。缺省 60000；`<= 0` 关闭。会话取消（`session.cancel`）另走 `AbortController`
   立即中断在途请求，与空闲超时相互独立。
+- `maxToolRounds?: number` —— **工具调用轮数上限**：跑满后 Agent 收束成一次不带工具定义的最终
+  回答（不再给模型调工具的机会）。缺省 8。
+- `maxContextTokens?: number` —— **上下文 token 预算**：发送前按此估算并裁剪历史，超出时**整轮**
+  丢弃最旧的工具轮次（保留 system + 用户原始请求 + 最近轮）。缺省 48K。
+- `temperature?: number` —— **采样温度**（0–2）。未提供时沿用 daemon 缺省 `0.2`。
+  注意 Anthropic 的合法区间是 **0–1**：越界值在模型层被钳制后发出，不会原样透传
+  （原样透传只会换来一个与配置无关的 400）。
+- `maxTokens?: number` —— **单次输出上限**（`max_tokens`）。未提供 / `<= 0` 表示
+  **不发送该字段**，上限交由服务端决定（OpenAI 兼容端点）；Anthropic 的 `/v1/messages`
+  把 `max_tokens` 列为必填，故未配置时回落 4096。
+
+  后四个字段都是**可选**的：客户端不下发时 daemon 使用缺省值，行为与引入这些字段之前一致
+  （尤其 `temperature`：缺省仍是 0.2，而不是"客户端必须显式声明"）。
 
 `initialize` 返回的 `agent` 字段标明本次实际生效的实现（`mock` | `real`）；扩展可据此在 UI 提示当前是否为真实模型。
 

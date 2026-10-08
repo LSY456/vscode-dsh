@@ -5,6 +5,7 @@ import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentContext, runFakeAgent } from './agent';
 import { isPathInside } from './paths';
+import { SessionSnapshotStore } from './sessionSnapshot';
 import { sleep } from './test-utils';
 
 let tmpDir: string;
@@ -267,5 +268,72 @@ describe('Agent：取消与按需读取', () => {
     const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
     expect(tool.params.ok).toBe(true);
     expect(tool.params.output).toContain('line1');
+  });
+});
+
+/**
+ * P2-6 端到端：Agent 改文件 → 影子快照 → 一键回滚。
+ *
+ * 这条链路的价值全在**装配**上（两个零件各有自己的单测）：快照钩子有没有真的从
+ * AgentContext 接到落地裁决上。钩子挂错位置（比如挂到了"用户拒绝"的分支、或忘了在写盘
+ * 之前调），单测照样全绿，而回滚一个文件都还不了 —— 只有跑一遍完整流程才看得出来。
+ */
+describe('Agent × P2-6：改动之后能回滚', () => {
+  it('接受补丁后，影子快照能把文件还原到本次会话开始前', async () => {
+    const target = path.join(tmpDir, 'rollback-me.txt');
+    fs.writeFileSync(target, 'line1\nTODO: fix\nline3\n', 'utf8');
+
+    const store = new SessionSnapshotStore({
+      root: path.join(tmpDir, '.dsh', 'snapshots'),
+      workspaceRoot: tmpDir,
+      log: () => {},
+    });
+    const ctx = makeCtx({ recordSnapshot: (p, c) => store.record('s1', p, c) });
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改文件，把 TODO 替换为 DONE（write edit）',
+      attachments: [
+        { kind: 'file', path: target, name: 'rollback-me.txt', content: fs.readFileSync(target, 'utf8') },
+      ],
+    });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters.shift()!.resolve(true);
+    await run;
+
+    // 改动确实落盘了（否则下面"回滚成功"就毫无意义）
+    expect(fs.readFileSync(target, 'utf8')).not.toContain('TODO');
+    expect(store.count('s1')).toBe(1);
+
+    const report = store.restore('s1', () => false);
+    expect(report.restored).toHaveLength(1);
+    expect(fs.readFileSync(target, 'utf8')).toBe('line1\nTODO: fix\nline3\n');
+  });
+
+  it('用户拒绝补丁 -> 什么都没改，快照里也不该多出条目', async () => {
+    const target = path.join(tmpDir, 'rejected.txt');
+    fs.writeFileSync(target, 'line1\nTODO: fix\nline3\n', 'utf8');
+
+    const store = new SessionSnapshotStore({
+      root: path.join(tmpDir, '.dsh', 'snapshots'),
+      workspaceRoot: tmpDir,
+      log: () => {},
+    });
+    const ctx = makeCtx({
+      sessionId: 's2',
+      recordSnapshot: (p, c) => store.record('s2', p, c),
+    });
+    const run = runFakeAgent(ctx, {
+      sessionId: 's2',
+      prompt: '请修改文件，把 TODO 替换为 DONE（write edit）',
+      attachments: [{ kind: 'file', path: target, name: 'rejected.txt', content: fs.readFileSync(target, 'utf8') }],
+    });
+
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters.shift()!.resolve(false);
+    await run;
+
+    expect(fs.readFileSync(target, 'utf8')).toContain('TODO');
+    expect(store.count('s2')).toBe(0);
   });
 });

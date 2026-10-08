@@ -398,6 +398,21 @@ export function writeTextFile(root: string, allowedDirs: string[], filePath: str
   fs.writeFileSync(resolved, content, { encoding: 'utf8', mode: 0o644 });
 }
 
+/**
+ * 删除文件（P2-6 会话回滚里"撤销新建"用），仍受 canonical 路径护栏约束。
+ *
+ * 目标不存在视为成功（ENOENT 吞掉）：回滚可能被点第二次，而"它已经不在那儿了"
+ * 与"我们要的结果"一致，不该报成失败让用户以为没回滚干净。
+ */
+export function deleteFile(root: string, allowedDirs: string[], filePath: string): void {
+  const resolved = resolveTarget(root, allowedDirs, filePath);
+  try {
+    fs.unlinkSync(resolved);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+}
+
 /** 读取文件旧内容（用于补丁 diff；文件不存在时返回 undefined），仍受 canonical 路径护栏约束。 */
 export function tryReadFile(root: string, allowedDirs: string[], filePath: string): string | undefined {
   const resolved = resolveTarget(root, allowedDirs, filePath);

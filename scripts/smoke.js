@@ -591,6 +591,47 @@ async function main() {
   assert(rbashDone.params.output.includes(path.basename(tmpDir)), '命令 cwd 被约束到工作区');
   await rconn.rpc.waitFor((m) => m.method === 'session.ended', '真实 bash 会话结束');
 
+  // ---- 10b. P2-6 会话级回滚：把本次会话改过的文件还原到会话开始前
+  console.log('[smoke] 会话级回滚…');
+  const beforeRollback = fs.readFileSync(samplePath, 'utf8');
+  assert(beforeRollback.includes('REAL-DAEMON-WRITE'), '回滚前：文件确实被本次会话改过');
+
+  const rb = await rconn.rpc.request('session.rollback', { sessionId: rsessionId });
+  assert(rb.total >= 1, `回滚报告覆盖了 ${rb.total} 个被改动的文件`);
+  assert(
+    rb.restored.some((p) => path.resolve(p).toLowerCase() === path.resolve(samplePath).toLowerCase()),
+    '回滚报告把 sample.txt 列为已还原'
+  );
+  const afterRollback = fs.readFileSync(samplePath, 'utf8');
+  assert(
+    afterRollback.includes('TODO') && !afterRollback.includes('REAL-DAEMON-WRITE'),
+    '回滚后：磁盘内容还原为本次会话开始前'
+  );
+  assert(rb.skippedDirty.length === 0 && rb.failed.length === 0, '回滚无跳过、无失败');
+
+  // 影子快照落在 .dsh/snapshots/<会话>/（首写优先，只增不改）
+  const snapDir = path.join(tmpDir, '.dsh', 'snapshots', rsessionId);
+  assert(
+    fs.existsSync(path.join(snapDir, 'index.json')) &&
+      fs.readdirSync(snapDir).some((f) => f.endsWith('.snap')),
+    '影子快照已落盘（.dsh/snapshots/<会话>/index.json + *.snap）'
+  );
+
+  // 门禁：运行中的会话拒绝回滚（否则会出现"刚还回去又被改掉"的中间状态）
+  const busySession = (await conn2.rpc.request('session.create', {})).sessionId;
+  conn2.rpc.resetEvents();
+  await conn2.rpc.request('session.send', { sessionId: busySession, prompt: 'slow 输出测试（slow）' });
+  await conn2.rpc.waitFor((m) => m.method === 'message.delta', '慢会话开始输出');
+  let busyCode;
+  try {
+    await conn2.rpc.request('session.rollback', { sessionId: busySession });
+  } catch (err) {
+    busyCode = err.code;
+  }
+  assert(busyCode === -32009, `运行中回滚被拒（期望 -32009，实际 ${busyCode}）`);
+  await conn2.rpc.request('session.cancel', { sessionId: busySession });
+  await conn2.rpc.waitFor((m) => m.method === 'session.ended', '慢会话取消结束', 15000);
+
   // 验证轨迹已持久化到 .dsh/trajectory
   const trajFile = path.join(tmpDir, '.dsh', 'trajectory', rsessionId + '.jsonl');
   assert(fs.existsSync(trajFile) && fs.statSync(trajFile).size > 0, '轨迹已持久化（.dsh/trajectory/*.jsonl）');

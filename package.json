@@ -42,11 +42,21 @@
     "Other",
     "Machine Learning"
   ],
+  "keywords": [
+    "deepseek",
+    "ai",
+    "agent",
+    "llm",
+    "assistant",
+    "code-assistant",
+    "chat"
+  ],
   "activationEvents": [
     "onView:dsh.agentView",
     "onCommand:dsh.openPanel",
     "onCommand:dsh.openEditor",
     "onCommand:dsh.newSession",
+    "onCommand:dsh.rollbackSession",
     "onCommand:dsh.sendSelection",
     "onCommand:dsh.daemon.restart",
     "onCommand:dsh.daemon.status",
@@ -76,52 +86,69 @@
     "commands": [
       {
         "command": "dsh.openPanel",
-        "title": "dsh: 打开 Agent 面板"
+        "category": "dsh",
+        "title": "打开 Agent 面板"
       },
       {
         "command": "dsh.sendSelection",
-        "title": "dsh: 将选中代码发送给 Agent"
+        "category": "dsh",
+        "title": "将选中代码发送给 Agent"
       },
       {
         "command": "dsh.daemon.restart",
-        "title": "dsh: 重启 Daemon"
+        "category": "dsh",
+        "title": "重启 Daemon"
       },
       {
         "command": "dsh.daemon.status",
-        "title": "dsh: 查看 Daemon 状态"
+        "category": "dsh",
+        "title": "查看 Daemon 状态"
       },
       {
         "command": "dsh.trustWorkspace",
-        "title": "dsh: 信任此工作区（启用 Agent）",
+        "category": "dsh",
+        "title": "信任此工作区（启用 Agent）",
         "enablement": "!isWorkspaceTrusted"
       },
       {
         "command": "dsh.diff.accept",
-        "title": "dsh: 应用此补丁",
+        "category": "dsh",
+        "title": "应用此补丁",
         "icon": "$(check)"
       },
       {
         "command": "dsh.diff.reject",
-        "title": "dsh: 拒绝此补丁",
+        "category": "dsh",
+        "title": "拒绝此补丁",
         "icon": "$(x)"
       },
       {
         "command": "dsh.diff.applyEdited",
-        "title": "dsh: 应用 Diff 中的编辑（编辑后应用）",
+        "category": "dsh",
+        "title": "应用 Diff 中的编辑（编辑后应用）",
         "icon": "$(edit)"
       },
       {
         "command": "dsh.debug.captureContext",
-        "title": "dsh: 调试 - 打印捕获的上下文"
+        "category": "dsh",
+        "title": "调试 - 打印捕获的上下文"
       },
       {
         "command": "dsh.newSession",
-        "title": "dsh: 新建会话",
+        "category": "dsh",
+        "title": "新建会话",
         "icon": "$(add)"
       },
       {
+        "command": "dsh.rollbackSession",
+        "category": "dsh",
+        "title": "回滚本次会话的文件改动",
+        "icon": "$(discard)"
+      },
+      {
         "command": "dsh.openEditor",
-        "title": "dsh: 在编辑器列打开 Agent",
+        "category": "dsh",
+        "title": "在编辑器列打开 Agent",
         "icon": "$(open-preview)"
       }
     ],
@@ -143,6 +170,12 @@
           "command": "dsh.openEditor",
           "when": "view == dsh.agentView",
           "group": "navigation@2"
+        },
+        {
+          "command": "dsh.rollbackSession",
+          "comment": "P2-6 会话回滚：破坏性操作，入口放视图标题栏（点击后有模态确认，误点不会直接执行）",
+          "when": "view == dsh.agentView",
+          "group": "navigation@3"
         }
       ],
       "editor/title": [
@@ -161,8 +194,41 @@
           "when": "resourceScheme == dsh-patch",
           "group": "navigation@3"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "dsh.debug.captureContext",
+          "comment": "调试命令：只在排障时用，不该占据命令面板的搜索位",
+          "when": "false"
+        },
+        {
+          "command": "dsh.diff.accept",
+          "comment": "补丁操作只在补丁 Diff 打开时才可调用（没补丁时点了没反应 = 假入口）",
+          "when": "resourceScheme == dsh-patch"
+        },
+        {
+          "command": "dsh.diff.applyEdited",
+          "when": "resourceScheme == dsh-patch"
+        },
+        {
+          "command": "dsh.diff.reject",
+          "when": "resourceScheme == dsh-patch"
+        }
       ]
     },
+    "keybindings": [
+      {
+        "command": "dsh.openPanel",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d"
+      },
+      {
+        "command": "dsh.sendSelection",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
     "configuration": {
       "title": "dsh Agent",
       "properties": {
@@ -237,6 +303,18 @@
           "minimum": 0,
           "maximum": 1800,
           "description": "模型请求空闲超时（秒）：距上一个流式增量超过该时长即中断本次请求，避免模型端静默时会话永久挂起；0 表示关闭。"
+        },
+        "dsh.model.temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "采样温度（0–2）：越低越确定、越高越发散。留空 = 使用内置缺省 0.2。注意 Anthropic 的合法区间是 0–1，超出部分会被钳制到 1。"
+        },
+        "dsh.model.maxTokens": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 131072,
+          "description": "单次输出上限（max_tokens）。留空 = 不发送该字段，由服务端决定上限（OpenAI 兼容端点）；Anthropic 把 max_tokens 列为必填，留空时回落到 4096。"
         },
         "dsh.agent.maxToolRounds": {
           "type": "number",
@@ -318,7 +396,8 @@
     "smoke:protocol": "node scripts/smokeProtocol.js",
     "smoke:real": "node esbuild.js && node scripts/smokeReal.js",
     "test:integration": "node scripts/runIntegrationTests.js",
-    "check": "npm run typecheck && npm run build && npm test && npm run smoke",
+    "check": "npm run typecheck && npm run build && npm test && npm run smoke && npm run check:package",
+    "check:package": "node scripts/checkPackage.js",
     "package": "vsce package --out dist",
     "vscode:prepublish": "npm run build"
   },

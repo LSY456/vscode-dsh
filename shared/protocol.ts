@@ -47,6 +47,7 @@ export const METHODS = {
   SessionSend: 'session.send',
   SessionCancel: 'session.cancel',
   SessionResume: 'session.resume',
+  SessionRollback: 'session.rollback',
   ApprovalRespond: 'approval.respond',
   FilePatchRespond: 'file.patch.respond',
   FileRead: 'file.read',
@@ -104,6 +105,20 @@ export const EVENTS = {
 export const DEFAULT_MAX_TOOL_ROUNDS = 8;
 export const DEFAULT_MAX_CONTEXT_TOKENS = 48 * 1024;
 
+/**
+ * 采样温度缺省值。取自 daemon 模型层原先的硬编码值（0.2）——
+ * 这是"把既有行为暴露成可配项"，**不是**调整缺省行为的地方。
+ */
+export const DEFAULT_TEMPERATURE = 0.2;
+
+/**
+ * 单次输出上限（max_tokens）的回落值。
+ *
+ * 语义按 provider 分岔：OpenAI 兼容端点**不发送**该字段（上限由服务端决定），
+ * 只有 Anthropic 的 /v1/messages 把它列为必填，未配置时才回落到这里。
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+
 export interface ModelConfig {
   /** API 端点 base，如 https://api.deepseek.com/v1 */
   baseURL?: string;
@@ -130,6 +145,17 @@ export interface ModelConfig {
    * 缺省 `DEFAULT_MAX_CONTEXT_TOKENS`。
    */
   maxContextTokens?: number;
+  /**
+   * 采样温度（0–2）：越低越确定、越高越发散。未配置时沿用 `DEFAULT_TEMPERATURE`。
+   * 注意 Anthropic 的合法区间是 0–1 —— 越界值在模型层钳制，不原样发出
+   * （原样发出只会换来一个与配置无关的 400）。
+   */
+  temperature?: number;
+  /**
+   * 单次输出上限（max_tokens）。未配置 / `<= 0` = **不发送该字段**（OpenAI 兼容端点由服务端
+   * 决定上限）；Anthropic 必填，故回落 `DEFAULT_MAX_OUTPUT_TOKENS`。
+   */
+  maxTokens?: number;
 }
 
 export interface InitializeParams {
@@ -174,6 +200,8 @@ export interface InitializeResult {
     trajectory: boolean;
     resume: boolean;
     fileRead: boolean;
+    /** P2-6 会话级回滚（可选，向后兼容）：daemon 会为改动留影子快照并支持还原 */
+    rollback?: boolean;
   };
   /** daemon 为本次连接分配/复用的默认会话 id */
   sessionId?: string;
@@ -287,6 +315,42 @@ export interface SessionResumeResult {
     newContent: string;
     description?: string;
   };
+}
+
+// ---------------------------------------------------------------------------
+// 会话级事务回滚（P2-6）
+// ---------------------------------------------------------------------------
+
+/**
+ * 会话级回滚：把**本次会话**改动过的文件还原到会话开始前。
+ *
+ * 与 Diff 审批是互补的两道门：审批在改动前拦（事前），回滚在改动后兜（事后）。
+ * daemon 侧在「每个文件第一次被写入之前」留一份影子快照（首写优先），本方法据此还原。
+ */
+export interface SessionRollbackParams {
+  sessionId?: string;
+}
+
+/**
+ * 回滚结果。各类**分列而不是合并成一句失败**——
+ * 「跳过了什么、为什么跳过」与「还原成功」对用户的下一步动作完全不同：
+ * 脏文档跳过要用户先保存/放弃改动，不可还原要用户手工处理，失败要用户去查日志。
+ */
+export interface SessionRollbackResult {
+  /** 本次会话记录到的改动文件总数 */
+  total: number;
+  /** 已还原为会话开始前的内容 */
+  restored: string[];
+  /** 本次会话新建、回滚时已删除的文件 */
+  deleted: string[];
+  /** 因编辑器有未保存改动而跳过（绝不覆盖用户正在编辑的内容） */
+  skippedDirty: string[];
+  /** 记录时就未能留存内容（文件过大等），无法回滚 */
+  unrestorable: { path: string; reason: string }[];
+  /** 还原过程中写盘 / 删除失败 */
+  failed: { path: string; error: string }[];
+  /** 因快照条目上限而完全未被记录的改动数（> 0 时本次回滚可能不完整） */
+  unrecorded: number;
 }
 
 export interface FileReadParams {

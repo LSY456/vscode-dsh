@@ -44,6 +44,7 @@ import {
   METHODS,
   SessionCreateResult,
   SessionResumeResult,
+  SessionRollbackResult,
 } from '../shared/protocol';
 import { captureContext } from './contextCapture';
 import { ConfigAccessor } from './configAccessor';
@@ -76,6 +77,7 @@ import {
   describeFetchFailure,
 } from './modelCatalog';
 import { fetchModelIds } from './modelCatalogFetch';
+import { formatRollbackReport } from './rollbackReport';
 import { DEFAULT_MAX_SESSIONS, FileMemento, SessionHistoryStore, SessionSummary } from './sessionHistory';
 import { openTrustManagement } from './trustCommands';
 import { resolveWorkspaceRoot } from './workspaceRoot';
@@ -150,6 +152,9 @@ interface FromWebview {
     /** Agent 循环预算（P2-2）：面板里的两个数字输入；区间在 ConfigAccessor 侧收敛 */
     maxToolRounds?: number;
     maxContextTokens?: number;
+    /** 采样参数（批次 2）：温度 0–2；maxTokens 未配置即不下发（由服务端决定上限） */
+    temperature?: number;
+    maxTokens?: number;
   };
 }
 
@@ -566,6 +571,57 @@ export class WebviewPanelHost {
     this.clearPending();
     this.post({ kind: 'session.reset', sessionId: result.sessionId, reason: 'new' });
     return result.sessionId;
+  }
+
+  /**
+   * 会话级事务回滚（P2-6）：把**本次会话**改动过的文件还原到会话开始前。
+   *
+   * 三个刻意的取舍：
+   * ① **破坏性操作先弹模态确认**，而不是复用面板里的审批卡 —— 审批卡是"Agent 发起的、必须走的门"，
+   *    回滚是用户主动发起的，用原生确认更直接，也不容易被误点。
+   * ② **结论进通知栏，明细进面板**：一句话说不出"哪几个文件被跳过、为什么"，
+   *    而这些恰恰决定用户下一步要做什么（去保存？去手动处理？）。
+   * ③ 前置失败（daemon 未连接 / 会话正在运行）如实报出来，不降级成"点了没反应"。
+   */
+  async rollbackSession(): Promise<void> {
+    const sessionId = this.daemon.getSessionId();
+    if (!this.daemon.client.isOpen || !sessionId) {
+      void vscode.window.showErrorMessage('daemon 未连接，无法回滚本次会话的改动');
+      return;
+    }
+    const pick = await vscode.window.showWarningMessage(
+      '将把本次会话改动过的文件还原到会话开始前。\n' +
+        '编辑器里有未保存改动的文件会被跳过（不会覆盖你正在编辑的内容）。\n' +
+        '此操作不可撤销。',
+      { modal: true },
+      '回滚'
+    );
+    if (pick !== '回滚') return;
+
+    try {
+      const report = await this.daemon.client.request<SessionRollbackResult>(METHODS.SessionRollback, {
+        sessionId,
+      });
+      const ws = resolveWorkspaceRoot(vscode.workspace.workspaceFolders);
+      const summary = formatRollbackReport(report, { workspaceRoot: ws.ok ? ws.root : undefined });
+      // 明细也落日志：面板可能已经关掉，而"哪些文件没回滚成"是需要事后查的
+      logger.info(`会话回滚：${summary.headline}${summary.detail ? `\n${summary.detail}` : ''}`);
+      this.post({
+        kind: 'event',
+        method: 'notice',
+        params: { text: summary.detail ? `${summary.headline}\n${summary.detail}` : summary.headline },
+      });
+      void vscode.window.showInformationMessage(summary.headline);
+    } catch (err) {
+      const code = (err as { code?: number } | null)?.code;
+      const msg = err instanceof Error ? err.message : String(err);
+      // Busy = 会话正在跑。这不是故障而是门禁，文案里已经写清"怎么办"，用警告而不是错误
+      if (code === ERROR_CODES.Busy) {
+        void vscode.window.showWarningMessage(msg);
+      } else {
+        void vscode.window.showErrorMessage(`回滚失败: ${msg}`);
+      }
+    }
   }
 
   /**

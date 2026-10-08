@@ -371,6 +371,9 @@ const settingsDom = await renderScenario(({ emitRaw }) => {
         // Agent 预算（此前的"死配置"）：面板里可改、可留空，留空即不修改
         maxToolRounds: 8,
         maxContextTokens: 49152,
+        // 采样参数（批次 2）：null = 用户没配过 → 面板留空，daemon 侧沿用模型层缺省
+        temperature: null,
+        maxTokens: null,
       },
       hasApiKey: true,
       models: [

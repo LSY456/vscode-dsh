@@ -23,6 +23,8 @@ interface EnvOverrides {
   dirty?: boolean;
   appliedInEditor?: boolean;
   edited?: string;
+  /** P2-6：收集 recordSnapshot 的调用（顺序即调用顺序） */
+  records?: Array<{ path: string; content: string | undefined }>;
 }
 
 function makeEnv(o: EnvOverrides = {}): { env: PatchApplyEnv; notices: string[] } {
@@ -35,6 +37,7 @@ function makeEnv(o: EnvOverrides = {}): { env: PatchApplyEnv; notices: string[] 
       isDirty: () => o.dirty ?? false,
       isAppliedInEditor: () => o.appliedInEditor ?? false,
       getEditedContent: () => o.edited,
+      recordSnapshot: (p, c) => o.records?.push({ path: p, content: c }),
       notifyUser: (delta) => notices.push(delta),
     },
   };
@@ -147,6 +150,97 @@ describe('applyPatchDecision（P0-1 脏文档 / P0-2 乐观锁 / P2 编辑后应
     });
     expect(r.applied).toBe(false);
     expect(r.error).toBeTruthy();
+  });
+});
+
+/**
+ * P2-6 会话回滚：快照必须在**改动发生之前**记下，且只在真的改动了文件时才记。
+ * 三条容易写错的边界：
+ *  ① 通路 3 的记录发生在落盘**之前**（顺序反了就等于什么都没救回来）；
+ *  ② 通路 2（脏文档拒绝落盘）什么都没改 —— 记了会让回滚报告凭空多出一个"改过的文件"；
+ *  ③ 乐观锁冲突 / 路径越界这类**没写盘的**失败同样不记录。
+ */
+describe('applyPatchDecision × P2-6 快照记录', () => {
+  it('通路3：记录顺序在落盘之前，内容是改动前的磁盘内容', () => {
+    fs.writeFileSync(target, 'before', 'utf8');
+    const records: Array<{ path: string; content: string | undefined }> = [];
+    const { env } = makeEnv({ records });
+    const r = applyPatchDecision(env, {
+      patchId: 's1',
+      resolvedPath: target,
+      oldContent: 'before',
+      newContent: 'after',
+    });
+    expect(r.applied).toBe(true);
+    expect(records).toEqual([{ path: target, content: 'before' }]);
+    expect(fs.readFileSync(target, 'utf8')).toBe('after');
+  });
+
+  it('通路1：改动发生在编辑器里，daemon 不落盘 —— 但快照照记', () => {
+    fs.writeFileSync(target, 'disk', 'utf8');
+    const records: Array<{ path: string; content: string | undefined }> = [];
+    const { env } = makeEnv({ appliedInEditor: true, dirty: true, records });
+    applyPatchDecision(env, {
+      patchId: 's2',
+      resolvedPath: target,
+      oldContent: 'disk',
+      newContent: 'agent',
+    });
+    expect(records).toEqual([{ path: target, content: 'disk' }]);
+  });
+
+  it('通路2：脏文档拒绝落盘 -> 不记录（没有任何改动发生）', () => {
+    fs.writeFileSync(target, 'disk', 'utf8');
+    const records: Array<{ path: string; content: string | undefined }> = [];
+    const { env } = makeEnv({ dirty: true, records });
+    const r = applyPatchDecision(env, {
+      patchId: 's3',
+      resolvedPath: target,
+      oldContent: 'buffer',
+      newContent: 'agent',
+    });
+    expect(r.applied).toBe(false);
+    expect(records).toEqual([]);
+  });
+
+  it('乐观锁冲突 -> 不记录（写盘没发生，回滚不该把它算进去）', () => {
+    fs.writeFileSync(target, 'changed-by-others', 'utf8');
+    const records: Array<{ path: string; content: string | undefined }> = [];
+    const { env } = makeEnv({ records });
+    applyPatchDecision(env, {
+      patchId: 's4',
+      resolvedPath: target,
+      oldContent: 'disk',
+      newContent: 'agent',
+    });
+    expect(records).toEqual([]);
+  });
+
+  it('从无到有新建 -> 记录 content 为 undefined（回滚语义即"删除"）', () => {
+    const fresh = path.join(root, 'snap-new.txt');
+    const records: Array<{ path: string; content: string | undefined }> = [];
+    const { env } = makeEnv({ records });
+    applyPatchDecision(env, {
+      patchId: 's5',
+      resolvedPath: fresh,
+      oldContent: undefined,
+      newContent: 'hello',
+    });
+    expect(records).toEqual([{ path: fresh, content: undefined }]);
+  });
+
+  it('编辑后应用：快照仍取 oldContent，而不是用户编辑后的内容', () => {
+    fs.writeFileSync(target, 'disk', 'utf8');
+    const records: Array<{ path: string; content: string | undefined }> = [];
+    const { env } = makeEnv({ edited: 'user-edited', records });
+    applyPatchDecision(env, {
+      patchId: 's6',
+      resolvedPath: target,
+      oldContent: 'disk',
+      newContent: 'agent',
+    });
+    expect(records).toEqual([{ path: target, content: 'disk' }]);
+    expect(fs.readFileSync(target, 'utf8')).toBe('user-edited');
   });
 });
 
