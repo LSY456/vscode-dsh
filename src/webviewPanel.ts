@@ -150,6 +150,9 @@ interface FromWebview {
     /** Agent 循环预算（P2-2）：面板里的两个数字输入；区间在 ConfigAccessor 侧收敛 */
     maxToolRounds?: number;
     maxContextTokens?: number;
+    /** 采样参数（批次 2）：温度 0–2；maxTokens 未配置即不下发（由服务端决定上限） */
+    temperature?: number;
+    maxTokens?: number;
   };
 }
 

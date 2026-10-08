@@ -442,3 +442,56 @@ describe('describeHttpError：HTTP 失败要给出可执行的原因', () => {
     expect(describeHttpError(500, '').message).not.toMatch(/：$/);
   });
 });
+
+describe('采样参数可配（批次 2）', () => {
+  /** 捕获每次请求体（fetch 被 stub 掉，不出网）。 */
+  function capture(): Array<Record<string, unknown>> {
+    const calls: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      calls.push(JSON.parse(init.body));
+      return { ok: true, body: sseChunks(['data: [DONE]']), text: async () => '' };
+    });
+    return calls;
+  }
+
+  it('OpenAI 兼容：温度未配置时沿用缺省 0.2，配置后原样发送', async () => {
+    const calls = capture();
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+    await model.chat([{ role: 'user', content: 'x' }]);
+    expect(calls[0].temperature).toBe(0.2);
+    await model.chat([{ role: 'user', content: 'x' }], { temperature: 1.1 });
+    expect(calls[1].temperature).toBe(1.1);
+  });
+
+  it('OpenAI 兼容：未配置 maxTokens 时**不发送**该字段（上限交给服务端）', async () => {
+    const calls = capture();
+    const model = new OpenAICompatibleModel({ apiKey: 'k' });
+
+    await model.chat([{ role: 'user', content: 'x' }]);
+    expect('max_tokens' in calls[0]).toBe(false);
+    // 0 / 负数 = "不指定"的另一种写法，同样不发送（而不是真去要 0 个 token）
+    await model.chat([{ role: 'user', content: 'x' }], { maxTokens: 0 });
+    expect('max_tokens' in calls[1]).toBe(false);
+    // 配了才发，且取整（部分端点不接受小数）
+    await model.chat([{ role: 'user', content: 'x' }], { maxTokens: 2048.4 });
+    expect(calls[2].max_tokens).toBe(2048);
+  });
+
+  it('Anthropic：max_tokens 必填故未配置时回落 4096；温度钳制到 0–1', async () => {
+    const calls = capture();
+    const model = new AnthropicModel({ baseURL: 'https://a.example', apiKey: 'ak', model: 'claude-x' });
+
+    await model.chat([{ role: 'user', content: 'x' }]);
+    expect(calls[0].max_tokens).toBe(4096);
+    expect(calls[0].temperature).toBe(0.2); // 与 OpenAI 链路对齐（此前该链路不发送温度）
+
+    await model.chat([{ role: 'user', content: 'x' }], { maxTokens: 8000, temperature: 1.5 });
+    expect(calls[1].max_tokens).toBe(8000);
+    // OpenAI 区间是 0–2，Anthropic 只到 1：越界**钳制**而不是原样发出 ——
+    // 原样发出是必然 400，而用户只会看到"上游报错"，无从归因到自己的配置。
+    expect(calls[1].temperature).toBe(1);
+
+    await model.chat([{ role: 'user', content: 'x' }], { temperature: -3 });
+    expect(calls[2].temperature).toBe(0);
+  });
+});

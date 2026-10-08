@@ -104,6 +104,20 @@ export const EVENTS = {
 export const DEFAULT_MAX_TOOL_ROUNDS = 8;
 export const DEFAULT_MAX_CONTEXT_TOKENS = 48 * 1024;
 
+/**
+ * 采样温度缺省值。取自 daemon 模型层原先的硬编码值（0.2）——
+ * 这是"把既有行为暴露成可配项"，**不是**调整缺省行为的地方。
+ */
+export const DEFAULT_TEMPERATURE = 0.2;
+
+/**
+ * 单次输出上限（max_tokens）的回落值。
+ *
+ * 语义按 provider 分岔：OpenAI 兼容端点**不发送**该字段（上限由服务端决定），
+ * 只有 Anthropic 的 /v1/messages 把它列为必填，未配置时才回落到这里。
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+
 export interface ModelConfig {
   /** API 端点 base，如 https://api.deepseek.com/v1 */
   baseURL?: string;
@@ -130,6 +144,17 @@ export interface ModelConfig {
    * 缺省 `DEFAULT_MAX_CONTEXT_TOKENS`。
    */
   maxContextTokens?: number;
+  /**
+   * 采样温度（0–2）：越低越确定、越高越发散。未配置时沿用 `DEFAULT_TEMPERATURE`。
+   * 注意 Anthropic 的合法区间是 0–1 —— 越界值在模型层钳制，不原样发出
+   * （原样发出只会换来一个与配置无关的 400）。
+   */
+  temperature?: number;
+  /**
+   * 单次输出上限（max_tokens）。未配置 / `<= 0` = **不发送该字段**（OpenAI 兼容端点由服务端
+   * 决定上限）；Anthropic 必填，故回落 `DEFAULT_MAX_OUTPUT_TOKENS`。
+   */
+  maxTokens?: number;
 }
 
 export interface InitializeParams {

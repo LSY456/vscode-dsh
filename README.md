@@ -144,6 +144,8 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
 | `dsh.model.model` | `deepseek-flash` | 模型名。建议在侧边栏「模型设置」里从下拉选择（列表自动跟随 DeepSeek 官方更新） |
 | `dsh.model.idleTimeoutSeconds` | `60` | 模型请求空闲超时秒数（0–1800，0 = 关闭）；距上一个流式增量超时即中断，防会话永久挂起 |
+| `dsh.model.temperature` | *（空）* | 采样温度 0–2；**留空 = 内置缺省 `0.2`**（留空时 daemon 根本不下发该值，行为与引入本项之前逐字节一致）。Anthropic 合法区间是 0–1，超出会被钳制 |
+| `dsh.model.maxTokens` | *（空）* | 单次输出上限；留空 = **不发送该字段**，由服务端决定上限。Anthropic 把 `max_tokens` 列为必填，留空时回落 4096 |
 | `dsh.agent.maxToolRounds` | `8` | 单轮会话最多工具调用轮次（1–50）；跑满后强制收束（`requestFinalAnswer`），不带工具再问一次给出正文 |
 | `dsh.agent.maxContextTokens` | `49152` | 上下文预算 token 数（4000–1000000）；超出后按滑动窗口丢弃最旧的工具轮次（保留系统提示与用户原始消息） |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |

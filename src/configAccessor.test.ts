@@ -102,6 +102,9 @@ describe('ConfigAccessor：面板配置读写（非凭据项）', () => {
       provider: 'auto',
       maxToolRounds: DEFAULT_MAX_TOOL_ROUNDS,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+      // 采样参数没有缺省值可回落到"当前值"：null = 用户没配过（详见下方「采样参数」一组）
+      temperature: null,
+      maxTokens: null,
     });
   });
 
@@ -168,5 +171,48 @@ describe('ConfigAccessor：Agent 预算（此前的"死配置"——用户改不
     const acc = new ConfigAccessor(makeSecrets().secrets, config);
     await acc.applyPanelConfig({ model: 'deepseek-flash' });
     expect(updates.some(([k]) => k.startsWith('agent.'))).toBe(false);
+  });
+});
+
+describe('ConfigAccessor：采样参数（批次 2）', () => {
+  it('未配置时读出 null —— 不能用缺省值冒充"用户配过"', () => {
+    const cfg = new ConfigAccessor(makeSecrets().secrets, makeConfig().config).getPanelConfig();
+    // null ⇒ 面板留空、daemon 不下发 ⇒ 温度仍走模型层缺省、上限仍不发送，
+    // 与引入本项之前逐字节一致。若在这里回落成 0.2，Anthropic 链路会被顺带改变行为
+    // （它此前根本不发送温度）—— 那是"加一个可配项"不该带来的变化。
+    expect(cfg.temperature).toBeNull();
+    expect(cfg.maxTokens).toBeNull();
+  });
+
+  it('配置后原样读出，不被缺省或面板逻辑改写', () => {
+    const cfg = new ConfigAccessor(
+      makeSecrets().secrets,
+      makeConfig({ 'model.temperature': 0.7, 'model.maxTokens': 8192 }).config
+    ).getPanelConfig();
+    expect(cfg.temperature).toBe(0.7);
+    expect(cfg.maxTokens).toBe(8192);
+  });
+
+  it('写入侧钳制区间，且温度保留小数（走整数钳制会把 0.2 变成 0）', async () => {
+    const { config, map } = makeConfig();
+    const acc = new ConfigAccessor(makeSecrets().secrets, config);
+
+    await acc.applyPanelConfig({ temperature: 0.2, maxTokens: 10 ** 9 });
+    expect(map.get('model.temperature')).toBe(0.2);
+    expect(map.get('model.maxTokens')).toBe(131_072);
+
+    await acc.applyPanelConfig({ temperature: 9, maxTokens: -5 });
+    expect(map.get('model.temperature')).toBe(2);
+    expect(map.get('model.maxTokens')).toBe(1);
+  });
+
+  it('非数字丢弃本次写入，而不是落一个缺省值进去', async () => {
+    const { config, map, updates } = makeConfig();
+    const acc = new ConfigAccessor(makeSecrets().secrets, config);
+    await acc.applyPanelConfig({ temperature: Number.NaN, maxTokens: Number.NaN });
+    // 用户没填 ≠ 他想改成缺省值：写进去就等于替他做了决定
+    expect(map.has('model.temperature')).toBe(false);
+    expect(map.has('model.maxTokens')).toBe(false);
+    expect(updates).toHaveLength(0);
   });
 });

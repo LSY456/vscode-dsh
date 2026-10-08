@@ -15,6 +15,10 @@
  */
 import { DEFAULT_MAX_CONTEXT_TOKENS, DEFAULT_MAX_TOOL_ROUNDS } from '../shared/protocol';
 
+/** 采样参数的可配置区间（写入侧收敛用；与 package.json 的 minimum/maximum 一致）。 */
+const TEMPERATURE_RANGE = { min: 0, max: 2 } as const;
+const MAX_OUTPUT_TOKENS_RANGE = { min: 1, max: 131_072 } as const;
+
 export const API_KEY_SECRET = 'dsh.apiKey';
 
 /** 用 PromiseLike 而非 Promise：兼容 vscode.Thenable 返回值 */
@@ -73,6 +77,8 @@ export class ConfigAccessor {
     provider: string;
     maxToolRounds: number;
     maxContextTokens: number;
+    temperature: number | null;
+    maxTokens: number | null;
   } {
     return {
       baseURL: this.config.get('model.baseURL', ''),
@@ -83,6 +89,12 @@ export class ConfigAccessor {
       // 缺省值与协议共用，避免两侧各写一份而漂移。
       maxToolRounds: this.config.get('agent.maxToolRounds', DEFAULT_MAX_TOOL_ROUNDS),
       maxContextTokens: this.config.get('agent.maxContextTokens', DEFAULT_MAX_CONTEXT_TOKENS),
+      // 采样参数刻意**不给缺省值**：null 表示"用户没配" —— 面板留空、daemon 侧不下发，
+      // 于是温度仍走模型层缺省（0.2）、上限仍不发送，与引入本项之前逐字节一致。
+      // 若在这里回落成 0.2，Anthropic 链路会被顺带改成 0.2（此前它不发送温度），
+      // 那是"加一个可配项"不该带来的行为变化。
+      temperature: this.config.get<number | null>('model.temperature', null),
+      maxTokens: this.config.get<number | null>('model.maxTokens', null),
     };
   }
 
@@ -94,6 +106,8 @@ export class ConfigAccessor {
     provider?: string;
     maxToolRounds?: number;
     maxContextTokens?: number;
+    temperature?: number;
+    maxTokens?: number;
   }): Promise<void> {
     if (values.baseURL !== undefined) await this.config.update('model.baseURL', values.baseURL || '');
     if (values.model !== undefined) await this.config.update('model.model', values.model || '');
@@ -108,6 +122,16 @@ export class ConfigAccessor {
         clampInt(values.maxContextTokens, 4_000, 1_000_000, DEFAULT_MAX_CONTEXT_TOKENS)
       );
     }
+    // 采样参数：temperature 是小数，不能走 clampInt（会把 0.2 四舍五入成 0）；
+    // 越界值钳制到区间，非数字则**丢弃本次写入** —— 用户没填 ≠ 他想改成缺省值。
+    if (values.temperature !== undefined) {
+      const t = clampNumber(values.temperature, TEMPERATURE_RANGE.min, TEMPERATURE_RANGE.max);
+      if (t !== undefined) await this.config.update('model.temperature', t);
+    }
+    if (values.maxTokens !== undefined) {
+      const m = clampNumber(values.maxTokens, MAX_OUTPUT_TOKENS_RANGE.min, MAX_OUTPUT_TOKENS_RANGE.max);
+      if (m !== undefined) await this.config.update('model.maxTokens', Math.round(m));
+    }
   }
 }
 
@@ -119,7 +143,13 @@ export class ConfigAccessor {
  * 写进配置后会被 daemon 无条件采用。
  */
 function clampInt(value: number, min: number, max: number, fallback: number): number {
+  const n = clampNumber(value, min, max);
+  return n === undefined ? fallback : Math.round(n);
+}
+
+/** 收敛任意输入到 [min, max]（保留小数）；非数字返回 undefined，由调用方决定怎么处理。 */
+function clampNumber(value: number, min: number, max: number): number | undefined {
   const n = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, Math.round(n)));
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(max, Math.max(min, n));
 }

@@ -83,6 +83,10 @@ export interface RuntimeConfig {
   /** Agent 循环预算（P2-2）：工具调用轮数上限 / 上下文 token 预算；undefined = 用协议缺省 */
   maxToolRounds?: number;
   maxContextTokens?: number;
+  /** 采样温度（0–2）；undefined = 用模型层缺省（0.2），即不改动既有行为 */
+  temperature?: number;
+  /** 单次输出上限（max_tokens）；undefined / <= 0 = 不发送该字段，由服务端决定 */
+  maxTokens?: number;
 }
 
 /**
@@ -339,6 +343,10 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           // Agent 循环预算（P2-2）：区间合法性在扩展侧写入配置时就已收敛，这里只做透传
           if (p.model?.maxToolRounds !== undefined) rt.maxToolRounds = p.model.maxToolRounds;
           if (p.model?.maxContextTokens !== undefined) rt.maxContextTokens = p.model.maxContextTokens;
+          // 采样参数（批次 2）：undefined 一律视为"用户没配" —— 温度继续走模型层缺省 0.2，
+          // 上限继续不发送；只有显式配置才改变请求体。
+          if (p.model?.temperature !== undefined) rt.temperature = p.model.temperature;
+          if (p.model?.maxTokens !== undefined) rt.maxTokens = p.model.maxTokens;
           const session = sessions.create();
           attach(conn, session);
           // 显式回报「为什么是 mock」，让前端能提示"演示模式"而不是静默降级
@@ -454,6 +462,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               // 未配置时留 undefined，由 realAgent 用协议缺省兜底。
               maxToolRounds: conn.runtime.maxToolRounds,
               maxContextTokens: conn.runtime.maxContextTokens,
+              temperature: conn.runtime.temperature,
+              maxTokens: conn.runtime.maxTokens,
             };
             void runRealAgent(ctx, p, agentConfig).finally(() => {
               session.end();

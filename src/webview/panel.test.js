@@ -1127,3 +1127,83 @@ describe('设置面板：Agent 预算不再"改不到"', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 });
+
+/**
+ * 采样参数（温度 / 输出上限）。
+ *
+ * 与上一组的关键差别：这里 `null` 是**有语义**的 —— 它表示"用户从没配过"，面板必须留空、
+ * 提交时也不下发，好让 daemon 侧继续用模型层缺省（温度 0.2、上限不发送）。若在扩展侧
+ * 回落成一个具体数字，就是把"没配"悄悄变成"配成 0.2"，凭空改变请求体。
+ */
+describe('设置面板：采样参数可配（批次 2）', () => {
+  const loadSettings = (config) => {
+    document.getElementById('btn-settings').click();
+    emitEvent('settings.loaded', {
+      config: {
+        model: 'deepseek-flash',
+        baseURL: 'https://api.deepseek.com/v1',
+        provider: 'auto',
+        ...config,
+      },
+      hasApiKey: true,
+      models: [{ id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' }],
+      modelsHint: '',
+    });
+  };
+
+  const submit = () => {
+    document
+      .getElementById('settings-form')
+      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    return lastMessageOfKind('settings.apply').settings;
+  };
+
+  it('两个字段都在表单里，且是带区间的数字输入', () => {
+    const temp = document.getElementById('inp-temperature');
+    const max = document.getElementById('inp-max-tokens');
+    expect(temp).not.toBeNull();
+    expect(max).not.toBeNull();
+    expect(temp.type).toBe('number');
+    expect(temp.min).toBe('0');
+    expect(temp.max).toBe('2');
+    expect(max.type).toBe('number');
+    expect(max.min).toBe('1');
+    expect(max.max).toBe('131072');
+  });
+
+  it('settings.loaded 把当前值填进输入框', () => {
+    loadSettings({ temperature: 0.7, maxTokens: 8192 });
+    expect(document.getElementById('inp-temperature').value).toBe('0.7');
+    expect(document.getElementById('inp-max-tokens').value).toBe('8192');
+  });
+
+  it('null（用户没配过）时留空 —— 显示 0.2 会把"没配"变成"配成 0.2"', () => {
+    loadSettings({ temperature: null, maxTokens: null });
+    expect(document.getElementById('inp-temperature').value).toBe('');
+    expect(document.getElementById('inp-max-tokens').value).toBe('');
+  });
+
+  it('填写后随 settings.apply 提交为数字', () => {
+    loadSettings({});
+    document.getElementById('inp-temperature').value = '1.2';
+    document.getElementById('inp-max-tokens').value = '4096';
+    const sent = submit();
+    expect(sent.temperature).toBe(1.2);
+    expect(sent.maxTokens).toBe(4096);
+  });
+
+  it('留空的判据是"空串"而不是"假值"：显式填 0 必须原样提交', () => {
+    loadSettings({});
+    document.getElementById('inp-temperature').value = '';
+    document.getElementById('inp-max-tokens').value = '';
+    const sent = submit();
+    expect(sent.temperature).toBeUndefined();
+    expect(sent.maxTokens).toBeUndefined();
+
+    // 温度 0 = 最确定，是**合法值**；用 `if (x)` 判断真假会把它当成"没填"而丢掉
+    document.getElementById('inp-temperature').value = '0';
+    expect(submit().temperature).toBe(0);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+});

@@ -238,6 +238,18 @@
           "maximum": 1800,
           "description": "模型请求空闲超时（秒）：距上一个流式增量超过该时长即中断本次请求，避免模型端静默时会话永久挂起；0 表示关闭。"
         },
+        "dsh.model.temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2,
+          "description": "采样温度（0–2）：越低越确定、越高越发散。留空 = 使用内置缺省 0.2。注意 Anthropic 的合法区间是 0–1，超出部分会被钳制到 1。"
+        },
+        "dsh.model.maxTokens": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 131072,
+          "description": "单次输出上限（max_tokens）。留空 = 不发送该字段，由服务端决定上限（OpenAI 兼容端点）；Anthropic 把 max_tokens 列为必填，留空时回落到 4096。"
+        },
         "dsh.agent.maxToolRounds": {
           "type": "number",
           "default": 8,
