@@ -1207,3 +1207,36 @@ describe('设置面板：采样参数可配（批次 2）', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 });
+
+/**
+ * 会话回滚（P2-6）的结果是**多行**系统消息：分项汇报「还原 / 删除 / 跳过 / 失败」。
+ *
+ * 只断言 JS 写进 DOM 的话，只能证明文本到了 —— 真正决定用户能不能看出分类的是样式表：
+ * `.message.system` 少一条 `white-space: pre-line`，HTML 就会把换行折叠成空格，
+ * 六类信息糊成一整行，而这个功能在 UI 上的**全部价值**就是把它们分清楚。
+ * 所以两半都要钉：CSS 有那条规则 + DOM 真的命中它。
+ */
+describe('会话回滚结果的多行汇报', () => {
+  const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+
+  it('样式表声明了系统消息保留换行', () => {
+    expect(css).toMatch(/\.message\.system\s*\{[^}]*white-space:\s*pre-line/);
+  });
+
+  it('notice 的多行文本原样落到 .message.system 且命中该规则', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_rollback_ui', reason: 'new' });
+    emitEvent('notice', {
+      text:
+        '已回滚 2 处文件改动，另有 1 处未处理\n' +
+        '- 还原为改动前：a.ts、b.ts\n' +
+        '- 跳过 1 个（编辑器里有未保存的改动）：c.ts。请先保存或放弃这些改动后再回滚。',
+    });
+
+    const nodes = [...document.querySelectorAll('.message.system')];
+    const last = nodes[nodes.length - 1];
+    // 换行必须真的在文本里（而不是被谁先做了 replace）
+    expect(last.textContent.split('\n')).toHaveLength(3);
+    expect(last.textContent).toContain('跳过 1 个');
+    expect(last.matches('.message.system')).toBe(true);
+  });
+});

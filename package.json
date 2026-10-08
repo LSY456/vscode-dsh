@@ -56,6 +56,7 @@
     "onCommand:dsh.openPanel",
     "onCommand:dsh.openEditor",
     "onCommand:dsh.newSession",
+    "onCommand:dsh.rollbackSession",
     "onCommand:dsh.sendSelection",
     "onCommand:dsh.daemon.restart",
     "onCommand:dsh.daemon.status",
@@ -139,6 +140,12 @@
         "icon": "$(add)"
       },
       {
+        "command": "dsh.rollbackSession",
+        "category": "dsh",
+        "title": "回滚本次会话的文件改动",
+        "icon": "$(discard)"
+      },
+      {
         "command": "dsh.openEditor",
         "category": "dsh",
         "title": "在编辑器列打开 Agent",
@@ -163,6 +170,12 @@
           "command": "dsh.openEditor",
           "when": "view == dsh.agentView",
           "group": "navigation@2"
+        },
+        {
+          "command": "dsh.rollbackSession",
+          "comment": "P2-6 会话回滚：破坏性操作，入口放视图标题栏（点击后有模态确认，误点不会直接执行）",
+          "when": "view == dsh.agentView",
+          "group": "navigation@3"
         }
       ],
       "editor/title": [

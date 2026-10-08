@@ -391,6 +391,9 @@ body {
   font-size: var(--dsh-fs-sm);
   text-align: left;
   padding: var(--dsh-sp-1) 0;
+  /* 系统消息可能是多行的（如会话回滚的分项汇报），而 DOM 里是纯 textContent：
+     不加这条，行与行会被 HTML 折叠成一行，明细全糊在一起 */
+  white-space: pre-line;
 }
 .message.error {
   border-left: 2px solid var(--dsh-err);

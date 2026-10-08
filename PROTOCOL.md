@@ -44,6 +44,7 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 | `session.send` | `{ sessionId?, prompt, attachments? }` | `{ sessionId, accepted }` |
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
 | `session.resume` | `{ sessionId }` | `{ sessionId, state, pendingApproval?, pendingPatch? }` |
+| `session.rollback` | `{ sessionId? }` | `{ total, restored, deleted, skippedDirty, unrestorable, failed, unrecorded }` |
 | `approval.respond` | `{ sessionId, approvalId, approved, note? }` | `{ ok }` |
 | `file.patch.respond` | `{ sessionId, patchId, accept, content?, applyInEditor? }` | `{ ok }` |
 | `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size, dirty? }` |
@@ -62,6 +63,22 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
 - 生效范围：`file.read` 返回 `dirty: true`；Agent 的 `read_file` 与 `apply_patch` 基准（diff 的 old 侧）同源。
 - 落地影响：目标是脏文档时补丁**不写磁盘**——客户端改走编辑器缓冲区并回执 `applyInEditor: true`；
   未带该标记则 daemon 拒绝落盘（安全默认），`file.patch.result` 返回 `applied: false` + 原因。
+
+### 会话级回滚（`session.rollback`，P2-6）
+
+与 Diff 审批互补：**审批是事前拦截，回滚是事后兜底**。
+
+- daemon 在**每个文件第一次被写入之前**把它的当前内容存成影子快照（`.dsh/snapshots/<sessionId>/`），
+  同一文件的后续改动**不再覆盖**——回滚语义是「回到本次会话开始前」，不是「回到上一次修改前」。
+- 落地通路的两条（写盘 / 交由编辑器 `applyInEditor`）都会记录；被拒绝、乐观锁冲突等**没有真正改动**的
+  分支一律不记录。
+- 结果**分列**（不是一句"成功/失败"）：`restored`（还原为改动前）/ `deleted`（本次新建，已删除）/
+  `skippedDirty`（目标此刻在编辑器里有未保存改动，**跳过不覆盖**）/ `unrestorable`（改动前内容未能留存，
+  如文件过大）/ `failed`（写盘或删除失败）/ `unrecorded`（快照条目达上限而未纳入回滚的改动数）。
+- 两条门禁：**运行中的会话拒绝回滚**（返回 `-32009`，避免与写入并发）；**还原前对每条路径重做
+  canonical 越界校验**（`index.json` 是本机可写文件，被篡改时不能让 daemon 写到工作区外）。
+- `initialize` 的 `capabilities.rollback` 声明该实现支持回滚（可选，老客户端忽略即可）。
+- 快照**只增不改**，清理交给用户（`.dsh/` 是旁路目录，可随时删）。
 
 ### `model`（真实模型接入）
 

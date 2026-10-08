@@ -6,6 +6,7 @@
  *  - DshDiffManager：原生 Diff 预览与补丁审批
  *  - WebviewPanelHost：对话 / 推理流 / 工具卡 / 审批卡 UI
  *  - 命令：dsh.openPanel / dsh.sendSelection / dsh.daemon.restart / dsh.daemon.status
+ *          / dsh.newSession / dsh.rollbackSession（P2-6 会话回滚）
  */
 import * as vscode from 'vscode';
 import { ConfigAccessor } from './configAccessor';
@@ -125,6 +126,8 @@ export function activate(context: vscode.ExtensionContext): DshApi {
         );
       }
     }),
+    // P2-6 会话级事务回滚：把本次会话改动过的文件还原到会话开始前（确认与汇报都在 panel 里）
+    vscode.commands.registerCommand('dsh.rollbackSession', () => panel.rollbackSession()),
     vscode.commands.registerCommand('dsh.sendSelection', async () => {
       const editor = vscode.window.activeTextEditor;
       let prompt = '请分析当前文件并给出建议。';

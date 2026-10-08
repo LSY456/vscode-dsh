@@ -47,6 +47,7 @@ export const METHODS = {
   SessionSend: 'session.send',
   SessionCancel: 'session.cancel',
   SessionResume: 'session.resume',
+  SessionRollback: 'session.rollback',
   ApprovalRespond: 'approval.respond',
   FilePatchRespond: 'file.patch.respond',
   FileRead: 'file.read',
@@ -199,6 +200,8 @@ export interface InitializeResult {
     trajectory: boolean;
     resume: boolean;
     fileRead: boolean;
+    /** P2-6 会话级回滚（可选，向后兼容）：daemon 会为改动留影子快照并支持还原 */
+    rollback?: boolean;
   };
   /** daemon 为本次连接分配/复用的默认会话 id */
   sessionId?: string;
@@ -312,6 +315,42 @@ export interface SessionResumeResult {
     newContent: string;
     description?: string;
   };
+}
+
+// ---------------------------------------------------------------------------
+// 会话级事务回滚（P2-6）
+// ---------------------------------------------------------------------------
+
+/**
+ * 会话级回滚：把**本次会话**改动过的文件还原到会话开始前。
+ *
+ * 与 Diff 审批是互补的两道门：审批在改动前拦（事前），回滚在改动后兜（事后）。
+ * daemon 侧在「每个文件第一次被写入之前」留一份影子快照（首写优先），本方法据此还原。
+ */
+export interface SessionRollbackParams {
+  sessionId?: string;
+}
+
+/**
+ * 回滚结果。各类**分列而不是合并成一句失败**——
+ * 「跳过了什么、为什么跳过」与「还原成功」对用户的下一步动作完全不同：
+ * 脏文档跳过要用户先保存/放弃改动，不可还原要用户手工处理，失败要用户去查日志。
+ */
+export interface SessionRollbackResult {
+  /** 本次会话记录到的改动文件总数 */
+  total: number;
+  /** 已还原为会话开始前的内容 */
+  restored: string[];
+  /** 本次会话新建、回滚时已删除的文件 */
+  deleted: string[];
+  /** 因编辑器有未保存改动而跳过（绝不覆盖用户正在编辑的内容） */
+  skippedDirty: string[];
+  /** 记录时就未能留存内容（文件过大等），无法回滚 */
+  unrestorable: { path: string; reason: string }[];
+  /** 还原过程中写盘 / 删除失败 */
+  failed: { path: string; error: string }[];
+  /** 因快照条目上限而完全未被记录的改动数（> 0 时本次回滚可能不完整） */
+  unrecorded: number;
 }
 
 export interface FileReadParams {
