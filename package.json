@@ -42,6 +42,15 @@
     "Other",
     "Machine Learning"
   ],
+  "keywords": [
+    "deepseek",
+    "ai",
+    "agent",
+    "llm",
+    "assistant",
+    "code-assistant",
+    "chat"
+  ],
   "activationEvents": [
     "onView:dsh.agentView",
     "onCommand:dsh.openPanel",
@@ -76,52 +85,63 @@
     "commands": [
       {
         "command": "dsh.openPanel",
-        "title": "dsh: 打开 Agent 面板"
+        "category": "dsh",
+        "title": "打开 Agent 面板"
       },
       {
         "command": "dsh.sendSelection",
-        "title": "dsh: 将选中代码发送给 Agent"
+        "category": "dsh",
+        "title": "将选中代码发送给 Agent"
       },
       {
         "command": "dsh.daemon.restart",
-        "title": "dsh: 重启 Daemon"
+        "category": "dsh",
+        "title": "重启 Daemon"
       },
       {
         "command": "dsh.daemon.status",
-        "title": "dsh: 查看 Daemon 状态"
+        "category": "dsh",
+        "title": "查看 Daemon 状态"
       },
       {
         "command": "dsh.trustWorkspace",
-        "title": "dsh: 信任此工作区（启用 Agent）",
+        "category": "dsh",
+        "title": "信任此工作区（启用 Agent）",
         "enablement": "!isWorkspaceTrusted"
       },
       {
         "command": "dsh.diff.accept",
-        "title": "dsh: 应用此补丁",
+        "category": "dsh",
+        "title": "应用此补丁",
         "icon": "$(check)"
       },
       {
         "command": "dsh.diff.reject",
-        "title": "dsh: 拒绝此补丁",
+        "category": "dsh",
+        "title": "拒绝此补丁",
         "icon": "$(x)"
       },
       {
         "command": "dsh.diff.applyEdited",
-        "title": "dsh: 应用 Diff 中的编辑（编辑后应用）",
+        "category": "dsh",
+        "title": "应用 Diff 中的编辑（编辑后应用）",
         "icon": "$(edit)"
       },
       {
         "command": "dsh.debug.captureContext",
-        "title": "dsh: 调试 - 打印捕获的上下文"
+        "category": "dsh",
+        "title": "调试 - 打印捕获的上下文"
       },
       {
         "command": "dsh.newSession",
-        "title": "dsh: 新建会话",
+        "category": "dsh",
+        "title": "新建会话",
         "icon": "$(add)"
       },
       {
         "command": "dsh.openEditor",
-        "title": "dsh: 在编辑器列打开 Agent",
+        "category": "dsh",
+        "title": "在编辑器列打开 Agent",
         "icon": "$(open-preview)"
       }
     ],
@@ -161,8 +181,41 @@
           "when": "resourceScheme == dsh-patch",
           "group": "navigation@3"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "dsh.debug.captureContext",
+          "comment": "调试命令：只在排障时用，不该占据命令面板的搜索位",
+          "when": "false"
+        },
+        {
+          "command": "dsh.diff.accept",
+          "comment": "补丁操作只在补丁 Diff 打开时才可调用（没补丁时点了没反应 = 假入口）",
+          "when": "resourceScheme == dsh-patch"
+        },
+        {
+          "command": "dsh.diff.applyEdited",
+          "when": "resourceScheme == dsh-patch"
+        },
+        {
+          "command": "dsh.diff.reject",
+          "when": "resourceScheme == dsh-patch"
+        }
       ]
     },
+    "keybindings": [
+      {
+        "command": "dsh.openPanel",
+        "key": "ctrl+alt+d",
+        "mac": "cmd+alt+d"
+      },
+      {
+        "command": "dsh.sendSelection",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
     "configuration": {
       "title": "dsh Agent",
       "properties": {
@@ -330,7 +383,8 @@
     "smoke:protocol": "node scripts/smokeProtocol.js",
     "smoke:real": "node esbuild.js && node scripts/smokeReal.js",
     "test:integration": "node scripts/runIntegrationTests.js",
-    "check": "npm run typecheck && npm run build && npm test && npm run smoke",
+    "check": "npm run typecheck && npm run build && npm test && npm run smoke && npm run check:package",
+    "check:package": "node scripts/checkPackage.js",
     "package": "vsce package --out dist",
     "vscode:prepublish": "npm run build"
   },

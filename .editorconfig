@@ -1,0 +1,22 @@
+# 编辑器基础约定（.editorconfig 是编辑器原生识别的，零依赖、零构建）。
+#
+# 为什么这一半先做、ESLint/Prettier 那一半没做：新增 devDependency 需要在 CI 的 `npm ci`
+# 里能装得上，而本机跑不了 npm（沙箱拦 cmd.exe），装了也验不了 —— 提交一份"验证不了"的
+# lint 配置，风险大于收益。先把无需依赖、编辑器立刻生效的部分落地。
+root = true
+
+[*]
+charset = utf-8
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+# 刻意不设 end_of_line：换行符统一交给 git（core.autocrlf / .gitattributes）处理，
+# 编辑器再插一手只会制造"整份文件都被改了"的假 diff。
+
+[*.md]
+# Markdown 行尾的双空格是有语义的（硬换行），不能被"清理行尾空白"吃掉
+trim_trailing_whitespace = false
+
+[*.{yml,yaml}]
+indent_size = 2

@@ -20,6 +20,39 @@
 >   没有写入入口（面板设置里没有该项），搬到密钥库反而会让 external 模式用户无法再配置，
 >   属于"先补设置入口再迁移"的连带改动，本轮有意不动。
 > - P1-3 落在 `src/statusLabel.ts`，P1-4 落在 `dsh.history.maxSessions`。Batch C 未动。
+>
+> **实施状态（2026-10-08）**：Batch C 的第 1 / 2 / 5 项与第 3 项的打包守卫已落地，
+> 第 4 项（`package.nls`）与第 3 项的图标/截图**未做**。逐条：
+> - **P2-1 命令元数据**：标题里的 `dsh: ` 前缀拆成 `"category": "dsh"`（命令面板显示不变，
+>   但 `package.json` 不再把展示前缀当标题）；新增 `menus.commandPalette` ——
+>   `dsh.debug.captureContext` 用 `when: false` 隐去（调试入口不该占搜索位），
+>   三个 `dsh.diff.*` 限定 `resourceScheme == dsh-patch`（没补丁时它们点了没反应，等于假入口）。
+> - **P2-2 默认快捷键**：`dsh.openPanel` = `Ctrl/Cmd+Alt+D`；`dsh.sendSelection` = `Ctrl/Cmd+Alt+K`
+>   且 `when: editorTextFocus && editorHasSelection`（没有选中文本就不抢按键）。
+> - **P2-6 lint/format**：只落地**无需依赖**的那一半 —— `.editorconfig`（含 Markdown 行尾双空格的例外），
+>   并删掉 `media/webview.js` 里那条**失效的** `eslint-disable-next-line no-undef`（文件没接 lint，
+>   它是死指令），换成 `/* global acquireVsCodeApi */`。**ESLint/Prettier 未接**：新增 devDependency
+>   需要在 CI 的 `npm ci` 里装得上，而本机跑不了 npm（沙箱拦 `cmd.exe`）—— 装了也验不了，
+>   而 `package-lock.json` 与依赖树一旦不一致，CI 会直接红。与其提交一份无法验证的配置，不如先不做。
+> - **P2-8 打包规则**：`docs/` 由逐份黑名单改成 `docs/**` + `!docs/mock-agent.md` 的**白名单**；
+>   `examples/**` **决定留在包内**（Python 参考实现是"后端可换"的活证据，比几 KB 值）。
+>   新增 `scripts/checkPackage.js`（`npm run check:package`，已接进 CI 的 test job）：跑真实
+>   `vsce ls` 断言禁入项 / 必需项 / 文件数 / 体积门槛。**它做过反向验证** —— 故意放开 `docs/**`、
+>   `src/**`、`media/**`、把 `**/*.map` 退回 `*.map`，四种情形全部被抓出并返回非零（否则
+>   "只会打印通过的守卫等于没有守卫"）。效果：包内文档 3 份 → 1 份，VSIX 267.3 → 261.6 KB。
+> - **P2-7 `retainContextWhenHidden`**：**本轮不改行为**，维持 `true`。关掉它依赖 `init` +
+>   事件重放恢复 DOM，而**输入框草稿与滚动位置不在重放范围内** —— 用户敲了一半的 prompt 切走再回来
+>   会丢，这是可见的数据损失。正确顺序是先用 `vscode.setState/getState` 持久化草稿与滚动位置，
+>   再关掉保留策略；本机无真机验证手段，不猜着改。
+> - **P2-4 Marketplace 元信息**：补了 `keywords`。**未做 icon 与截图** —— `icon` 需要 128×128 PNG
+>   （`resources/dsh-activity.svg` 不能当图标），而本机无头浏览器已被沙箱拦死，生成不出合格位图；
+>   截图同理。这两项属"要出图"的资产，留给人来定。
+>   **文档更正**：原表中的「`categories` 无 `AI`」**不成立** —— VS Code 的 `categories` 是封闭枚举
+>   （另有 Data Science / Machine Learning / Linters / Visualization 等），**其中没有 `AI`**，
+>   写进去 `vsce` 会直接报错；本插件已声明 `Machine Learning`，无需再改。
+> - **第 4 项 `package.nls.json` 未做**：它要把 `package.json` 里几十条中文串换成 `%key%` 并落两个
+>   nls 文件，机械改动量大，收益主要在 Marketplace 列表页的英文文案；留作独立一步，
+>   免得和本轮的打包规则改动混在同一次评审里。
 
 ---
 

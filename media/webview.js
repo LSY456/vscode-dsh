@@ -17,7 +17,10 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
 (function () {
   'use strict';
 
-  // eslint-disable-next-line no-undef
+  // acquireVsCodeApi 由 webview 运行时注入，不在任何 import 路径上 —— 用 /* global */ 声明，
+  // 而不是拿 eslint-disable 压检查：在没有接 lint 的文件里后者是**死指令**（此前就是如此），
+  // 等真接上 lint 时它又会把 no-undef 一并掩盖掉。
+  /* global acquireVsCodeApi */
   const vscode = acquireVsCodeApi();
 
   const $ = (id) => document.getElementById(id);

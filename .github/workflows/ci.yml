@@ -61,6 +61,11 @@ jobs:
       - name: End-to-end smoke test
         run: npm run smoke
 
+      # 打包清单守卫：禁入项 / 必需项 / 体积门槛。放在 test job（而不是只在 main 上跑的
+      # package job）才能拦住 PR 里悄悄放宽 .vscodeignore 的改动。
+      - name: Package manifest guard
+        run: npm run check:package
+
       # 协议「第二实现」冒烟：用 examples/python-daemon 的 Python daemon 驱动同一份协议，
       # 证明"后端可换"不是文档承诺而是可验证事实（--require：缺 Python 判失败，不许静默跳过）
       - name: Protocol second-implementation smoke（Python daemon）
