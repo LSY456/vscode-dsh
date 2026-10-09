@@ -379,6 +379,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               fileRead: true,
               rollback: true,
               plan: true,
+              image: true,
             },
             sessionId: session.id,
             agent: decision.mode,

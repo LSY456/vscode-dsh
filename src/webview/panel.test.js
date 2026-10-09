@@ -1351,3 +1351,221 @@ describe('Plan 模式：计划卡', () => {
     expect(chips[0].textContent).toBe('计划模式');
   });
 });
+
+/**
+ * 图片输入（P2-4）。
+ *
+ * 这里的断言对准的是**用户真的能完成的动作**：选文件 / 拖进来 / 粘贴 -> 看得见缩略图 ->
+ * 能删掉 -> 发得出去。三条输入路径必须汇到同一处暂存（否则限额与降采样就会出现两份实现），
+ * 而"发出去的是什么"必须与"面板显示的是什么"分开说清楚：载荷里只有 base64 与 clientId，
+ * 缩略图（data URL）**不回传**扩展 —— 来回搬一趟等于把几 MB 的图片复制进消息桥。
+ *
+ * jsdom 下 `canProcessImages()` 判为 false（没有真的 canvas/解码），于是这里走的是
+ * "原样发送"分支 —— 正好也把这条降级路径锁住了：解码不可用时功能不能整个消失。
+ */
+describe('图片输入（批次 6）', () => {
+  const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+  const staging = () => document.getElementById('image-staging');
+  const notice = () => document.getElementById('composer-notice');
+  const thumbs = () => [...staging().querySelectorAll('.image-thumb')];
+  const inputEl = () => document.getElementById('input');
+  /** 最后一条用户回合：角色标记、正文气泡、chip 行都挂在同一个 `.turn.user` 上。 */
+  const lastUserTurn = () => {
+    const turns = [...document.querySelectorAll('.turn.user')];
+    return turns[turns.length - 1];
+  };
+
+  async function waitFor(fn, what, timeout = 3000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      if (fn()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error('等待超时：' + what);
+  }
+
+  /** 结束当前回合，保证 send() 不会因为"上一轮还在跑"而静默返回。 */
+  function idle() {
+    emitEvent('session.ended', { reason: 'completed' });
+    inputEl().value = '';
+  }
+
+  /** 造一个图片 File（jsdom 的 File/FileReader 是真的，能给出真 data URL）。 */
+  const png = (name = 'shot.png') => new File(['\u0089PNG'], name, { type: 'image/png' });
+
+  /** 模拟"选择文件"：jsdom 里 fileInput.files 只读，只能顶替掉。 */
+  async function selectFiles(...files) {
+    const input = document.getElementById('file-input');
+    notice().hidden = true; // 上一次的提示可能还挂着，避免误判"已完成"
+    Object.defineProperty(input, 'files', { configurable: true, value: files });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await waitFor(() => thumbs().length > 0 || !notice().hidden, '文件被暂存（或给出拒绝原因）');
+  }
+
+  it('骨架：附件按钮 / 隐藏文件输入 / 暂存区 / 提示区都在，且 accept 与协议白名单一致', () => {
+    const btn = document.getElementById('btn-attach');
+    const file = document.getElementById('file-input');
+    expect(btn).not.toBeNull();
+    expect(file).not.toBeNull();
+    expect(file.type).toBe('file');
+    expect(file.multiple).toBe(true);
+    // 选择器不限死单张：多张图一次选中是常见动作，限额判定在暂存时统一做
+    expect(file.accept).toBe('image/png,image/jpeg,image/webp,image/gif');
+    expect(staging()).not.toBeNull();
+    expect(staging().hidden).toBe(true); // 没图时收起，不占高度
+    expect(notice()).not.toBeNull();
+    expect(notice().hidden).toBe(true);
+  });
+
+  it('可发现性：输入框的悬停提示说明了"能粘贴 / 能拖进来"', () => {
+    const title = inputEl().getAttribute('title') || '';
+    expect(title).toContain('粘贴');
+    expect(title).toContain('拖');
+  });
+
+  it('DOM ↔ CSS 契约：chip 对齐与三类图片元素的规则都在样式表里', () => {
+    // 图片 chip 高得多，默认 stretch 会把相邻文字 chip 抻成同高的椭圆（曾实际出现）
+    expect(css).toMatch(/\.chips[ \t]*\{[^}]*align-items:[ \t]*center/);
+    expect(css).toMatch(/\.image-staging[ \t]*\{[^}]*display:[ \t]*flex/);
+    expect(css).toMatch(/\.image-thumb[ \t]*\{[^}]*position:[ \t]*relative/);
+    expect(css).toMatch(/\.image-remove[ \t]*\{[^}]*position:[ \t]*absolute/);
+    // 用户气泡里的图片 chip：直接画缩略图，不写字
+    expect(css).toMatch(/\.chip\.chip-image[ \t]+img[ \t]*\{[^}]*object-fit:[ \t]*cover/);
+    // 拖放悬停要有反馈，否则用户不敢松手
+    expect(css).toMatch(/\.composer-box\.drop-target[ \t]*\{[^}]*box-shadow/);
+  });
+
+  it('文件选择：暂存出缩略图，data URL 直接可用（jsdom 无 canvas 时走原样发送）', async () => {
+    idle();
+    await selectFiles(png('报错截图.png'));
+
+    expect(staging().hidden).toBe(false);
+    expect(thumbs()).toHaveLength(1);
+    const pic = thumbs()[0].querySelector('img');
+    expect(pic.src.startsWith('data:image/png;base64,')).toBe(true);
+    expect(pic.alt).toBe('报错截图.png');
+    // 体积是算出来的（'<89>PNG' = 4 字节），提示里带名字与体积
+    expect(pic.title).toContain('报错截图.png');
+    // 没有真的降采样时更要能删：移除按钮是唯一退路
+    expect(thumbs()[0].querySelector('.image-remove').getAttribute('aria-label')).toBe('移除 报错截图.png');
+  });
+
+  it('移除：点 × 之后缩略图消失，暂存区收起', async () => {
+    thumbs()[0].querySelector('.image-remove').click();
+    expect(thumbs()).toHaveLength(0);
+    expect(staging().hidden).toBe(true);
+  });
+
+  it('格式不支持：不暂存、但**必须说出来**（静默忽略会让用户以为已经附上了）', async () => {
+    idle();
+    await selectFiles(new File(['x'], 'logo.svg', { type: 'image/svg+xml' }));
+    expect(thumbs()).toHaveLength(0);
+    expect(notice().hidden).toBe(false);
+    expect(notice().textContent).toContain('不支持');
+    expect(notice().textContent).toContain('logo.svg');
+  });
+
+  it('只发图不写字：载荷里只有 base64 与 clientId，缩略图不来回搬', async () => {
+    idle();
+    await selectFiles(png());
+    posted.length = 0;
+    document.getElementById('btn-send').click();
+
+    const send = lastMessageOfKind('send');
+    expect(send).toBeTruthy();
+    expect(send.prompt).toBe('');
+    expect(send.images).toHaveLength(1);
+    expect(send.images[0].mimeType).toBe('image/png');
+    expect(send.images[0].clientId).toBeTruthy();
+    // dataBase64 是裸 base64，不是 data URL（前缀由 daemon 侧按 provider 拼）
+    expect(send.images[0].dataBase64.startsWith('data:')).toBe(false);
+    // 缩略图留在面板本地
+    expect('previewUrl' in send.images[0]).toBe(false);
+  });
+
+  it('发送后暂存**不**立即清空；等扩展回显才提交，并把缩略图画进用户气泡', async () => {
+    const send = lastMessageOfKind('send');
+    const clientId = send.images[0].clientId;
+
+    // 关键顺序：点发送就清空的话，扩展一旦拒绝（超限），用户就得重新粘一遍，
+    // 而那张图往往正是问题本身。所以先保持原样。
+    expect(thumbs()).toHaveLength(1);
+
+    emitEvent('user.message', { text: '', attachments: [{ label: '🖼 shot.png', imageId: clientId }] });
+
+    expect(thumbs()).toHaveLength(0);
+    expect(staging().hidden).toBe(true);
+    // chip 行与正文气泡同属一个 .turn.user（不是塞进气泡里），故取最后一条用户回合
+    const chip = lastUserTurn().querySelector('.chip.chip-image');
+    expect(chip).not.toBeNull();
+    expect(chip.querySelector('img').src.startsWith('data:image/png;base64,')).toBe(true);
+  });
+
+  it('拿不到缩略图时退回文字 chip（历史重放不显示破图）', () => {
+    emitEvent('user.message', {
+      text: '看下这个',
+      attachments: [{ label: '🖼 旧图.png', imageId: 'img_不存在的会话' }],
+    });
+    const turn = lastUserTurn();
+    expect(turn.querySelector('.chip-image')).toBeNull();
+    expect([...turn.querySelectorAll('.chip')].map((n) => n.textContent)).toEqual(['🖼 旧图.png']);
+  });
+
+  it('纯文字 chip 不受影响（回归：图片能力不能改掉既有的上下文回显）', () => {
+    emitEvent('user.message', { text: '改这里', attachments: [{ label: 'app.ts' }, { label: '选区 L12-30' }] });
+    const turn = lastUserTurn();
+    expect([...turn.querySelectorAll('.chip')].map((n) => n.textContent)).toEqual(['app.ts', '选区 L12-30']);
+  });
+
+  it('拖放：有图片才有悬停反馈，落下走的是同一条暂存通路', async () => {
+    idle();
+    const box = document.getElementById('composer-box');
+    const dragEvent = (type, files) => {
+      const ev = new Event(type, { bubbles: true, cancelable: true });
+      ev.dataTransfer = { files, dropEffect: '' };
+      return ev;
+    };
+
+    // 纯文本拖放不该给"会附上图片"的假反馈
+    box.dispatchEvent(dragEvent('dragover', []));
+    expect(box.classList.contains('drop-target')).toBe(false);
+
+    box.dispatchEvent(dragEvent('dragover', [png('拖进来的.png')]));
+    expect(box.classList.contains('drop-target')).toBe(true);
+
+    box.dispatchEvent(dragEvent('drop', [png('拖进来的.png')]));
+    await waitFor(() => thumbs().length === 1, '拖放的图片被暂存');
+    expect(box.classList.contains('drop-target')).toBe(false);
+    expect(thumbs()[0].querySelector('img').alt).toBe('拖进来的.png');
+    thumbs()[0].querySelector('.image-remove').click();
+  });
+
+  it('粘贴：剪贴板里有图片才接管，纯文本粘贴完全不动', async () => {
+    idle();
+    const paste = () => {
+      const ev = new Event('paste', { bubbles: true, cancelable: true });
+      return ev;
+    };
+    // 纯文本：既不暂存，也不干扰浏览器把文字贴进输入框
+    const text = paste();
+    text.clipboardData = { files: [], items: [] };
+    inputEl().dispatchEvent(text);
+    expect(thumbs()).toHaveLength(0);
+
+    const shot = paste();
+    shot.clipboardData = { files: [png('截图.png')], items: [] };
+    inputEl().dispatchEvent(shot);
+    await waitFor(() => thumbs().length === 1, '粘贴的截图被暂存');
+    expect(thumbs()[0].querySelector('img').alt).toBe('截图.png');
+    thumbs()[0].querySelector('.image-remove').click();
+  });
+
+  it('新会话清空暂存（上一轮没发出去的图不会跨会话跟过来）', async () => {
+    idle();
+    await selectFiles(png('半途而废.png'));
+    expect(thumbs()).toHaveLength(1);
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_img_reset', reason: 'new' });
+    expect(thumbs()).toHaveLength(0);
+    expect(staging().hidden).toBe(true);
+  });
+});

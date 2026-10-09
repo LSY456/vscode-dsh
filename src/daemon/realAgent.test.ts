@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatCompletionResult, ChatMessage, ChatModel, ChatStreamOptions, FakeChatModel, FakeTurn, formatToolCallContent } from './model';
+import { ChatCompletionResult, ChatContentPart, ChatMessage, ChatModel, ChatStreamOptions, contentToText, FakeChatModel, FakeTurn, formatToolCallContent } from './model';
 import { applyTokenBudget, estimateTokens, generateTitle, RealAgentConfig, runRealAgent, TITLE_SYSTEM_PROMPT } from './realAgent';
 import { PLAN_MODE_MARKER } from './planMode';
 
@@ -957,10 +957,11 @@ describe('realAgent：工具调用围栏不落进答案区', () => {
 function recording(inner: ChatModel): {
   model: ChatModel;
   toolSets: Array<string[] | undefined>;
-  calls: Array<{ tools?: string[]; messages: Array<{ role: string; content: string }> }>;
+  // content 可能是内容块数组（图片，批次 6）：断言只看结构，所以按联合类型收
+  calls: Array<{ tools?: string[]; messages: Array<{ role: string; content: ChatContentPart[] | string }> }>;
 } {
   const toolSets: Array<string[] | undefined> = [];
-  const calls: Array<{ tools?: string[]; messages: Array<{ role: string; content: string }> }> = [];
+  const calls: Array<{ tools?: string[]; messages: Array<{ role: string; content: ChatContentPart[] | string }> }> = [];
   return {
     toolSets,
     calls,
@@ -1028,7 +1029,7 @@ describe('realAgent：Plan 模式（P2-7）', () => {
     expect(execCall.messages[0].content).not.toContain(PLAN_MODE_MARKER);
     expect(execCall.messages[0].content).toContain('你是 dsh');
     // 调研阶段的上下文要留下（不然执行阶段会把同一批文件再读一遍）
-    expect(execCall.messages.some((m) => m.content.startsWith('【已批准的计划】'))).toBe(true);
+    expect(execCall.messages.some((m) => contentToText(m.content).startsWith('【已批准的计划】'))).toBe(true);
   });
 
   it('拒绝计划：一个文件都不碰，按「已取消」收尾而不是谎报已完成', async () => {
@@ -1099,5 +1100,218 @@ describe('realAgent：Plan 模式（P2-7）', () => {
 
     expect(ctx.events.some((e) => e.method === EVENTS.PlanRequest)).toBe(false);
     expect(toolCallsOf(rec)[0]).toContain('write_file');
+  });
+});
+/**
+ * 图片输入（P2-4）。
+ *
+ * 这里守的是 daemon 侧的**最后一道**校验与消息装配 —— 面板里已经校验过一次，
+ * 但 daemon 是安全边界（协议允许任意客户端接入，`examples/python-daemon` 就是活证据），
+ * 凡是**要发给模型**的内容必须在真正使用它的那一刻再验一次。
+ *
+ * 另外两条不变量：① 图片走独立内容块、文本侧只留 `[图片 N]` 位置标记；
+ * ② 没有图片时 user 消息必须仍是**裸字符串**（改造前后请求体逐字节一致）。
+ */
+describe('realAgent：图片输入（P2-4）', () => {
+  const PNG = 'iVBORw0KGgo=';
+  const img = (over: Record<string, unknown> = {}) => ({
+    kind: 'image' as const,
+    mimeType: 'image/png' as const,
+    dataBase64: PNG,
+    name: 'shot.png',
+    clientId: 'c1',
+    ...over,
+  });
+
+  /** 记录模型真正收到的消息（标题生成那一次用 TITLE_SYSTEM_PROMPT 单独识别并跳过）。 */
+  function captureModel(): { model: ChatModel; calls: ChatMessage[][] } {
+    const calls: ChatMessage[][] = [];
+    const model: ChatModel = {
+      async chat(messages, opts = {}) {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        calls.push(messages);
+        opts.onChunk?.({ type: 'content', text: '收到' });
+        return { reasoning: '', content: '收到' };
+      },
+    };
+    return { model, calls };
+  }
+
+  const userParts = (messages: ChatMessage[]): ChatContentPart[] => messages[1].content as ChatContentPart[];
+  const textOf = (messages: ChatMessage[]): string => {
+    const c = messages[1].content;
+    return typeof c === 'string' ? c : c.filter((p) => p.type === 'text').map((p) => (p.type === 'text' ? p.text : '')).join('\n');
+  };
+
+  it('图片作为独立内容块到达模型，文本只留 [图片 N] 位置标记（base64 不折进文本）', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    await runRealAgent(
+      ctx,
+      { prompt: '看这个报错', attachments: [{ kind: 'file', path: file, name: 'a.txt' }, img()] },
+      { model }
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0].role).toBe('system');
+    const parts = userParts(calls[0]);
+    expect(Array.isArray(parts)).toBe(true);
+    // text 必须在前：位置标记与图片块的先后顺序是两家 provider 都能接受的形式
+    expect(parts[0]).toMatchObject({ type: 'text' });
+    expect(parts[1]).toEqual({ type: 'image', mimeType: 'image/png', dataBase64: PNG });
+    // 文本侧看得到"有第几张图"和文件上下文，但看不见 base64
+    expect(textOf(calls[0])).toContain('[图片 1：shot.png]');
+    expect(textOf(calls[0])).toContain('<file');
+    expect(textOf(calls[0])).not.toContain(PNG);
+  });
+
+  it('多张图：编号按附件顺序递增，数组里的顺序与之一致（"[图片 2]"必须真指第 2 张）', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    await runRealAgent(
+      ctx,
+      {
+        prompt: '两张都看',
+        attachments: [
+          img({ name: 'a.png', clientId: 'a', dataBase64: 'AAAA' }),
+          img({ name: 'b.png', clientId: 'b', dataBase64: 'AA==' }),
+        ],
+      },
+      { model }
+    );
+
+    const text = textOf(calls[0]);
+    expect(text).toContain('[图片 1：a.png]');
+    expect(text).toContain('[图片 2：b.png]');
+    expect(text.indexOf('[图片 1：a.png]')).toBeLessThan(text.indexOf('[图片 2：b.png]'));
+    expect(userParts(calls[0]).slice(1)).toEqual([
+      { type: 'image', mimeType: 'image/png', dataBase64: 'AAAA' },
+      { type: 'image', mimeType: 'image/png', dataBase64: 'AA==' },
+    ]);
+  });
+
+  it('没有名字时不出现空括号（`[图片 1：]` 会被模型当成残缺信息）', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    await runRealAgent(ctx, { prompt: '看图', attachments: [img({ name: undefined })] }, { model });
+    expect(textOf(calls[0])).toContain('[图片 1]');
+    expect(textOf(calls[0])).not.toContain('[图片 1：]');
+  });
+
+  it('只发图不写字也成立（粘一张截图直接回车是最常见的用法）', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    await runRealAgent(ctx, { prompt: '', attachments: [img()] }, { model });
+    expect(calls).toHaveLength(1);
+    expect(userParts(calls[0])).toHaveLength(2);
+  });
+
+  it('无图片时 user 消息仍是**裸字符串**，不是内容块数组（无图片的请求逐字节不变）', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    await runRealAgent(ctx, baseParams, { model });
+    expect(typeof calls[0][1].content).toBe('string');
+  });
+
+  it('声明体积撒谎也不能放行：实测超限照样拒绝（体积以真字节数为准）', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    // 6MB 真内容 + sizeBytes 声明为 1
+    const huge = 'A'.repeat(8_000_000);
+    await runRealAgent(ctx, { prompt: '看图', attachments: [img({ dataBase64: huge, sizeBytes: 1 })] }, { model });
+
+    expect(calls).toHaveLength(0);
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('error');
+  });
+
+  it('不合规图片 -> 整条消息明确拒绝：不发 session.started、模型一次都没被调用', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    await runRealAgent(ctx, { prompt: '看图', attachments: [img({ mimeType: 'image/svg+xml' })] }, { model });
+
+    // 关键：**不是**丢掉那张继续发。少发一张会让模型对着不存在的图作答，
+    // 用户拿到的是一段看起来完全正常的胡话 —— 比直接报错难发现得多。
+    expect(calls).toHaveLength(0);
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionStarted)).toBe(false);
+
+    const err = ctx.events.find((e) => e.method === EVENTS.Error);
+    expect(err).toBeTruthy();
+    expect(err!.params.code).toBe(ERROR_CODES.InvalidParams);
+    expect(err!.params.message).toContain('图片附件被拒绝');
+
+    // 原因同时进正文（用户看得到），并且以 error 收尾而不是 completed
+    const deltas = ctx.events.filter((e) => e.method === EVENTS.MessageDelta).map((e) => e.params.delta).join('');
+    expect(deltas).toContain('不支持');
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('error');
+  });
+
+  it('超出张数上限同样整条拒绝，且原因说得出该删哪一张', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    await runRealAgent(
+      ctx,
+      { prompt: '看图', attachments: Array.from({ length: 5 }, () => img()) },
+      { model }
+    );
+    expect(calls).toHaveLength(0);
+    const deltas = ctx.events.filter((e) => e.method === EVENTS.MessageDelta).map((e) => e.params.delta).join('');
+    expect(deltas).toContain('最多');
+  });
+
+  it('非图片附件不受图片校验影响（校验只挑 kind=image 的那几条）', async () => {
+    const ctx = makeCtx();
+    const { model, calls } = captureModel();
+    await runRealAgent(
+      ctx,
+      {
+        prompt: '杂附件',
+        attachments: [
+          { kind: 'text', text: '一段纯文本' },
+          img(),
+          { kind: 'selection', path: file, name: 'a.txt', range: { startLine: 1, endLine: 2 }, content: 'x' },
+        ],
+      },
+      { model }
+    );
+
+    expect(calls).toHaveLength(1);
+    const text = textOf(calls[0]);
+    expect(text).toContain('<text>一段纯文本</text>');
+    expect(text).toContain('<selection');
+    // 图片块的相对顺序也保持（附件里排在 text 之后）
+    expect(userParts(calls[0]).filter((p) => p.type === 'image')).toHaveLength(1);
+  });
+
+  it('图片计入上下文预算：超预算时裁掉旧轮次也**不会**丢初始用户消息里的图', async () => {
+    const ctx = makeCtx();
+    const seen: ChatMessage[][] = [];
+    let turn = 0;
+    const big = path.join(root, 'big2.txt');
+    fs.writeFileSync(big, 'x'.repeat(2000), 'utf8');
+    const model: ChatModel = {
+      async chat(messages, opts = {}) {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        seen.push(messages);
+        turn++;
+        // content 必须给：assistant 消息会带着它回灌，undefined 会让下一轮的 token 估算炸掉
+        if (turn <= 2) {
+          return { reasoning: '', content: '我先看看。', toolCalls: [{ tool: 'read_file', input: { path: big }, id: `c${turn}` }] };
+        }
+        opts.onChunk?.({ type: 'content', text: 'done' });
+        return { reasoning: '', content: 'done' };
+      },
+    };
+
+    await runRealAgent(ctx, { prompt: '看图', attachments: [img()] }, { model, maxContextTokens: 100, maxToolRounds: 4 });
+
+    expect(seen.length).toBe(3);
+    // 每轮都被裁到 system+user，而 user 里那把图还在（图片是"提问本身"，丢了它整轮就没意义）
+    for (const messages of seen) {
+      expect(messages).toHaveLength(2);
+      expect(messages[1].content).toEqual([
+        { type: 'text', text: expect.stringContaining('[图片 1') },
+        { type: 'image', mimeType: 'image/png', dataBase64: PNG },
+      ]);
+    }
   });
 });

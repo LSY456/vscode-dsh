@@ -652,6 +652,113 @@ async function main() {
     '影子快照已落盘（.dsh/snapshots/<会话>/index.json + *.snap）'
   );
 
+  // ---- 10d. P2-4 图片输入：daemon 侧复验 + 图片**真的**进了请求体
+  console.log('[smoke] 图片附件…');
+  assert(
+    rconn.init.capabilities.image === true,
+    '能力声明包含 image（第三方客户端据此判断"发图给你收不收"）'
+  );
+  // 8 字节 PNG 头（89 50 4E 47 0D 0A 1A 0A）的 base64 —— 形态合法，足够走完校验。
+  const PNG_B64 = 'iVBORw0KGgo=';
+
+  rconn.rpc.resetEvents();
+  await rconn.rpc.request('session.send', {
+    sessionId: rsessionId,
+    prompt: '这张截图里有几处问题？',
+    attachments: [
+      { kind: 'image', mimeType: 'image/png', dataBase64: PNG_B64, name: 'shot.png', clientId: 'smoke-img-1' },
+    ],
+  });
+  await rconn.rpc.waitFor((m) => m.method === 'session.ended', '图片会话结束');
+  assert(
+    !rconn.rpc.events.some((m) => m.method === 'error'),
+    '合法图片不报错（校验放行）'
+  );
+  assert(
+    rconn.rpc.events.some((m) => m.method === 'session.started'),
+    '带图会话正常开始（图片不再需要额外的批准步骤）'
+  );
+  const imgDeltas = rconn.rpc.events
+    .filter((m) => m.method === 'message.delta')
+    .map((m) => m.params.delta)
+    .join('');
+  // 假模型把请求体里真实的 image 内容块数回显出来：冒烟只看得到 SSE 正文，看不见请求体，
+  // 靠 `[图片 N]` 标记只能证明文本到了。这两条一起才算"图片输入跑通"。
+  assert(
+    imgDeltas.includes('已收到 1 张图片'),
+    '图片以独立内容块到达模型（假模型回显请求体的 image 块数）'
+  );
+  assert(
+    imgDeltas.includes('[图片 1：shot.png]'),
+    '文本侧保留 [图片 N] 位置标记（模型知道"第 1 张"指哪一张）'
+  );
+  assert(!imgDeltas.includes(PNG_B64), 'base64 不折进文本（否则每轮都要重读一份噪声）');
+  assert(
+    rconn.rpc.events.find((m) => m.method === 'session.ended').params.reason === 'completed',
+    '带图会话以 reason=completed 收尾'
+  );
+
+  // 非法格式：**整条消息**拒绝，而不是丢掉那张继续发
+  rconn.rpc.resetEvents();
+  await rconn.rpc.request('session.send', {
+    sessionId: rsessionId,
+    prompt: '看图',
+    attachments: [{ kind: 'image', mimeType: 'image/svg+xml', dataBase64: PNG_B64 }],
+  });
+  await rconn.rpc.waitFor((m) => m.method === 'session.ended', '图片被拒后的会话结束');
+  const imgErr = rconn.rpc.events.find((m) => m.method === 'error');
+  assert(!!imgErr, '非法图片格式 -> 明确报错（不静默丢弃那张）');
+  assert(
+    imgErr.params.code === -32602,
+    `图片被拒的错误码为 InvalidParams（实际 ${imgErr && imgErr.params.code}）`
+  );
+  assert(
+    String(imgErr.params.message).includes('图片附件被拒绝'),
+    '错误文案点明是图片附件被拒（用户知道去改什么）'
+  );
+  assert(
+    !rconn.rpc.events.some((m) => m.method === 'session.started'),
+    '被拒时不发 session.started：模型一次都没被调用（拿不到"对着不存在的图作答"的机会）'
+  );
+  assert(
+    rconn.rpc.events.find((m) => m.method === 'session.ended').params.reason === 'error',
+    '被拒会话以 reason=error 收尾（不谎报 completed）'
+  );
+
+  // 超张数：同样是整条拒绝，且文案说得出上限
+  rconn.rpc.resetEvents();
+  await rconn.rpc.request('session.send', {
+    sessionId: rsessionId,
+    prompt: '看图',
+    attachments: [0, 1, 2, 3, 4].map((i) => ({
+      kind: 'image',
+      mimeType: 'image/png',
+      dataBase64: PNG_B64,
+      clientId: 'smoke-many-' + i,
+    })),
+  });
+  await rconn.rpc.waitFor((m) => m.method === 'session.ended', '超张数会话结束');
+  const manyErr = rconn.rpc.events.find((m) => m.method === 'error');
+  assert(!!manyErr && String(manyErr.params.message).includes('最多'), '超过张数上限 -> 拒绝并说明上限');
+  assert(
+    !rconn.rpc.events.some((m) => m.method === 'session.started'),
+    '超张数时模型同样没被调用'
+  );
+
+  // 只发图不写字：prompt 允许为空串（粘一张截图直接回车是最常见的用法）
+  rconn.rpc.resetEvents();
+  await rconn.rpc.request('session.send', {
+    sessionId: rsessionId,
+    prompt: '',
+    attachments: [{ kind: 'image', mimeType: 'image/png', dataBase64: PNG_B64, clientId: 'smoke-img-only' }],
+  });
+  await rconn.rpc.waitFor((m) => m.method === 'session.ended', '只发图的会话结束');
+  const onlyImgDeltas = rconn.rpc.events
+    .filter((m) => m.method === 'message.delta')
+    .map((m) => m.params.delta)
+    .join('');
+  assert(onlyImgDeltas.includes('已收到 1 张图片'), '空 prompt + 有图片：会话照常成立（只发图不写字）');
+
   // 门禁：运行中的会话拒绝回滚（否则会出现"刚还回去又被改掉"的中间状态）
   const busySession = (await conn2.rpc.request('session.create', {})).sessionId;
   conn2.rpc.resetEvents();

@@ -206,6 +206,15 @@ export interface InitializeResult {
     rollback?: boolean;
     /** P2-7 Plan 模式（可选，向后兼容）：支持先出计划、待用户批准后再执行 */
     plan?: boolean;
+    /**
+     * P2-4 图片输入（可选，向后兼容）：附件支持 `kind:'image'`，请求体会带多模态内容块。
+     *
+     * 扩展自身**不**据此判断 —— 它与 daemon 同属一次构建，`buildId` 不一致时旧 daemon
+     * 会被回收重启（见 daemonManager），所以不存在"扩展支持、daemon 不支持"的中间态。
+     * 这个位是留给第三方客户端的：它们与 daemon 版本各自演进，需要一个明确的问题
+     * "发图给你收不收"，而不是去猜 `protocolVersion`（后者保持 1.0 不变，因为这些都是可选字段）。
+     */
+    image?: boolean;
   };
   /** daemon 为本次连接分配/复用的默认会话 id */
   sessionId?: string;
@@ -238,9 +247,26 @@ export interface Diagnostic {
   source?: string;
 }
 
+/**
+ * 图片附件的 MIME 白名单。
+ *
+ * 用白名单而不是 `image/*`：这些字节会被原样拼进请求体发给模型端点，
+ * 放开到任意 `image/*` 等于把"用户粘进来的是什么"的判定权交给上游；
+ * 而 `image/svg+xml` 这类**能携带脚本**的格式，收窄到四种常见位图就完全用不上。
+ */
+export const IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
+export type ImageMimeType = (typeof IMAGE_MIME_TYPES)[number];
+
+/** 单条消息最多携带的图片张数。 */
+export const MAX_IMAGES_PER_MESSAGE = 4;
+/** 单张图片的最大字节数。超限**拒绝并说明**，绝不静默截断（截断后的图会变成噪声，比不发更糟）。 */
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** 一条消息里图片的总字节上限（防止 4 张恰好都压线通过时把请求体撑到 20MB）。 */
+export const MAX_IMAGE_TOTAL_BYTES = 12 * 1024 * 1024;
+
 /** VSCode 捕获后打包的结构化附件 */
 export interface Attachment {
-  kind: 'file' | 'selection' | 'diagnostics' | 'gitStatus' | 'text';
+  kind: 'file' | 'selection' | 'diagnostics' | 'gitStatus' | 'text' | 'image';
   /** file/selection 对应的文件 URI（file:// 或 vscode 自定义 scheme） */
   uri?: string;
   /** 文件绝对路径 */
@@ -264,6 +290,17 @@ export interface Attachment {
   gitStatus?: string;
   /** 纯文本附件 */
   text?: string;
+  /** image 附件：MIME 类型，取值受 {@link IMAGE_MIME_TYPES} 白名单约束 */
+  mimeType?: ImageMimeType;
+  /** image 附件：base64 内容（**不含** `data:` 前缀、不含换行） */
+  dataBase64?: string;
+  /** image 附件：原始字节数（base64 会膨胀约 4/3，不能拿字符串长度当字节数用） */
+  sizeBytes?: number;
+  /**
+   * 客户端为这张图片生成的临时标识，**只**用于把扩展回显的 chip 与面板里的缩略图对上。
+   * daemon 不解释它：它不是路径、不是 id，也不参与任何判定。
+   */
+  clientId?: string;
 }
 
 export interface SessionCreateParams {

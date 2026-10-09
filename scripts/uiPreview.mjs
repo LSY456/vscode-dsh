@@ -10,6 +10,11 @@
  * 产物：scripts/ui-preview.html
  */
 import { readFileSync, writeFileSync } from 'node:fs';
+import { Buffer } from 'node:buffer';
+
+/** 见下方 SHOT_PNG_BYTES 的说明；这里内联以免预览脚本依赖外部文件。 */
+const SHOT_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAWgAAADcCAIAAADSq6xVAAACzUlEQVR42u3cIQ7CQBBA0Z6kgoRbrEZXY/EcgkNUcSA0p6hENYiGYEkw3WwYutk3eScg9AuYTrc/XQGydD4CQDgA4QCEAxAOQDgAhAMQDkA4AOEAhANAOADhAP4WjmV5AWQRDkA4AOEAthiOeX4CZBEOQDgA4QCEAxAOQDgAhAMQDmAj4bADB1g5B4QDEA6grXDcU4JgHlHhAOEQDhAO4RAOhAPhQDhwAQywcg4IByAcAMIBCAcgHIBwAMIB4AIY4B4HIByAcADCASAcgHAAwgHUHY50vkEwj2j1F8B8iYlnR7P6lXNfYoQD4UA4EA6EA2/HAsIBCAcgHADCAbgABnhXBRAOQDgAhAMQDkA4AOEAhAOg4AIYgJVzQDiADYZjNCZ8PKLCYYxwCIcxwiEcwmGEA+EwwoF/VQAXwAAr54BwAAgHIByAcADCAQgHgHAALoABVs4B4QCEA0A4AOEAhAOoOxzpMkAwj6hwgHC0dwHMl5h4djSrXzn3JUY4EA6EAy+5AcIBCAcgHIBwAAgH4AIY4CU3QDgA4QAQDkA4AOEAhAMQDoCCC2AAVs6B34djNCZ8PKLCYYxwCIcxwiEcwmGEA+EwwoF/VQDhAFwAA6ycAwgHIByAcADCAQgHgHAAwgG4AAZYOQeEA0A4AOEAhAMQDkA4AOEAcAEMsHIOCAcgHIBwAAgHIByAcADCAbgABmDlHBAOQDgA4QCEA2g9HH2/A8giHIBwAMIBCAcgHIBwAAgHIByAcADCAQgHwPpwPA7pk88IKA3HdByAlYRDOEA4hAOEQzhAOPw4Cvg7FhAOQDgAhAMQDkA4AOEAhANAOADhAIQDEA5AOL543xG8HSscIBzCAcIhHCAcfhwFhAMQDgDhAIQDEA5AOADhABAOQDgA4QCEAxAOAOEAhAMQDkA4AOEAhMOnAAgHIByAcADCAQgHgHAAwgEIB1CjNyd09U9GPzqIAAAAAElFTkSuQmCC';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';
 
@@ -22,6 +27,15 @@ const BODY_HTML = rawHtml
   .slice(rawHtml.indexOf('<body>') + '<body>'.length, rawHtml.lastIndexOf('</body>'))
   .replace(/<script[\s\S]*?<\/script>/g, '');
 const PANEL_CSS = media('webview.css');
+
+/**
+ * 一张合成的"报错截图"（360×220 PNG，约 774 字节）。
+ *
+ * 为什么要造一张真图而不是用 1×1 占位：缩略图是 object-fit: cover 渲染的，
+ * 用透明的小图在预览里**看不见**，等于没法验证布局；而且真字节才能顺带把
+ * "base64 → 字节数"的换算显示对。
+ */
+const SHOT_PNG_BYTES = Buffer.from(SHOT_PNG_BASE64, 'base64');
 
 /**
  * 用真实 UI 代码渲染一个场景，返回渲染后的 body innerHTML。
@@ -39,7 +53,16 @@ async function renderScenario(script) {
   globalThis.document = window.document;
   globalThis.MessageEvent = window.MessageEvent;
   globalThis.KeyboardEvent = window.KeyboardEvent;
-  globalThis.acquireVsCodeApi = () => ({ postMessage() {} });
+  // FileReader 是浏览器内置名，真实 webview 里本来就在（图片附件靠它读字节）。
+  // 预览把 webview.js 装进 Node 的全局域运行，所以这些"浏览器给的"名字要一个个搬过来 ——
+  // 漏一个的后果不是报错，而是某个功能在预览里静默失效。
+  globalThis.FileReader = window.FileReader;
+  const posted = [];
+  globalThis.acquireVsCodeApi = () => ({
+    postMessage(msg) {
+      posted.push(msg);
+    },
+  });
 
   await import(`${new URL('../media/webview.js', import.meta.url).href}?scenario=${seq}`);
 
@@ -48,7 +71,8 @@ async function renderScenario(script) {
   const emitRaw = (data) =>
     window.dispatchEvent(new window.MessageEvent('message', { data }));
 
-  script({ emit, emitRaw });
+  // 场景可以是 async：暂存图片要等 FileReader，同步回调会截到一个空暂存区
+  await script({ emit, emitRaw, posted });
   return window.document.body.innerHTML;
 }
 
@@ -453,6 +477,76 @@ const planDom = await renderScenario(({ emit, emitRaw }) => {
   if (!doc.querySelector('.card.plan')) throw new Error('[uiPreview] 没有渲染出计划卡');
 });
 
+// ---- 场景九：图片附件（P2-4）----
+// 一条"粘贴截图 → 发送 → 再粘一张"的完整路径，一次展示三处新界面：
+// 用户气泡里的缩略图、下方待发送的暂存区、以及输入框旁的附加按钮。
+// 走的是真实路径（派发 paste 事件 → stageImageFiles → send），不是直接改 DOM。
+const imageDom = await renderScenario(async ({ emit, emitRaw, posted }) => {
+  emitRaw({
+    kind: 'init',
+    state: {
+      sessionId: 'sess_preview_image',
+      connected: true,
+      agent: 'real',
+      model: 'deepseek-flash',
+      history: [],
+    },
+  });
+  emitRaw({ kind: 'session.reset', sessionId: 'sess_preview_image', reason: 'new' });
+
+  const win = globalThis.window;
+  const doc = globalThis.document;
+  const makeFile = (name) =>
+    new win.File([new Uint8Array(SHOT_PNG_BYTES)], name, { type: 'image/png' });
+
+  // 粘贴：剪贴板里的截图在 jsdom 里只能靠一个带 clipboardData 的 paste 事件来模拟
+  const paste = (name) => {
+    const ev = new win.Event('paste');
+    ev.clipboardData = { files: [makeFile(name)], items: [] };
+    doc.getElementById('input').dispatchEvent(ev);
+  };
+  // 暂存要等 FileReader 真的读回来。用轮询而不是固定 sleep：固定 sleep 要么不够
+  // （预览里静默少一张图），要么白等（CI 上拖慢）—— 两种都不该出现在一个"看一眼"的脚本里。
+  const waitThumbs = async (n, what) => {
+    for (let i = 0; i < 150; i++) {
+      if (doc.querySelectorAll('#image-staging .image-thumb').length === n) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error('[uiPreview] 等待超时：' + what);
+  };
+
+  paste('报错截图.png');
+  await waitThumbs(1, '第一张图进入暂存区');
+
+  doc.getElementById('input').value = '这个报错怎么修？';
+  doc.getElementById('btn-send').click();
+
+  // 扩展确认收到后回显（图片 chip 只带 imageId，不带 base64）
+  const sent = posted.find((m) => m.kind === 'send');
+  if (!sent || !sent.images || sent.images.length === 0) {
+    throw new Error('[uiPreview] 图片没有被暂存/发送');
+  }
+  emit('user.message', {
+    text: '这个报错怎么修？',
+    attachments: [
+      ...sent.images.map((i) => ({ label: '🖼 ' + i.name, imageId: i.clientId })),
+      { label: 'app.ts' },
+      { label: '选区 L12-30' },
+    ],
+  });
+  // session.started 在**发送之后**才到（真实时序如此）——而它会把输入区置为 running，
+  // 所以场景里绝不能提前发，否则 send() 会被自己的"处理中"挡住。
+  emit('session.started', { sessionId: 'sess_preview_image', title: '修一下这个报错' });
+  emit('reasoning.delta', { delta: '先看这张截图里的报错栈……' });
+  emit('message.delta', { delta: '截图里这两行是同一个错误的两次抛出，直接看第二行即可。' });
+  emit('message.done', {});
+  emit('session.ended', { reason: 'completed' });
+
+  // 再粘一张：展示"待发送暂存区"（含删除按钮与尺寸提示）
+  paste('console-output.png');
+  await waitThumbs(1, '第二张图进入暂存区');
+});
+
 // ---- 组装预览页 ----
 const esc = (s) => s.replace(/<\/(script)/gi, '<\\/$1');
 
@@ -522,6 +616,10 @@ const preview = `<!DOCTYPE html>
       <figcaption>⑧ 侧边栏 340px · 计划模式：方案待批准（上为已拒绝的折叠态）（浅色主题）</figcaption>
       <div class="frame narrow"><iframe id="f-narrow-plan"></iframe></div>
     </figure>
+    <figure>
+      <figcaption>⑨ 侧边栏 340px · 图片附件：气泡缩略图 + 待发送暂存区（浅色主题）</figcaption>
+      <div class="frame narrow"><iframe id="f-narrow-image"></iframe></div>
+    </figure>
   </div>
 
 <script type="text/plain" id="panel-css">${esc(PANEL_CSS)}</script>
@@ -534,6 +632,7 @@ const preview = `<!DOCTYPE html>
 <script type="text/plain" id="dom-restricted">${esc(restrictedDom)}</script>
 <script type="text/plain" id="dom-settings">${esc(settingsDom)}</script>
 <script type="text/plain" id="dom-plan">${esc(planDom)}</script>
+<script type="text/plain" id="dom-image">${esc(imageDom)}</script>
 <script>
   const txt = (id) => document.getElementById(id).textContent;
   const panelCss = txt('panel-css');
@@ -548,6 +647,7 @@ const preview = `<!DOCTYPE html>
   const restricted = txt('dom-restricted');
   const settings = txt('dom-settings');
   const plan = txt('dom-plan');
+  const image = txt('dom-image');
   document.getElementById('f-narrow-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-wide-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-narrow-dark').srcdoc = build(empty, 'theme-dark');
@@ -556,6 +656,7 @@ const preview = `<!DOCTYPE html>
   document.getElementById('f-narrow-restricted').srcdoc = build(restricted, 'theme-light');
   document.getElementById('f-narrow-settings').srcdoc = build(settings, 'theme-light');
   document.getElementById('f-narrow-plan').srcdoc = build(plan, 'theme-light');
+  document.getElementById('f-narrow-image').srcdoc = build(image, 'theme-light');
 </script>
 </body>
 </html>
