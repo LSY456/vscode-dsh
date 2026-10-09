@@ -41,11 +41,12 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 | --- | --- | --- |
 | `initialize` | `{ workspaceRoot, apiKey?, preset?, model?, capabilities?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities, sessionId?, agent, agentReason? }` |
 | `session.create` | `{ id?, title? }` | `{ sessionId, title? }` |
-| `session.send` | `{ sessionId?, prompt, attachments? }` | `{ sessionId, accepted }` |
+| `session.send` | `{ sessionId?, prompt, attachments?, planMode? }` | `{ sessionId, accepted }` |
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
-| `session.resume` | `{ sessionId }` | `{ sessionId, state, pendingApproval?, pendingPatch? }` |
+| `session.resume` | `{ sessionId }` | `{ sessionId, state, pendingApproval?, pendingPatch?, pendingPlan? }` |
 | `session.rollback` | `{ sessionId? }` | `{ total, restored, deleted, skippedDirty, changedAfter, unrestorable, failed, unrecorded }` |
 | `approval.respond` | `{ sessionId, approvalId, approved, note? }` | `{ ok }` |
+| `plan.respond` | `{ sessionId, planId, approved, note? }` | `{ ok }` |
 | `file.patch.respond` | `{ sessionId, patchId, accept, content?, applyInEditor? }` | `{ ok }` |
 | `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size, dirty? }` |
 | `workspace.syncDirty` | `{ files: [{ path, content? }] }` | `{ ok, count }` |
@@ -83,8 +84,33 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
 - 三条门禁：**运行中的会话拒绝回滚**（返回 `-32009`，避免与写入并发）；**还原前对每条路径重做
   canonical 越界校验**；**内容引用（`blob`）同样按白名单形状校验** —— 它与 `path` 同源于
   `index.json` 这个本机可写文件，只校验 `path` 等于留了半扇门。
-- `initialize` 的 `capabilities.rollback` 声明该实现支持回滚（可选，老客户端忽略即可）。
+- `initialize` 的 `capabilities.rollback` 声明该实现支持会话级回滚（可选，老客户端忽略即可）；
+- `initialize` 返回的 `capabilities.plan` 声明该实现支持计划模式（可选，同上）。
 - 快照**只增不改**，清理交给用户（`.dsh/` 是旁路目录，可随时删）。
+
+### 计划模式（Plan，P2-7）
+
+`session.send` 带 `planMode: true` 时，本轮**先只调研、只出方案**，方案经用户批准后才进入执行阶段。
+它复用审批那套"挂起—恢复"基础设施，因此断线续跑、超时、取消的语义与审批完全一致。
+
+- **调研阶段只读**：可用工具在**工具清单这一层**收窄为 `read_file` / `list_dir` / `grep` / `glob`
+  —— 靠提示词说"别改文件"不可靠，模型看不到写入工具就发不出写入调用。
+- **调研轮次独立预算**（`DEFAULT_PLAN_MAX_ROUNDS` = 4）**不占用** `maxToolRounds`：共用一份的话，
+  计划阶段读得越多、批准后可用轮次越少，用户看到的是"批准完直接没轮次了"。
+- **收束方式与主循环同源**：调研预算用尽仍在调工具时，不传 `tools` 再问一次，逼模型把已知信息写成计划，
+  而不是把"没产出"甩给用户。
+- **挂起点**：调研完成 → `plan.request { sessionId, planId, plan, expiresAt }`，会话转入 `pending_plan`；
+  用户以 `plan.respond { sessionId, planId, approved, note? }` 批准或拒绝。
+  不存在的 `planId` → `-32013 NotFound`；超过 `expiresAt` → `-32010 Expired`（到点按"拒绝"解析）。
+- **批准**：daemon 把「已批准的计划」与可选备注一起回注 `messages`，并**保留调研阶段的工具结果**
+  （那才是计划的地基；执行阶段直接复用，也让"计划里写的路径"与"执行时读到的内容"是同一份）。
+  随后恢复完整工具集，进入正常执行循环。
+- **拒绝**：以 `session.ended { reason: 'canceled' }` 收尾并明说「没有改动任何文件」。
+  **不能报 `completed`** —— 用户拒绝一个方案不等于任务完成，报"已完成"会让他以为改动已经发生。
+- **未产出计划**（模型没给出可用内容）不是静默收场：给出一条明确的提示（建议补更具体的信息或关掉开关），
+  以 `reason: 'error'` 收尾。
+- 该能力经 `initialize` 返回的 `capabilities.plan` 声明（可选，老客户端忽略即可）。
+- 审批迹线以 `trajectory.record { kind: 'plan' }` 记录（`plan.request` 与 `plan.respond` 各一条）。
 
 ### `model`（真实模型接入）
 
@@ -129,7 +155,7 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
 - `allowedTools?: string[]` —— 工具白名单；**缺省或空数组 = 全部允许**，非空 = 仅白名单内可用（越权工具直接以 `tool.executed { ok:false, output:'工具被禁用' }` 结束，不发起审批）。
 - `allowedDirs?: string[]` —— 目录白名单；缺省 = 仅工作区根。所有路径操作（patch / file.read / 附件读取）必须在工作区 ∩ allowedDirs 内，越界返回 `-32012`。
 - `maxConcurrency?: number` —— 全局并发会话上限；0 = 不限制。
-- `approvalTtlMs?: number` —— **挂起项超时**（`approval.request` / `file.patch.pending`）毫秒数；
+- `approvalTtlMs?: number` —— **挂起项超时**（`approval.request` / `file.patch.pending` / `plan.request`）毫秒数；
   缺省 60s，daemon 端钳制到 `[10s, 60min]`，到点未响应按"拒绝"解除挂起。daemon 会把生效值
   盖戳到挂起事件上（`expiresAt`），客户端据此显示倒计时。
 
@@ -157,8 +183,9 @@ VSCode 侧自动打包的结构化附件，`kind` 取值：
 | `tool.started` / `tool.executed` | 工具执行开始/结束（含 ok/output/durationMs） |
 | `approval.request` | **挂起点**：高危工具待人工审批（tool/input/risk/reason/expiresAt） |
 | `file.patch.pending` | **挂起点**：文件修改待审查（path/oldContent/newContent/description/expiresAt） |
+| `plan.request` | **挂起点**：计划模式下方案待批准（planId/plan/expiresAt） |
 | `file.patch.result` | 补丁决策结果（accepted/applied/error） |
-| `trajectory.record` | 迹线步骤（step/kind/detail/ts） |
+| `trajectory.record` | 迹线步骤（step/kind/detail/ts；`kind` 取值含 `tool` / `approval` / `patch` / `plan` / `system`） |
 | `session.ended` | 会话结束（reason: completed/canceled/error） |
 | `error` | 协议/运行错误（code 取值见错误码表） |
 
@@ -166,15 +193,16 @@ VSCode 侧自动打包的结构化附件，`kind` 取值：
 
 ### 状态机
 
-每个会话独立维护状态：`idle -> running -> (pending_approval | pending_patch) -> running -> idle`
+每个会话独立维护状态：`idle -> running -> (pending_approval | pending_patch | pending_plan) -> running -> idle`
 
 ```
 session.send ──> (流式事件...) ──> approval.request ──挂起──> approval.respond ──> tool.executed ──> session.ended
-                                └─> file.patch.pending ──挂起──> file.patch.respond ──> file.patch.result ─┘
+                                ├─> file.patch.pending ──挂起──> file.patch.respond ──> file.patch.result ─┤
+                                └─> plan.request ──挂起──> plan.respond ──批准──> (执行循环) ─────────────┘
 ```
 
 - **并发**：状态为 `idle` 才允许 `session.send`（同一会话返回 `-32009 Busy`）；**不同会话可并行**（多会话并发）。
-- **挂起强校验**：`approval.respond` / `file.patch.respond` 校验 id 归属；不存在的 id 返回 `-32013 NotFound`；
+- **挂起强校验**：`approval.respond` / `file.patch.respond` / `plan.respond` 校验 id 归属；不存在的 id 返回 `-32013 NotFound`；
   超过 `expiresAt`（默认 60s）返回 `-32010 Expired`，且到点自动按"拒绝"解析以解除挂起。
 - **取消**：`session.cancel` 置 canceled 标记并将挂起项按拒绝解除，Agent 收尾发出 `session.ended(reason=canceled)`。
 
@@ -182,7 +210,7 @@ session.send ──> (流式事件...) ──> approval.request ──挂起─�
 
 - daemon 为每个会话维护**事件环形缓冲**（默认 2000 条）：断线期间事件照常入缓冲（不丢失）。
 - 重连后客户端以原 `sessionId` 调用 `session.resume`：daemon **重放缓冲事件**并返回当前
-  `state` 与挂起快照（`pendingApproval` / `pendingPatch`，含 `expiresAt`），UI 据此恢复审批/补丁卡片。
+  `state` 与挂起快照（`pendingApproval` / `pendingPatch` / `pendingPlan`，含 `expiresAt`），UI 据此恢复审批/补丁/计划卡片。
 - daemon 进程重启后会话丢失，`resume` 返回 `-32013 NotFound`，客户端回退 `session.create` 新建会话。
 
 ### 心跳

@@ -420,3 +420,86 @@ describe('SessionManager.prune：空闲会话回收（P1-1 内存有界）', () 
     expect(sm.get('s')).toBe(s);
   });
 });
+
+describe('Plan 挂起项（P2-7：计划与审批同构，但语义上独立）', () => {
+  function makePlan(id: string) {
+    return { sessionId: 's1', planId: id, plan: '## 计划\n1. 改 a.ts', expiresAt: Date.now() + 60_000 };
+  }
+
+  it('登记后进入 pending_plan，批准后回到 running', async () => {
+    const s = new Session('s1', '/ws');
+    const p = s.registerPlan(makePlan('p1'));
+    expect(s.state).toBe('pending_plan');
+
+    expect(s.respondPlan('p1', true)).toBe('ok');
+    await expect(p).resolves.toBe(true);
+    expect(s.state).toBe('running');
+  });
+
+  it('resume 时把待批准的计划原样交还（断线重连后用户还能批）', () => {
+    const s = new Session('s1', '/ws');
+    s.deliver = () => {};
+    void s.registerPlan(makePlan('p1'));
+
+    const r = s.resume();
+    expect(r.state).toBe('pending_plan');
+    expect(r.pendingPlan?.planId).toBe('p1');
+    expect(r.pendingPlan?.plan).toContain('改 a.ts');
+  });
+
+  it('补充意见只在"批准"时留存（拒绝时那段文字对执行阶段没有意义）', async () => {
+    const s = new Session('s1', '/ws');
+
+    const approved = s.registerPlan(makePlan('p1'));
+    s.respondPlan('p1', true, '  第 2 步别动 b.ts  ');
+    await approved;
+    expect(s.getPlanNote()).toBe('  第 2 步别动 b.ts  ');
+
+    const rejected = s.registerPlan(makePlan('p2'));
+    s.respondPlan('p2', false, '不同意');
+    await rejected;
+    expect(s.getPlanNote()).toBeUndefined();
+  });
+
+  it('登记新计划会清掉上一轮的补充意见（不跨计划残留）', async () => {
+    const s = new Session('s1', '/ws');
+    const first = s.registerPlan(makePlan('p1'));
+    s.respondPlan('p1', true, '加个日志');
+    await first;
+    expect(s.getPlanNote()).toBe('加个日志');
+
+    void s.registerPlan(makePlan('p2'));
+    expect(s.getPlanNote()).toBeUndefined();
+  });
+
+  it('取消会让挂起中的计划按"不同意"解析（不留悬空 Promise）', async () => {
+    const s = new Session('s1', '/ws');
+    const p = s.registerPlan(makePlan('p1'));
+    s.cancel();
+    await expect(p).resolves.toBe(false);
+    expect(s.state).toBe('running'); // 交还给 Agent 去走取消收尾
+    expect(s.resume().pendingPlan).toBeUndefined();
+  });
+
+  it('重复/未知 planId：not_found；已过期的返回 expired 而不是 not_found', async () => {
+    const s = new Session('s1', '/ws');
+    expect(s.respondPlan('nope', true)).toBe('not_found');
+
+    const p = s.registerPlan({ ...makePlan('p1'), expiresAt: Date.now() - 1 });
+    await p;
+    // 到点未响应：条目仍保留标记，respond 才能回 expired（用户才知道自己是"点晚了"）
+    expect(s.respondPlan('p1', true)).toBe('expired');
+    expect(s.respondPlan('p1', true)).toBe('not_found');
+  });
+
+  it('end() 清掉计划快照与补充意见', async () => {
+    const s = new Session('s1', '/ws');
+    const p = s.registerPlan(makePlan('p1'));
+    s.respondPlan('p1', true, '备注');
+    await p;
+    s.end();
+    expect(s.getPlanNote()).toBeUndefined();
+    expect(s.resume().pendingPlan).toBeUndefined();
+    expect(s.state).toBe('idle');
+  });
+});

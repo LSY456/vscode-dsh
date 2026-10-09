@@ -35,7 +35,9 @@ import {
   InitializeResult,
   EventApprovalRequest,
   EventFilePatchPending,
+  EventPlanRequest,
   EventTrajectory,
+  PlanRespondParams,
   SessionSendParams,
   SessionRollbackParams,
   SessionRollbackResult,
@@ -376,6 +378,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               resume: true,
               fileRead: true,
               rollback: true,
+              plan: true,
             },
             sessionId: session.id,
             agent: decision.mode,
@@ -421,7 +424,11 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             notify: (method, params) => {
               // 挂起类事件由 daemon 统一盖章过期时间：TTL 只有一个来源（initialize 声明 / 缺省 60s），
               // 避免 Agent 各自硬编码，同时让 UI 能显示真实倒计时。
-              if (method === EVENTS.ApprovalRequest || method === EVENTS.FilePatchPending) {
+              if (
+                method === EVENTS.ApprovalRequest ||
+                method === EVENTS.FilePatchPending ||
+                method === EVENTS.PlanRequest
+              ) {
                 const p = params as { expiresAt?: number };
                 if (p && typeof p === 'object' && p.expiresAt === undefined) {
                   p.expiresAt = Date.now() + conn.approvalTtlMs;
@@ -437,6 +444,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               if (kind === 'approval') {
                 return session.registerApproval(snapshot as EventApprovalRequest, conn.approvalTtlMs);
               }
+              if (kind === 'plan') {
+                return session.registerPlan(snapshot as EventPlanRequest, conn.approvalTtlMs);
+              }
               return session.registerPatch(snapshot as EventFilePatchPending, conn.approvalTtlMs);
             },
             isCanceled: () => session.isCanceled(),
@@ -446,6 +456,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             // 而不是等下一个 onChunk 才察觉（模型静默时 onChunk 永不触发）。
             onCancel: (fn) => session.onCancel(fn),
             isTrusted: (command) => trustStore.matches(command),
+            // P2-7：用户在批准计划时附带的补充意见（透传给执行阶段的指令）
+            getPlanNote: () => session.getPlanNote(),
             getPatchContent: (patchId) => session.getPatchContent(patchId),
             readFile: async (target, maxBytes) => {
               const r = resolvePath(conn.capabilities, target);
@@ -581,6 +593,25 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           }
           if (r === 'expired') {
             sendError(conn.ws, req.id, ERROR_CODES.Expired, `审批已过期: ${p?.approvalId}`);
+            return;
+          }
+          sendResult(conn.ws, req.id, { ok: true });
+          return;
+        }
+        case METHODS.PlanRespond: {
+          const p = req.params as PlanRespondParams | undefined;
+          const session = sessions.get(p?.sessionId ?? conn.currentSessionId);
+          if (!session) {
+            sendError(conn.ws, req.id, ERROR_CODES.NotFound, 'session 不存在');
+            return;
+          }
+          const r = session.respondPlan(p?.planId ?? '', !!p?.approved, p?.note);
+          if (r === 'not_found') {
+            sendError(conn.ws, req.id, ERROR_CODES.NotFound, `计划不存在或已处理: ${p?.planId}`);
+            return;
+          }
+          if (r === 'expired') {
+            sendError(conn.ws, req.id, ERROR_CODES.Expired, `计划已过期: ${p?.planId}`);
             return;
           }
           sendResult(conn.ws, req.id, { ok: true });

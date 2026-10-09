@@ -8,10 +8,12 @@
 import {
   DEFAULT_MAX_CONTEXT_TOKENS,
   DEFAULT_MAX_TOOL_ROUNDS,
+  DEFAULT_PLAN_MAX_ROUNDS,
   EVENTS,
   ERROR_CODES,
   EventApprovalRequest,
   EventFilePatchPending,
+  EventPlanRequest,
   SessionSendParams,
 } from '../../shared/protocol';
 import * as path from 'path';
@@ -34,6 +36,12 @@ import {
 } from './tools';
 import { applyPatchDecision, describePatchOutcome } from './patchApply';
 import { makePatchEnv } from './agent';
+import {
+  PLAN_COLLAPSE_INSTRUCTION,
+  PLAN_SYSTEM_APPENDIX,
+  planApprovedInstruction,
+  READONLY_TOOL_NAMES,
+} from './planMode';
 import { CommandSandbox } from './sandbox';
 
 export interface RealAgentConfig {
@@ -188,6 +196,16 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
 ];
 
+/** 只读工具的定义子集（计划模式的 tools 参数）。见 `planMode.ts` 的 `READONLY_TOOL_NAMES`。 */
+const READONLY_TOOL_DEFINITIONS: ToolDefinition[] = TOOL_DEFINITIONS.filter((t) =>
+  READONLY_TOOL_NAMES.includes(t.name)
+);
+
+/** 计划阶段的结局。`ok:false` 时调用方据此收尾（已自行播报原因的不重复播报）。 */
+type PlanPhaseOutcome =
+  | { ok: true; plan: string }
+  | { ok: false; reason: 'canceled' | 'error' | 'empty' };
+
 export async function runRealAgent(
   ctx: AgentContext,
   params: SessionSendParams,
@@ -315,6 +333,180 @@ export async function runRealAgent(
       return false;
     }
   };
+
+  /**
+   * P2-7 计划阶段：只调研、不改动，产出一份计划交给用户批准。
+   *
+   * 三条硬约束：
+   *  ① **只提供只读工具** —— "批准前什么都不改"是计划模式的全部承诺，靠提示词约束不可靠，
+   *     必须在工具清单这一层就拿掉 write_file / apply_patch / bash_execute；
+   *  ② 调研预算与执行预算**分开计数**（`DEFAULT_PLAN_MAX_ROUNDS`）—— 共用一份的话，
+   *     计划阶段读得越多、批准后可用的轮次越少，用户看到的是"批准完直接没轮次了"；
+   *  ③ 系统提示词换成计划版，但**保留调研得到的工具结果** —— 执行阶段直接复用，
+   *     既省一轮往返，也让"计划里写的路径"和"执行时读到的内容"是同一份。
+   *
+   * 跑满调研预算时的收束方式与主循环同源：不传 tools 再问一次，而不是把"没计划"丢给用户。
+   */
+  async function runPlanPhase(): Promise<PlanPhaseOutcome> {
+    const originalSystem = messages[0];
+    messages[0] = { role: 'system', content: `${SYSTEM_PROMPT}\n\n${PLAN_SYSTEM_APPENDIX}` };
+    let plan = '';
+    let failure: PlanPhaseOutcome | null = null;
+    try {
+      for (let round = 0; round < DEFAULT_PLAN_MAX_ROUNDS; round++) {
+        if (ctx.isCanceled() || abort.signal.aborted) {
+          failure = { ok: false, reason: 'canceled' };
+          break;
+        }
+        fenceFilter = createToolCallFenceFilter();
+        let content = '';
+        let nativeToolCalls: ToolCall[] | undefined;
+        let failed: Error | null = null;
+        try {
+          const trimmed = applyTokenBudget(messages, maxContextTokens);
+          if (trimmed.length < messages.length) {
+            messages.length = 0;
+            messages.push(...trimmed);
+          }
+          const result = await config.model.chat(messages, {
+            signal: abort.signal,
+            idleTimeoutMs: config.idleTimeoutMs,
+            temperature: config.temperature,
+            maxTokens: config.maxTokens,
+            tools: READONLY_TOOL_DEFINITIONS,
+            onChunk: streamChunk,
+          });
+          content = result.content;
+          nativeToolCalls = result.toolCalls;
+        } catch (err) {
+          failed = err instanceof Error ? err : new Error(String(err));
+        }
+        flushVisibleText();
+        if (ctx.isCanceled() || abort.signal.aborted) {
+          failure = { ok: false, reason: 'canceled' };
+          break;
+        }
+        if (failed) {
+          console.error(
+            `[dsh-daemon] 计划阶段模型调用失败（session=${ctx.sessionId}）：${failed.message}`
+          );
+          ctx.notify(EVENTS.Error, {
+            sessionId: ctx.sessionId,
+            code: ERROR_CODES.InternalError,
+            message: `计划阶段模型调用失败：${failed.message}`,
+          });
+          ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[计划阶段已中止]' });
+          failure = { ok: false, reason: 'error' };
+          break;
+        }
+        ctx.notify(EVENTS.MessageDone, { sessionId: ctx.sessionId });
+
+        const calls = nativeToolCalls && nativeToolCalls.length > 0 ? nativeToolCalls : parseToolCalls(content);
+        if (calls.length === 0) {
+          plan = content.trim(); // 不再调工具 => 计划已流式输出完毕
+          break;
+        }
+        messages.push({ role: 'assistant', content, toolCalls: nativeToolCalls });
+        for (const call of calls) {
+          if (ctx.isCanceled()) break;
+          const toolOutput = await dispatchTool(ctx, call, caps, config, trajectory);
+          messages.push({ role: 'tool', content: `tool=${call.tool}\n${toolOutput}`, toolCallId: call.id });
+        }
+      }
+
+      if (!failure && !plan) {
+        // 调研预算用尽仍在调工具：收束成一次不带工具定义的请求，逼模型把已知信息写成计划。
+        trajectory(
+          'system',
+          `计划阶段调研轮次已达上限（${DEFAULT_PLAN_MAX_ROUNDS} 轮），转为直接产出计划`
+        );
+        messages.push({ role: 'user', content: PLAN_COLLAPSE_INSTRUCTION });
+        fenceFilter = null; // 不提供工具时，正文里的围栏是内容而非调用（与 requestFinalAnswer 同理）
+        try {
+          const r = await config.model.chat(messages, {
+            signal: abort.signal,
+            idleTimeoutMs: config.idleTimeoutMs,
+            temperature: config.temperature,
+            maxTokens: config.maxTokens,
+            onChunk: streamChunk,
+          });
+          if (ctx.isCanceled() || abort.signal.aborted) failure = { ok: false, reason: 'canceled' };
+          else {
+            ctx.notify(EVENTS.MessageDone, { sessionId: ctx.sessionId });
+            plan = (r.content ?? '').trim();
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[dsh-daemon] 计划收束失败（session=${ctx.sessionId}）：${msg}`);
+          ctx.notify(EVENTS.Error, {
+            sessionId: ctx.sessionId,
+            code: ERROR_CODES.InternalError,
+            message: `计划收束失败：${msg}`,
+          });
+          failure = { ok: false, reason: 'error' };
+        }
+      }
+    } finally {
+      // 换回完整系统提示词：执行阶段仍受全部规则约束（调研结果**保留**在上下文里）
+      if (originalSystem) messages[0] = originalSystem;
+    }
+
+    if (failure) return failure;
+    return plan ? { ok: true, plan } : { ok: false, reason: 'empty' };
+  }
+
+  // ---- P2-7：计划模式先跑调研 + 计划阶段，批准后才进入主循环 --------------------
+  if (params.planMode) {
+    const outcome = await runPlanPhase();
+    if (!outcome.ok) {
+      unsubscribeCancel?.();
+      if (outcome.reason === 'canceled') {
+        ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[已取消]' });
+        ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'canceled' });
+        trajectory('system', 'session 结束：canceled（计划阶段被取消）');
+      } else if (outcome.reason === 'empty') {
+        // 明说"没产出计划"而不是静默收场：用户据此才知道该补什么信息、或关掉计划开关
+        ctx.notify(EVENTS.MessageDelta, {
+          sessionId: ctx.sessionId,
+          delta:
+            '\n\n> ⚠️ 计划阶段未能产出计划（模型没有给出可用内容）。' +
+            '可以再发一条更具体的消息（把目标或要看的文件说清楚），或关掉输入框的「计划」开关直接执行。\n\n',
+        });
+        ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'error' });
+        trajectory('system', 'session 结束：error（计划阶段未产出计划）');
+      } else {
+        // 失败原因已由计划阶段内的 error 事件给出，这里只收尾（不重复转述、更不猜配置）
+        ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'error' });
+        trajectory('system', 'session 结束：error（计划阶段失败）');
+      }
+      return;
+    }
+
+    const planId = `plan_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const planPayload: EventPlanRequest = { sessionId: ctx.sessionId, planId, plan: outcome.plan };
+    ctx.notify(EVENTS.PlanRequest, planPayload);
+    trajectory('plan', `plan.request ${planId}`);
+
+    const approved = await ctx.waitForUser('plan', planPayload);
+    trajectory('plan', `plan.respond ${approved ? 'approved' : 'rejected'}`);
+
+    if (!approved) {
+      // 用户不同意这份计划 => 未做任何改动就收尾。用 canceled 而不是 completed：
+      // 「已取消」才是用户此刻看到的事实，报"已完成"会让他以为改动已经发生了。
+      ctx.notify(EVENTS.MessageDelta, {
+        sessionId: ctx.sessionId,
+        delta: '\n\n[计划未批准] 已按你的决定停止，**没有改动任何文件**。',
+      });
+      ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'canceled' });
+      trajectory('system', 'session 结束：canceled（计划未获批准）');
+      return;
+    }
+
+    // 批准：计划与补充意见一起回灌，主循环据此执行（工具集恢复为完整清单）
+    messages.push({ role: 'assistant', content: `【已批准的计划】\n${outcome.plan}` });
+    messages.push({ role: 'user', content: planApprovedInstruction(ctx.getPlanNote?.()) });
+    trajectory('system', '计划已获批准，进入执行阶段');
+  }
 
   /** 模型是否自己收的尾（不再调用工具 => 已有最终回答）。false 即轮次被耗尽。 */
   let concludedByModel = false;

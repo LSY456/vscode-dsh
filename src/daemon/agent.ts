@@ -10,6 +10,7 @@
  *  - 含 slow/慢：延长流式输出，用于验证 session.cancel
  *  - 含 read/查看：以 tool.started/tool.executed 呈现附件文件读取
  *    （附件省略内容时经 ctx.readFile 按需读取）
+ *  - params.planMode：先发 plan.request 等批准，拒绝即结束且**不做任何改动**（P2-7）
  *
  * 真实实现（Cordis 动态插件版 daemon）只需保持相同的事件时序与消息结构。
  */
@@ -19,6 +20,7 @@ import {
   ERROR_CODES,
   EventApprovalRequest,
   EventFilePatchPending,
+  EventPlanRequest,
   SessionSendParams,
 } from '../../shared/protocol';
 import { assertPathInside } from './paths';
@@ -36,8 +38,8 @@ export interface AgentContext {
   notify(method: string, params: unknown): void;
   /** 等待用户响应：携带完整快照（用于挂起快照与续跑重放） */
   waitForUser(
-    kind: 'approval' | 'patch',
-    snapshot: EventApprovalRequest | EventFilePatchPending
+    kind: 'approval' | 'patch' | 'plan',
+    snapshot: EventApprovalRequest | EventFilePatchPending | EventPlanRequest
   ): Promise<boolean>;
   isCanceled(): boolean;
   /**
@@ -58,6 +60,13 @@ export interface AgentContext {
   onCancel?(fn: () => void): () => void;
   /** B1 信任记忆：命令是否命中免审批白名单（server 注入；测试缺省走审批） */
   isTrusted?(command: string): boolean;
+  /**
+   * P2-7：用户在批准计划时附带的补充意见（无则 undefined）。
+   *
+   * 单独取而不是并进 `waitForUser` 的布尔返回值：approve/reject 的语义不该被一段自由文本污染，
+   * 而"批准但要求改一处"是计划评审里最常见的表态，丢了它用户只能靠再发一条消息补。
+   */
+  getPlanNote?(): string | undefined;
   /** P2 编辑后应用：读用户编辑后的补丁内容（无则 undefined，用原始 newContent） */
   getPatchContent?(patchId: string): string | undefined;
   /**
@@ -101,7 +110,7 @@ let stepCounter = 0;
 
 function trajectory(
   ctx: AgentContext,
-  kind: 'reasoning' | 'message' | 'tool' | 'patch' | 'approval' | 'system',
+  kind: 'reasoning' | 'message' | 'tool' | 'patch' | 'approval' | 'plan' | 'system',
   detail: string
 ) {
   ctx.notify(EVENTS.Trajectory, {
@@ -134,7 +143,40 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     await sleep(60);
   }
 
-  // ---- 2. 可选的 read 工具（模拟读取附件，支持 contentOmitted 按需读取）
+  // ---- 2. P2-7 计划模式：先出计划、等用户批准（拒绝则本次不改任何东西）
+  if (params.planMode) {
+    const planId = `plan_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const planPayload: EventPlanRequest = {
+      sessionId: ctx.sessionId,
+      planId,
+      plan:
+        `## 计划（演示）\n\n1. 目标：处理请求「${truncated(prompt, 40)}」。\n` +
+        '2. 步骤：定位目标文件 → 生成改动 → 提交 Diff 审查。\n' +
+        `3. 涉及文件：${attachments.find((a) => a.path)?.path ?? '（由请求中的路径决定）'}\n` +
+        '4. 风险：改动会先经用户审查，批准前不落盘。',
+    };
+    ctx.notify(EVENTS.PlanRequest, planPayload);
+    trajectory(ctx, 'plan', `plan.request ${planId}`);
+
+    const approved = await ctx.waitForUser('plan', planPayload);
+    trajectory(ctx, 'plan', `plan.respond ${approved ? 'approved' : 'rejected'}`);
+
+    if (!approved || ctx.isCanceled()) {
+      ctx.notify(EVENTS.MessageDelta, {
+        sessionId: ctx.sessionId,
+        delta: '\n\n[计划未批准] 已按你的决定停止，**没有改动任何文件**。',
+      });
+      ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'canceled' });
+      trajectory(ctx, 'system', 'session 结束：canceled（计划未获批准）');
+      return;
+    }
+    ctx.notify(EVENTS.MessageDelta, {
+      sessionId: ctx.sessionId,
+      delta: '\n\n计划已获批准，开始执行。\n',
+    });
+  }
+
+  // ---- 3. 可选的 read 工具（模拟读取附件，支持 contentOmitted 按需读取）
   if (/read|查看|读取/i.test(prompt) && attachments.length > 0) {
     const file = attachments.find((a) => a.path) ?? attachments[0];
     const target = file.path ?? file.uri ?? 'unknown';
@@ -155,7 +197,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     trajectory(ctx, 'tool', 'read_file 完成');
   }
 
-  // ---- 3. 文件修改（触发补丁审批，目标路径须在工作区内，canonical 校验防符号链接逃逸）
+  // ---- 4. 文件修改（触发补丁审批，目标路径须在工作区内，canonical 校验防符号链接逃逸）
   if (/修改|edit|write|创建|replace/i.test(prompt)) {
     const rawTarget =
       attachments.find((a) => a.path)?.path ??
@@ -218,7 +260,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     }
   }
 
-  // ---- 4. 高危命令（触发工具审批，受 allowedTools 约束）
+  // ---- 5. 高危命令（触发工具审批，受 allowedTools 约束）
   if (/bash|danger|危险|rm\s/i.test(prompt)) {
     // 语义：allowedTools 缺省/空数组 = 全部允许；非空 = 仅白名单内允许
     const tools = ctx.capabilities?.allowedTools;
@@ -277,7 +319,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     }
   }
 
-  // ---- 5. 慢速输出（验证取消）
+  // ---- 6. 慢速输出（验证取消）
   if (/slow|慢/i.test(prompt)) {
     for (let i = 0; i < 30; i++) {
       if (ctx.isCanceled()) break;
@@ -286,7 +328,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     }
   }
 
-  // ---- 6. 收尾
+  // ---- 7. 收尾
   const canceled = ctx.isCanceled();
   if (canceled) {
     ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[已取消]' });

@@ -27,6 +27,7 @@
 | 🧠 **Agent 独立成 daemon** | 模型路由、工具调度、会话状态全部下沉到独立进程，与编辑器解耦；长任务不再拖垮编辑器，同一 Agent 内核可复用于 CLI / Web / 其他 IDE。注意：daemon 由扩展宿主 `spawn`、并在 `deactivate()` 时被回收，**它不跨窗口存活**；但同一工作区的多个窗口可复用同一个 daemon（能力/脏文档覆盖层按连接隔离，互不污染） |
 | 📎 **上下文不失真** | 发送 Prompt 时自动打包活动文件全文、高亮选区（带行号）、编译诊断、git status 为结构化附件，不再需要手动复制粘贴、不再丢失编辑现场 |
 | 🛡️ **改动可控** | 高危工具调用必须过**审批卡**（Human-in-the-Loop）；文件修改必须先看**原生 Diff 并排视图**再决定落盘——把"AI 盲改"变成"AI 提议、人拍板" |
+| 📋 **计划模式** | 可以要求 Agent **先出方案再动手**：调研阶段只读、给出一份可审阅的计划（目标 / 步骤 / 涉及文件 / 风险），**批准后才进入执行**。想清楚再改，避免"边想边改"把仓库改花 |
 | 🔒 **安全边界干净** | 工具在独立 daemon 进程执行，仅监听 127.0.0.1 随机端口，WS 握手必须带一次性 Bearer token、拒绝带浏览器 Origin 的连接 |
 | 🔌 **协议化可插拔** | 一份明确 JSON-RPC 契约（方法/事件见 [PROTOCOL.md](PROTOCOL.md)），前端可换（VSCode / JetBrains / CLI），后端可换（内置内核 / 第三方 daemon / 自研 Agent）——而且**有两个可运行的实现**（Node + [Python](examples/python-daemon/dsh_daemon.py)）来证明它，不是纸面承诺 |
 | 📜 **全程可追溯** | daemon 内部轨迹以 `trajectory.record` 事件流投影到 UI 的"执行迹线"面板，步骤级审计、回放与失败定位 |
@@ -102,7 +103,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test                    # 单元测试（vitest，615 用例）
+npm test                    # 单元测试（vitest，636 用例）
 npm run smoke               # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemon 跑通同一份协议
                             #（缺 Python 3 时优雅跳过；`npm run smoke:protocol -- --require` 则判失败）
@@ -130,6 +131,11 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
   目标文件此刻在编辑器里有未保存改动，或它在本次会话之后**又被改过**（比如你手工编辑并保存了）——
   绝不覆盖你的改动。结果按类分列（还原 / 删除 / 脏跳过 / 内容已变 / 不可还原 / 失败 / 未记录），
   不会压成一句"回滚完成"。
+- **计划模式**：输入框左侧的**「计划」开关**（默认关闭，开着就一直是计划模式，直到你再点一次）。打开后这一轮 Agent
+  **只调研、只出方案**：可用工具收窄到 `read_file` / `list_dir` / `grep` / `glob` —— 写入类工具**根本没有被提供**
+  （不是靠提示词请它自觉），接着给出计划卡（目标 / 按序步骤 / 涉及文件 / 风险与待确认）挂起等你拍板。
+  **批准**才进入执行（可附一句补充意见，执行时以它为准）；**拒绝**则什么都没改就停下，会话以「已取消」收尾并
+  明说「没有改动任何文件」。调研轮次有**独立预算**，不会挤占批准后的执行轮次。
 - 需要大屏审阅时用 **`dsh: 在编辑器列打开 Agent`**，侧边栏与编辑器列两个视图共享同一会话状态。
 - 编辑器选中代码后右键 **`dsh: 将选中代码发送给 Agent`**。
 - 补丁 Diff 的**标题栏**带 `应用 / 编辑后应用 / 拒绝` 按钮，不必回面板点。
@@ -161,7 +167,7 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.history.maxSessions` | `50` | 会话历史保留条数（0–10000，0 = 不限）；超出按创建时间裁剪最旧的 |
 | `dsh.capabilities.allowedTools` | `[]` | 工具白名单（空 = 全部允许），如 `["bash_execute"]` |
 | `dsh.capabilities.maxConcurrency` | `0` | daemon 全局并发会话上限（0 = 不限） |
-| `dsh.approval.ttlSeconds` | `60` | 审批 / 补丁挂起的超时秒数（10–3600，到点按拒绝处理；改后重启 daemon 生效） |
+| `dsh.approval.ttlSeconds` | `60` | 审批 / 补丁 / 计划挂起的超时秒数（10–3600，到点按拒绝处理；改后重启 daemon 生效） |
 
 ## 目录结构
 
@@ -184,10 +190,11 @@ vscode-dsh/
 │   └── daemon/
 │       ├── index.ts        # daemon CLI 入口（--agent mock|real|auto --fake-model）
 │       ├── server.ts       # WS/JSON-RPC 服务端（安全握手/能力分级/resume/file.read/agent 切换）
-│       ├── sessionManager.ts # 会话状态机 + 事件缓冲 + 审批/补丁强校验（纯逻辑，可单测）
+│       ├── sessionManager.ts # 会话状态机 + 事件缓冲 + 审批/补丁/计划强校验（纯逻辑，可单测）
 │       ├── paths.ts        # 路径护栏（canonical，防 symlink/junction 逃逸）
 │       ├── agent.ts        # 模拟 Agent 循环（mock 实现，演示/测试用）
-│       ├── realAgent.ts    # 真实 Agent 循环（模型 + 工具 + 审批门控）
+│       ├── realAgent.ts    # 真实 Agent 循环（模型 + 工具 + 审批门控 + 计划模式）
+│       ├── planMode.ts     # 计划模式单一来源（只读工具白名单 + 各阶段提示词）
 │       ├── model.ts        # 模型适配层（OpenAI 兼容流式 + Anthropic Messages + FakeChatModel）
 │       ├── tools.ts        # 真实工具沙箱（只读搜索/写入 Diff 审查/bash 策略门控）
 │       ├── toolcall.ts     # 模型工具调用 fenced 块协议
@@ -241,7 +248,7 @@ vscode-dsh/
   （不发审批）、越界路径一律拒绝（`-32012`）。
 - **路径护栏（canonical）**：patch / `file.read` / 附件读取目标以 `fs.realpathSync` 解析后的
   **规范路径**做包含判断，拒绝 `..` 逃逸、符号链接/目录联结（junction）逃逸、NUL 与 Windows ADS。
-- **审批/补丁强校验**：id 归属校验（`-32013`）+ 60s 过期（`-32010`，UI 倒计时置灰）。
+- **审批/补丁/计划强校验**：id 归属校验（`-32013`）+ 60s 过期（`-32010`，UI 倒计时置灰）。
 - **命令默认拒绝**：`bash_execute` 在内置高危拒绝规则（`rm -rf`、fork bomb、格式化、`curl|sh`、
   shutdown 等）之外，还需人工审批；普通命令亦须审批。
 - **密钥脱敏 + 权限**：轨迹持久化前统一脱敏密钥 / Token / 密码词面；轨迹目录 `0700`、文件 `0600`。
@@ -254,12 +261,14 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，615 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，636 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
+  会话级回滚（快照/写入指纹/幂等与防覆盖）、计划模式（只读工具集/挂起/批准与拒绝分支）、
   Webview Markdown 渲染与净化（XSS 安全）、以及面板 DOM 契约（jsdom 载入真实 `media/webview.html`）。
 - **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
-  `file.read` 越界拒绝、真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘），
+  `file.read` 越界拒绝、真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘）、
+  计划模式全流程（出方案 → 反复挂起被拒 → 拒绝不改盘 → 批准后落盘），
   以及真实 `bash_execute`（审批 → spawn 执行 → cwd 约束校验）。
 - **集成测试**：`npm run test:integration` 用 `@vscode/test-electron` 启动真实 VSCode Extension Host，
   覆盖扩展宿主层 ↔ daemon 的完整闭环（T1 激活连接 / T2 补丁 / T3 审批 / T4 路径护栏 / T5 编辑后应用）。

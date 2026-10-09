@@ -11,6 +11,7 @@ import {
   ERROR_CODES,
   EventApprovalRequest,
   EventFilePatchPending,
+  EventPlanRequest,
   SessionResumeResult,
   SessionState,
 } from '../../shared/protocol';
@@ -48,6 +49,26 @@ export interface PatchSnapshot {
   description?: string;
 }
 
+/** P2-7 计划快照：断线重连后靠它把「待批准的计划」原样交还给用户。 */
+export interface PlanSnapshot {
+  planId: string;
+  expiresAt: number;
+  plan: string;
+}
+
+/** 挂起项类别（审批 / 补丁 / 计划）。三者的登记-响应-过期语义完全同构。 */
+type PendingKind = 'approval' | 'patch' | 'plan';
+
+/**
+ * 是否处于「等用户决策」的挂起态。
+ *
+ * 收在一个判定里而不是各写一遍 `||`：新增一类挂起时，漏掉任何一处分支的后果都是
+ * "取消后状态没退回 running""到点过期后状态卡住"这类难查的中间态。
+ */
+function isPendingState(state: SessionState): boolean {
+  return state === 'pending_approval' || state === 'pending_patch' || state === 'pending_plan';
+}
+
 export const DEFAULT_APPROVAL_TTL_MS = 60_000;
 /** 挂起项 TTL 可配范围：太短来不及看，太长等于让 Agent 干等 */
 export const MIN_APPROVAL_TTL_MS = 10_000;
@@ -70,8 +91,12 @@ export class Session {
   private buffer: BufferedEvent[] = [];
   private pendingApproval = new Map<string, PendingItem>();
   private pendingPatch = new Map<string, PendingItem>();
+  private pendingPlan = new Map<string, PendingItem>();
   private approvalSnapshot: ApprovalSnapshot | null = null;
   private patchSnapshot: PatchSnapshot | null = null;
+  private planSnapshot: PlanSnapshot | null = null;
+  /** P2-7：批准计划时用户附带的补充意见（仅"批准"时留存） */
+  private planNote: string | null = null;
   /** P2 编辑后应用：patchId -> 用户编辑后的完整内容（accept 时带回，写盘覆盖 newContent） */
   private patchContent = new Map<string, string>();
   /** P0-1：已由客户端应用到编辑器缓冲区的 patchId（agent 侧须跳过写盘） */
@@ -142,6 +167,10 @@ export class Session {
         description: p.description,
       };
     }
+    if (this.planSnapshot) {
+      const pl = this.planSnapshot;
+      result.pendingPlan = { planId: pl.planId, expiresAt: pl.expiresAt, plan: pl.plan };
+    }
     return result;
   }
 
@@ -160,7 +189,13 @@ export class Session {
   cancel(): void {
     this.canceled = true;
     this.rejectAllPending();
-    if (this.state === 'pending_approval' || this.state === 'pending_patch') {
+    // 挂起项被整体按"拒绝"解析掉了，快照就必须跟着清 —— 否则 `session.resume` 在
+    // 「已取消、Agent 还没收尾」这段窗口里会交还一个再也答不了的挂起项给 UI。
+    // （三种挂起项同此：状态、Promise、快照必须同时归位。）
+    this.approvalSnapshot = null;
+    this.patchSnapshot = null;
+    this.planSnapshot = null;
+    if (isPendingState(this.state)) {
       this.state = 'running'; // Agent 会在下一轮检查 canceled 并收尾
     }
     // P0-3：同步触发在途请求中断（在 rejectAllPending 之后，避免回调里再观察挂起态）
@@ -197,6 +232,8 @@ export class Session {
     this.state = 'idle';
     this.approvalSnapshot = null;
     this.patchSnapshot = null;
+    this.planSnapshot = null;
+    this.planNote = null;
     this.patchContent.clear();
     this.patchApplyInEditor.clear();
     this.rejectAllPending();
@@ -250,6 +287,34 @@ export class Session {
     return r;
   }
 
+  /** P2-7：登记一份待用户批准的计划。过期语义与审批完全一致（到点按"拒绝"处理）。 */
+  registerPlan(params: EventPlanRequest, ttlMs = DEFAULT_APPROVAL_TTL_MS): Promise<boolean> {
+    this.planSnapshot = {
+      planId: params.planId,
+      expiresAt: params.expiresAt ?? Date.now() + ttlMs,
+      plan: params.plan,
+    };
+    this.planNote = null; // 上一轮的补充意见不跨计划残留
+    this.state = 'pending_plan';
+    return this.registerPending('plan', this.planSnapshot.planId, this.planSnapshot.expiresAt);
+  }
+
+  respondPlan(planId: string, approved: boolean, note?: string): 'ok' | 'expired' | 'not_found' {
+    const r = this.respondPending('plan', planId, approved);
+    if (r === 'ok') {
+      // 只在"批准"时留存补充意见：拒绝时那段文字对执行阶段没有意义。
+      this.planNote = approved && typeof note === 'string' && note.trim() ? note : null;
+      this.planSnapshot = null;
+      this.state = 'running';
+    }
+    return r;
+  }
+
+  /** P2-7：用户在批准计划时附带的补充意见（无则 undefined）。 */
+  getPlanNote(): string | undefined {
+    return this.planNote ?? undefined;
+  }
+
   /** 当前挂起审批的输入参数（B1 信任记忆用：approval.respond 带 trust 时取命令入白名单）。 */
   getPendingApprovalInput(): Record<string, unknown> | null {
     return this.approvalSnapshot ? { ...this.approvalSnapshot.input } : null;
@@ -296,12 +361,13 @@ export class Session {
 
   // ------------------------------------------------------------------ 内部
 
-  private registerPending(
-    kind: 'approval' | 'patch',
-    id: string,
-    expiresAt: number
-  ): Promise<boolean> {
-    const map = kind === 'approval' ? this.pendingApproval : this.pendingPatch;
+  private pendingMapOf(kind: PendingKind): Map<string, PendingItem> {
+    if (kind === 'approval') return this.pendingApproval;
+    return kind === 'patch' ? this.pendingPatch : this.pendingPlan;
+  }
+
+  private registerPending(kind: PendingKind, id: string, expiresAt: number): Promise<boolean> {
+    const map = this.pendingMapOf(kind);
     // 每次登记新条目时顺手扫掉同类型的**已过期**条目（P1-7 的最小修法）。
     //
     // 不变量：到点未响应的条目要保留一小会儿 —— 此时 `respond` 必须还能回 `expired`（而不是
@@ -322,8 +388,9 @@ export class Session {
           entry.expired = true;
           entry.resolve(false);
           if (kind === 'approval') this.approvalSnapshot = null;
-          else this.patchSnapshot = null;
-          if (this.state === 'pending_approval' || this.state === 'pending_patch') {
+          else if (kind === 'patch') this.patchSnapshot = null;
+          else this.planSnapshot = null;
+          if (isPendingState(this.state)) {
             this.state = 'running';
           }
         }, Math.max(0, expiresAt - Date.now())),
@@ -340,11 +407,11 @@ export class Session {
   }
 
   private respondPending(
-    kind: 'approval' | 'patch',
+    kind: PendingKind,
     id: string,
     accepted: boolean
   ): 'ok' | 'expired' | 'not_found' {
-    const map = kind === 'approval' ? this.pendingApproval : this.pendingPatch;
+    const map = this.pendingMapOf(kind);
     const entry = map.get(id);
     if (!entry) return 'not_found';
     map.delete(id);
@@ -357,16 +424,13 @@ export class Session {
   }
 
   private rejectAllPending(): void {
-    for (const p of this.pendingApproval.values()) {
-      clearTimeout(p.timer);
-      p.resolve(false);
+    for (const map of [this.pendingApproval, this.pendingPatch, this.pendingPlan]) {
+      for (const p of map.values()) {
+        clearTimeout(p.timer);
+        p.resolve(false);
+      }
+      map.clear();
     }
-    this.pendingApproval.clear();
-    for (const p of this.pendingPatch.values()) {
-      clearTimeout(p.timer);
-      p.resolve(false);
-    }
-    this.pendingPatch.clear();
   }
 }
 
