@@ -16,6 +16,7 @@ function report(over: Partial<SessionRollbackResult> = {}): SessionRollbackResul
     restored: [],
     deleted: [],
     skippedDirty: [],
+    changedAfter: [],
     unrestorable: [],
     failed: [],
     unrecorded: 0,
@@ -52,6 +53,21 @@ describe('formatRollbackReport', () => {
     expect(s.headline).toBe('已回滚 1 处文件改动，另有 1 处未处理');
     expect(s.detail).toContain('编辑器里有未保存的改动');
     expect(s.detail).toContain('先保存或放弃这些改动后再回滚');
+  });
+
+  it('内容已变的文件单独成行（与"脏文档跳过"是两回事：一个先保存，一个先看看改了什么）', () => {
+    const s = formatRollbackReport(
+      report({
+        total: 2,
+        restored: ['/ws/a.ts'],
+        changedAfter: [{ path: '/ws/b.ts', reason: '文件内容在本次会话之后被修改过，未覆盖' }],
+      }),
+      { workspaceRoot: '/ws' }
+    );
+    expect(s.headline).toBe('已回滚 1 处文件改动，另有 1 处未处理');
+    expect(s.detail).toContain('在本次会话之后又被改过');
+    expect(s.detail).toContain('b.ts');
+    expect(s.detail).not.toContain('编辑器里有未保存的改动');
   });
 
   it('不可还原 / 失败各自成行，并带上原因', () => {

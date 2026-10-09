@@ -242,6 +242,48 @@ describe('applyPatchDecision × P2-6 快照记录', () => {
     expect(records).toEqual([{ path: target, content: 'disk' }]);
     expect(fs.readFileSync(target, 'utf8')).toBe('user-edited');
   });
+
+  it('写入指纹随快照一并记账（回滚据此判断文件有没有被改过）', () => {
+    fs.writeFileSync(target, 'before', 'utf8');
+    const writes: Array<{ path: string; before?: string; after?: string }> = [];
+    const { env } = makeEnv();
+    env.recordSnapshot = (p, before, after) => writes.push({ path: p, before, after });
+    applyPatchDecision(env, {
+      patchId: 'w1',
+      resolvedPath: target,
+      oldContent: 'before',
+      newContent: 'after',
+    });
+    expect(writes).toEqual([{ path: target, before: 'before', after: 'after' }]);
+  });
+
+  it('编辑后应用：写入指纹取用户编辑后的内容，而不是 agent 原始内容', () => {
+    fs.writeFileSync(target, 'disk', 'utf8');
+    const writes: Array<{ path: string; before?: string; after?: string }> = [];
+    const { env } = makeEnv({ edited: 'user-edited' });
+    env.recordSnapshot = (p, before, after) => writes.push({ path: p, before, after });
+    applyPatchDecision(env, {
+      patchId: 'w2',
+      resolvedPath: target,
+      oldContent: 'disk',
+      newContent: 'agent',
+    });
+    expect(writes).toEqual([{ path: target, before: 'disk', after: 'user-edited' }]);
+  });
+
+  it('通路1（编辑器应用）：写入指纹取应用进缓冲区的那份内容', () => {
+    fs.writeFileSync(target, 'disk', 'utf8');
+    const writes: Array<{ path: string; before?: string; after?: string }> = [];
+    const { env } = makeEnv({ appliedInEditor: true, dirty: true });
+    env.recordSnapshot = (p, before, after) => writes.push({ path: p, before, after });
+    applyPatchDecision(env, {
+      patchId: 'w3',
+      resolvedPath: target,
+      oldContent: 'disk',
+      newContent: 'agent',
+    });
+    expect(writes).toEqual([{ path: target, before: 'disk', after: 'agent' }]);
+  });
 });
 
 describe('describePatchOutcome', () => {

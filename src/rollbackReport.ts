@@ -1,7 +1,7 @@
 /**
  * 会话回滚结果 → 用户可读文案（纯函数，便于单测）。
  *
- * 为什么单独成模块：回滚结果有六类，压成一句"回滚完成"会把真正有用的信息埋掉 ——
+ * 为什么单独成模块：回滚结果有七类，压成一句"回滚完成"会把真正有用的信息埋掉 ——
  * 「3 个文件因为编辑器里还没保存，跳过了」与「全部还原成功」对用户的下一步动作完全不同
  * （前者要用户先去保存或放弃改动，后者什么也不用做）。这里负责把它们排成人话，
  * UI 只负责显示；也因此可以脱离 vscode 直接测。
@@ -34,9 +34,13 @@ export function formatRollbackReport(
   opts: RollbackFormatOptions = {}
 ): RollbackSummary {
   const short = (p: string) => shortPath(p, opts.workspaceRoot);
+  // 防御 `undefined`：扩展可能连着一个"升级前就已在跑"的 daemon（进程存活期内不会重载代码），
+  // 那种 daemon 不认识本字段。缺字段当成空数组，而不是让整个回滚汇报抛异常。
+  const changedAfter = report.changedAfter ?? [];
   const done = report.restored.length + report.deleted.length;
   const unhandled =
     report.skippedDirty.length +
+    changedAfter.length +
     report.unrestorable.length +
     report.failed.length +
     report.unrecorded;
@@ -61,6 +65,12 @@ export function formatRollbackReport(
     lines.push(
       `- 跳过 ${report.skippedDirty.length} 个（编辑器里有未保存的改动，回滚不会覆盖它们）：` +
         `${list(report.skippedDirty.map(short))}。请先保存或放弃这些改动后再回滚。`
+    );
+  }
+  if (changedAfter.length > 0) {
+    lines.push(
+      `- 跳过 ${changedAfter.length} 个（在本次会话之后又被改过，回滚不覆盖它们）：` +
+        `${list(changedAfter.map((c) => short(c.path)))}。请先确认这些改动是否要保留，再决定如何回退。`
     );
   }
   if (report.unrestorable.length > 0) {

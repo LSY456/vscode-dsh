@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { SessionSnapshotStore, safeSessionSegment } from './sessionSnapshot';
+import { SessionSnapshotStore, isSafeBlobName, safeSessionSegment } from './sessionSnapshot';
 
 /**
  * P2-6 会话级事务回滚的存储层。
@@ -232,5 +232,141 @@ describe('clear', () => {
     expect(s.clear('sess1')).toBe(1);
     expect(fs.existsSync(path.join(storeRoot, 'sess1'))).toBe(false);
     expect(s.count('sess1')).toBe(0);
+  });
+});
+
+/**
+ * 写入指纹（文件头 ⑤）。
+ *
+ * ③ 的「脏文档跳过」只挡得住"编辑器里还没保存"的改动；用户改完**保存**之后文件不脏，
+ * 守卫就失效了 —— 回滚会把他的改动连同 Agent 的一起退回，而报告还显示"全部成功"。
+ * 这一组用例钉的就是这个缺口：磁盘不是"我留下的样子"就一律不碰。
+ */
+describe('restore × 写入指纹（会话之后被改过就不覆盖）', () => {
+  it('磁盘内容与本次会话写入的一致 -> 正常还原', () => {
+    const s = mk();
+    const f = file('a.txt');
+    fs.writeFileSync(f, 'original', 'utf8');
+    s.record('sess1', f, 'original', 'agent-written');
+    fs.writeFileSync(f, 'agent-written', 'utf8'); // 正是会话写入的样子
+
+    const r = s.restore('sess1', () => false);
+    expect(r.restored).toEqual([f]);
+    expect(r.changedAfter).toEqual([]);
+    expect(fs.readFileSync(f, 'utf8')).toBe('original');
+  });
+
+  it('用户改完又保存（文件不脏）-> 归入「内容已变」，绝不覆盖', () => {
+    const s = mk();
+    const f = file('a.txt');
+    fs.writeFileSync(f, 'original', 'utf8');
+    s.record('sess1', f, 'original', 'agent-written');
+    fs.writeFileSync(f, 'user-edited-and-saved', 'utf8'); // 会话之后被改过
+
+    // 关键：不脏（已保存），所以脏文档守卫拦不住它 —— 挡住它的是写入指纹
+    const r = s.restore('sess1', () => false);
+    expect(r.changedAfter).toHaveLength(1);
+    expect(r.changedAfter[0].path).toBe(f);
+    expect(r.restored).toEqual([]);
+    expect(fs.readFileSync(f, 'utf8')).toBe('user-edited-and-saved'); // 用户改动保住了
+  });
+
+  it('会话新建的文件被用户改过 -> 不删除（删除会毁掉用户的改动）', () => {
+    const s = mk();
+    const f = file('created.txt');
+    s.record('sess1', f, undefined, 'agent-created');
+    fs.writeFileSync(f, 'user-edited', 'utf8');
+
+    const r = s.restore('sess1', () => false);
+    expect(r.deleted).toEqual([]);
+    expect(r.changedAfter).toHaveLength(1);
+    expect(fs.existsSync(f)).toBe(true);
+  });
+
+  it('原本存在的文件在会话之后被删掉 -> 陈述「未还原」，不谎报成功', () => {
+    const s = mk();
+    const f = file('gone.txt');
+    fs.writeFileSync(f, 'original', 'utf8');
+    s.record('sess1', f, 'original', 'agent-written');
+    fs.unlinkSync(f);
+
+    const r = s.restore('sess1', () => false);
+    expect(r.restored).toEqual([]);
+    expect(r.changedAfter).toHaveLength(1);
+    expect(r.changedAfter[0].reason).toContain('不存在');
+  });
+
+  it('同一文件写两次：改动前内容取第一次，写入指纹取最后一次', () => {
+    const s = mk();
+    const f = file('a.txt');
+    fs.writeFileSync(f, 'v1', 'utf8');
+    s.record('sess1', f, 'v1', 'w1');
+    s.record('sess1', f, 'v2', 'w2'); // 改动前内容被忽略、指纹被更新为 w2
+    fs.writeFileSync(f, 'w2', 'utf8');
+
+    const r = s.restore('sess1', () => false);
+    expect(r.restored).toEqual([f]);
+    expect(fs.readFileSync(f, 'utf8')).toBe('v1'); // 仍是"会话开始前"
+  });
+
+  it('未观测到写入内容 -> 退回旧行为，不因缺指纹就让回滚整体失效', () => {
+    const s = mk();
+    const f = file('a.txt');
+    fs.writeFileSync(f, 'original', 'utf8');
+    s.record('sess1', f, 'original'); // 没有写入指纹
+    fs.writeFileSync(f, 'anything', 'utf8');
+
+    const r = s.restore('sess1', () => false);
+    expect(r.restored).toEqual([f]);
+    expect(r.changedAfter).toEqual([]);
+  });
+
+  it('回滚两次是幂等的：第二次仍报还原，而不是谎报「内容已变」', () => {
+    const s = mk();
+    const f = file('a.txt');
+    fs.writeFileSync(f, 'original', 'utf8');
+    s.record('sess1', f, 'original', 'agent-written');
+    fs.writeFileSync(f, 'agent-written', 'utf8');
+
+    expect(s.restore('sess1', () => false).restored).toEqual([f]);
+    // 快照只增不改，所以「再点一次回滚」是常见动作：此时磁盘 = 会话开始前的内容，
+    // 与写入指纹不符，但那是**我们自己**刚还原的结果，不该吓用户说"内容已变"
+    const again = s.restore('sess1', () => false);
+    expect(again.restored).toEqual([f]);
+    expect(again.changedAfter).toEqual([]);
+  });
+});
+
+describe('restore × 索引篡改（path 与 blob 都必须过护栏）', () => {
+  const tamper = (session: string, mutate: (idx: any) => void) => {
+    const idxFile = path.join(storeRoot, session, 'index.json');
+    const idx = JSON.parse(fs.readFileSync(idxFile, 'utf8'));
+    mutate(idx);
+    fs.writeFileSync(idxFile, JSON.stringify(idx), 'utf8');
+  };
+
+  it('blob 被改成目录穿越 -> 拒绝读取（只校验 path 等于留了半扇门）', () => {
+    const s = mk();
+    const inside = file('safe.txt');
+    fs.writeFileSync(inside, 'v', 'utf8');
+    s.record('sess1', inside, 'original', 'written');
+    tamper('sess1', (idx) => {
+      idx.entries[0].blob = '../../../../Windows/win.ini';
+    });
+    fs.writeFileSync(inside, 'written', 'utf8'); // 否则先被指纹挡下，测不到 blob 这道闸
+
+    const r = s.restore('sess1', () => false);
+    expect(r.restored).toEqual([]);
+    expect(r.failed).toHaveLength(1);
+    expect(r.failed[0].error).toContain('不合法');
+  });
+
+  it('isSafeBlobName 只放行记录侧真正会产出的形状', () => {
+    expect(isSafeBlobName('blob_0001.snap')).toBe(true);
+    expect(isSafeBlobName('blob_12.snap')).toBe(true);
+    expect(isSafeBlobName('blob_0001.snap.bak')).toBe(false);
+    expect(isSafeBlobName('../index.json')).toBe(false);
+    expect(isSafeBlobName('C:\\x\\blob_0001.snap')).toBe(false);
+    expect(isSafeBlobName('blob_0001.txt')).toBe(false);
   });
 });

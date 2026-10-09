@@ -17,7 +17,8 @@
  * 「审阅期间缓冲区又被改过」由客户端在应用前自校验（见 `diffProvider`）。
  *
  * P2-6 会话回滚：**两条真正改动工作区的通路（1 与 3）都会先调 `recordSnapshot`**，把改动前的
- * 内容留给影子快照。通路 2 什么都没改，故不记录 —— 记了会让回滚报告凭空多出一个文件。
+ * 内容留给影子快照，并附上本次写入的内容（供还原前做指纹比对）。通路 2 什么都没改，故不记录
+ * —— 记了会让回滚报告凭空多出一个文件。
  */
 import { checkPatchConflict, writeTextFile } from './tools';
 
@@ -31,13 +32,14 @@ export interface PatchApplyEnv {
   /** P2：用户编辑后的内容（无则用 agent 原始 newContent） */
   getEditedContent(patchId: string): string | undefined;
   /**
-   * P2-6 会话回滚：在**真正改动发生之前**记下改动前的内容（供事后还原）。
+   * P2-6 会话回滚：在**真正改动发生之前**记下改动前的内容，并附上**本次写入的内容**
+   * （供还原前做指纹比对，见 `sessionSnapshot.ts` 文件头 ⑤）。
    *
    * 必须由本模块调用而不是调用方各写一遍 —— 两条落地通路（写盘 / 交由编辑器）都会改动
    * 工作区，漏记任何一条，回滚就会少还一个文件，而用户无从察觉。
-   * 实现侧须保证「首写优先」与「失败不抛」（见 `sessionSnapshot.ts`）。
+   * 实现侧须保证「改动前内容首写优先」「写入指纹末次覆盖」与「失败不抛」（见 `sessionSnapshot.ts`）。
    */
-  recordSnapshot?(resolvedPath: string, originalContent: string | undefined): void;
+  recordSnapshot?(resolvedPath: string, originalContent: string | undefined, writtenContent?: string): void;
   /** 向用户播报（映射到 message.delta） */
   notifyUser(delta: string): void;
 }
@@ -67,8 +69,12 @@ export function applyPatchDecision(env: PatchApplyEnv, patch: PatchApplyRequest)
   // 通路 1：客户端已应用到编辑器缓冲区 —— daemon 不得写盘
   if (env.isAppliedInEditor(patchId)) {
     // 改动**确实发生了**（发生在编辑器缓冲区里），只是不由 daemon 执行 —— 回滚快照照记。
+    // 写入内容按"编辑器里最终应用的那份"记账：daemon 看不到缓冲区，只能取用户编辑后的内容
+    // （无编辑则取 agent 的 newContent）。这一份若与真实缓冲区不符，只会让还原变成**保守跳过**
+    // （报"内容已变"），不会造成覆盖 —— 宁可少还原，也不覆盖用户的东西。
     // 还原时该文件多半仍是脏的，届时按「脏文档跳过」如实回报。
-    env.recordSnapshot?.(resolvedPath, oldContent);
+    const appliedInBuffer = env.getEditedContent(patchId) ?? newContent;
+    env.recordSnapshot?.(resolvedPath, oldContent, appliedInBuffer);
     return { applied: false, appliedInEditor: true };
   }
 
@@ -94,7 +100,7 @@ export function applyPatchDecision(env: PatchApplyEnv, patch: PatchApplyRequest)
     }
     const finalContent = env.getEditedContent(patchId) ?? newContent;
     // P2-6：先留快照再落盘 —— 顺序反了就什么都救不回来了
-    env.recordSnapshot?.(resolvedPath, oldContent);
+    env.recordSnapshot?.(resolvedPath, oldContent, finalContent);
     writeTextFile(env.workspaceRoot, env.allowedDirs, resolvedPath, finalContent);
     return { applied: true, appliedInEditor: false };
   } catch (e) {
