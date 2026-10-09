@@ -68,10 +68,11 @@ export interface AgentContext {
   /** P0-1：本补丁是否已由客户端应用到编辑器缓冲区（为 true 时 agent 不得写盘） */
   isPatchAppliedInEditor?(patchId: string): boolean;
   /**
-   * P2-6 会话级回滚：在文件被改动之前记下改动前的内容（server 注入，落 `.dsh/snapshots/<会话>/`）。
-   * 未提供（测试里的裸 context）时自动退化为"不留快照"，回滚功能不可用但不影响写盘。
+   * P2-6 会话级回滚：在文件被改动之前记下改动前的内容，并附上本次写入的内容
+   * （server 注入，落 `.dsh/snapshots/<会话>/`）。未提供（测试里的裸 context）时自动退化为
+   * "不留快照"，回滚功能不可用但不影响写盘。
    */
-  recordSnapshot?(resolvedPath: string, originalContent: string | undefined): void;
+  recordSnapshot?(resolvedPath: string, originalContent: string | undefined, writtenContent?: string): void;
   /** 按需读取文件（须在工作区内），失败返回 undefined */
   readFile(target: string, maxBytes?: number): Promise<string | undefined>;
 }
@@ -88,7 +89,8 @@ export function makePatchEnv(ctx: AgentContext): PatchApplyEnv {
     isAppliedInEditor: (patchId) => ctx.isPatchAppliedInEditor?.(patchId) ?? false,
     getEditedContent: (patchId) => ctx.getPatchContent?.(patchId),
     // P2-6：快照钩子透传。这里不做 try/catch —— 实现侧已保证不抛（留不下快照不该阻断写盘）
-    recordSnapshot: (resolvedPath, originalContent) => ctx.recordSnapshot?.(resolvedPath, originalContent),
+    recordSnapshot: (resolvedPath, originalContent, writtenContent) =>
+      ctx.recordSnapshot?.(resolvedPath, originalContent, writtenContent),
     notifyUser: (delta) => ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta }),
   };
 }

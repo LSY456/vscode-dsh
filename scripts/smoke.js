@@ -609,6 +609,41 @@ async function main() {
   );
   assert(rb.skippedDirty.length === 0 && rb.failed.length === 0, '回滚无跳过、无失败');
 
+  // ---- 10c. P2-6 加固：文件在会话之后**又被改过**（模拟用户手工编辑并保存）-> 跳过而不是覆盖
+  console.log('[smoke] 回滚 × 内容已变的守卫…');
+  rconn.rpc.resetEvents();
+  await rconn.rpc.request('session.send', {
+    sessionId: rsessionId,
+    prompt: '请修改 sample.txt（write edit）',
+    attachments: [
+      { kind: 'file', path: samplePath, name: 'sample.txt', content: fs.readFileSync(samplePath, 'utf8') },
+    ],
+  });
+  const rpatch2 = await rconn.rpc.waitFor((m) => m.method === 'file.patch.pending', '第二次真实补丁');
+  await rconn.rpc.request('file.patch.respond', {
+    sessionId: rsessionId,
+    patchId: rpatch2.params.patchId,
+    accept: true,
+  });
+  await rconn.rpc.waitFor(
+    (m) => m.method === 'file.patch.result' && m.params.patchId === rpatch2.params.patchId,
+    '第二次真实补丁结果'
+  );
+  await rconn.rpc.waitFor((m) => m.method === 'session.ended', '第二次真实写会话结束');
+
+  // 会话之后手工改一遍并"保存" —— 文件因此**不脏**，脏文档守卫拦不住它，只有写入指纹能拦
+  const userSaved = fs.readFileSync(samplePath, 'utf8') + '\n// USER-SAVED-AFTER-SESSION\n';
+  fs.writeFileSync(samplePath, userSaved, 'utf8');
+  const rb2 = await rconn.rpc.request('session.rollback', { sessionId: rsessionId });
+  assert(
+    rb2.changedAfter.some(
+      (c) => path.resolve(c.path).toLowerCase() === path.resolve(samplePath).toLowerCase()
+    ),
+    '会话之后被改过的文件被列入 changedAfter（而不是被静默覆盖）'
+  );
+  assert(rb2.restored.length === 0, '内容已变时不做还原');
+  assert(fs.readFileSync(samplePath, 'utf8') === userSaved, '用户会话之后的改动被保住');
+
   // 影子快照落在 .dsh/snapshots/<会话>/（首写优先，只增不改）
   const snapDir = path.join(tmpDir, '.dsh', 'snapshots', rsessionId);
   assert(

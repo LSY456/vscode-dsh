@@ -44,7 +44,7 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 | `session.send` | `{ sessionId?, prompt, attachments? }` | `{ sessionId, accepted }` |
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
 | `session.resume` | `{ sessionId }` | `{ sessionId, state, pendingApproval?, pendingPatch? }` |
-| `session.rollback` | `{ sessionId? }` | `{ total, restored, deleted, skippedDirty, unrestorable, failed, unrecorded }` |
+| `session.rollback` | `{ sessionId? }` | `{ total, restored, deleted, skippedDirty, changedAfter, unrestorable, failed, unrecorded }` |
 | `approval.respond` | `{ sessionId, approvalId, approved, note? }` | `{ ok }` |
 | `file.patch.respond` | `{ sessionId, patchId, accept, content?, applyInEditor? }` | `{ ok }` |
 | `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size, dirty? }` |
@@ -73,10 +73,16 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
 - 落地通路的两条（写盘 / 交由编辑器 `applyInEditor`）都会记录；被拒绝、乐观锁冲突等**没有真正改动**的
   分支一律不记录。
 - 结果**分列**（不是一句"成功/失败"）：`restored`（还原为改动前）/ `deleted`（本次新建，已删除）/
-  `skippedDirty`（目标此刻在编辑器里有未保存改动，**跳过不覆盖**）/ `unrestorable`（改动前内容未能留存，
+  `skippedDirty`（目标此刻在编辑器里有未保存改动，**跳过不覆盖**）/ `changedAfter`（文件在本次会话之后
+  又被改过，例如用户手工编辑并**保存**，**跳过不覆盖**）/ `unrestorable`（改动前内容未能留存，
   如文件过大）/ `failed`（写盘或删除失败）/ `unrecorded`（快照条目达上限而未纳入回滚的改动数）。
-- 两条门禁：**运行中的会话拒绝回滚**（返回 `-32009`，避免与写入并发）；**还原前对每条路径重做
-  canonical 越界校验**（`index.json` 是本机可写文件，被篡改时不能让 daemon 写到工作区外）。
+- **还原前比对写入指纹**：仅凭"编辑器里没保存"挡不住"改完又保存"——那种文件不脏，回滚会把用户改动
+  连同 Agent 的一起退回，而报告还显示"全部成功"。故 daemon 在每次写入后记下**写入内容**的 sha256
+  （首写优先只约束"改动前内容"，指纹反过来取**最后一次**写入），还原前读磁盘比对，不一致即归入
+  `changedAfter`。**观测不到写入内容的旧索引/老 daemon 退化为仅按脏文档判定**，不让回滚整体失效。
+- 三条门禁：**运行中的会话拒绝回滚**（返回 `-32009`，避免与写入并发）；**还原前对每条路径重做
+  canonical 越界校验**；**内容引用（`blob`）同样按白名单形状校验** —— 它与 `path` 同源于
+  `index.json` 这个本机可写文件，只校验 `path` 等于留了半扇门。
 - `initialize` 的 `capabilities.rollback` 声明该实现支持回滚（可选，老客户端忽略即可）。
 - 快照**只增不改**，清理交给用户（`.dsh/` 是旁路目录，可随时删）。
 

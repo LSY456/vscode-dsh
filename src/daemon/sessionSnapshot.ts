@@ -18,11 +18,18 @@
  *    **拒绝还原并如实回报**。悄悄覆盖用户正在编辑的内容，比"回滚失败"严重得多。
  *
  * ④ **还原前重做路径校验**：索引文件是本机任意进程可写的普通文件（同 `.dsh/` 下的其它文件），
- *    被篡改时不能让它把 daemon 变成"写任意路径"的工具。每条路径都重新过一遍 canonical 护栏。
+ *    被篡改时不能让它把 daemon 变成"写任意路径"的工具。每条路径都重新过一遍 canonical 护栏，
+ *    **内容文件名（blob）同理** —— 它与 path 出自同一个索引文件，只校验 path 等于留了半扇门。
+ *
+ * ⑤ **还原前比对写入指纹**：③ 只挡得住"编辑器里还没保存"的改动；用户改完**保存**之后文件不脏，
+ *    ③ 就失效了 —— 回滚会把用户的改动连同 Agent 的一起退回，而报告还显示"全部成功"。
+ *    故每次写入后记下**写入内容**的哈希，还原前读磁盘比对，不一致即归入「内容已变」跳过。
+ *    这条与补丁链路上的乐观锁（`checkPatchConflict`）是同一纪律，只是换了个时间点。
  *
  * 快照只增不改：清理交给用户（`.dsh/` 本就是可随手删掉的旁路目录）。任何一步失败都**不抛异常**
  * —— 留不下快照不是让写盘失败的理由，但必须说出来（经 `log`），否则用户会在回滚时才发现少了一个文件。
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { assertPathInside, pathKey } from './paths';
@@ -47,6 +54,16 @@ export interface SnapshotEntry {
   blob: string | null;
   /** 原始内容字节数（已留存时） */
   bytes?: number;
+  /**
+   * 本次会话**最后一次写入**该文件的内容指纹（sha256 hex）。
+   *
+   * 用途见文件头 ⑤：还原前拿磁盘内容比对，不一致说明文件在会话之后被别的通路动过，
+   * 一律跳过而不覆盖。取"最后一次"而非"第一次"是因为还原要防的是"磁盘现在是不是我留下的样子"。
+   *
+   * 为 `null` / `undefined` 表示**未能观测到写入内容**（例如老版本索引、或改动发生在编辑器
+   * 缓冲区里而 daemon 无从读取最终结果）—— 此时只能退回到"仅按脏文档判定"。
+   */
+  afterHash?: string | null;
   /** 记录时刻（epoch ms） */
   recordedAt: number;
   /** 未能留存内容的原因（有值时该条无法回滚，但仍要如实出现在报告里） */
@@ -70,6 +87,11 @@ export interface RestoreReport {
   deleted: string[];
   /** 因编辑器有未保存改动而跳过（需用户先保存或放弃改动再回滚） */
   skippedDirty: string[];
+  /**
+   * 因文件在**本次会话之后被别的通路改过**（用户保存 / 外部工具 / 另一会话）而跳过。
+   * 与 `skippedDirty` 分开列：一个是"先保存再说"，一个是"先看看这是什么改动"。
+   */
+  changedAfter: { path: string; reason: string }[];
   /** 记录时就未能留存内容（文件过大），无法回滚 */
   unrestorable: { path: string; reason: string }[];
   /** 还原过程中写盘 / 删除失败 */
@@ -107,6 +129,22 @@ export function safeSessionSegment(sessionId: string): string {
   return cleaned || '_unnamed';
 }
 
+/**
+ * 快照内容文件名是否安全（拼进路径前校验）。
+ *
+ * 与 `safeSessionSegment` 同一个理由：`blob` 字段来自**可被本机任意进程改写**的 `index.json`，
+ * 直接 `path.join(dir, blob)` 就等于把"读哪个文件"的决定权交了出去（`../../Windows/win.ini`）。
+ * 记录侧只会产出 `blob_NNNN.snap`，那就只接受这一种形状 —— 白名单比黑名单少猜很多变形。
+ */
+export function isSafeBlobName(name: string): boolean {
+  return /^blob_\d{1,6}\.snap$/.test(name);
+}
+
+/** 内容指纹（sha256 hex）。用途见文件头 ⑤；不做盐/不做 HMAC —— 这是"有没有被改过"而非防伪造。 */
+function hashContent(content: string): string {
+  return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
 export class SessionSnapshotStore {
   private readonly maxBytes: number;
   private readonly maxEntries: number;
@@ -125,13 +163,33 @@ export class SessionSnapshotStore {
     return path.join(this.opts.root, safeSessionSegment(sessionId));
   }
 
-  /** 记录「这个文件即将被改动」——由落地裁决在真正写入**之前**调用。 */
-  record(sessionId: string, filePath: string, originalContent: string | undefined): void {
+  /**
+   * 记录「这个文件即将被改动」——由落地裁决在真正写入**之前**调用。
+   *
+   * `originalContent` 取**首写优先**（会话开始前的样子）；`writtenContent` 是本会话**最后一次**
+   * 写入的内容（用于还原前的指纹比对，见文件头 ⑤），可省略（表示无法观测最终内容）。
+   */
+  record(
+    sessionId: string,
+    filePath: string,
+    originalContent: string | undefined,
+    writtenContent?: string
+  ): void {
     try {
       const index = this.readIndex(sessionId);
       const key = pathKey(filePath);
-      // 首写优先：已有记录说明本会话早先就动过它，那份快照才是"会话开始前"的样子
-      if (index.entries.some((e) => pathKey(e.path) === key)) return;
+      const afterHash = writtenContent === undefined ? null : hashContent(writtenContent);
+
+      const existing = index.entries.find((e) => pathKey(e.path) === key);
+      if (existing) {
+        // 首写优先只约束"改动前的内容"；写入指纹反过来取**最后一次** —— 它回答的是
+        // "磁盘现在应该是谁留下的样子"。观测不到新内容时保留旧指纹，绝不清空。
+        if (afterHash !== null && existing.afterHash !== afterHash) {
+          existing.afterHash = afterHash;
+          this.writeIndex(sessionId, index);
+        }
+        return;
+      }
 
       if (index.entries.length >= this.maxEntries) {
         // 不静默丢弃：计数上报，回滚报告里会提示"回滚可能不完整"
@@ -147,6 +205,7 @@ export class SessionSnapshotStore {
         path: filePath,
         existed: originalContent !== undefined,
         blob: null,
+        afterHash,
         recordedAt: this.now(),
       };
 
@@ -177,7 +236,7 @@ export class SessionSnapshotStore {
     return this.readIndex(sessionId).entries;
   }
 
-  /** 某会话已记录的改动文件数（面板据此决定是否显示「回滚」入口）。 */
+  /** 某会话已记录的改动文件数（回滚清理时据此回报"丢弃了几条"）。 */
   count(sessionId: string): number {
     return this.readIndex(sessionId).entries.length;
   }
@@ -195,6 +254,7 @@ export class SessionSnapshotStore {
       restored: [],
       deleted: [],
       skippedDirty: [],
+      changedAfter: [],
       unrestorable: [],
       failed: [],
       unrecorded: index.dropped,
@@ -219,6 +279,12 @@ export class SessionSnapshotStore {
         report.skippedDirty.push(entry.path);
         continue;
       }
+      // ⑤ 内容指纹：文件在会话之后被别的通路改过（用户保存 / 外部工具 / 另一会话）就不碰
+      const drift = this.detectDrift(resolved, entry, dir);
+      if (drift) {
+        report.changedAfter.push({ path: entry.path, reason: drift });
+        continue;
+      }
 
       try {
         if (!entry.existed) {
@@ -230,6 +296,14 @@ export class SessionSnapshotStore {
           report.failed.push({ path: entry.path, error: '快照索引缺少内容引用' });
           continue;
         }
+        // ④ `blob` 与 `path` 同源于可被篡改的 index.json，同样不能直接拼进路径
+        if (!isSafeBlobName(entry.blob)) {
+          report.failed.push({
+            path: entry.path,
+            error: `快照内容引用不合法（${entry.blob}），已拒绝读取`,
+          });
+          continue;
+        }
         const content = fs.readFileSync(path.join(dir, entry.blob), 'utf8');
         writeTextFile(this.opts.workspaceRoot, this.opts.allowedDirs ?? [], resolved, content);
         report.restored.push(entry.path);
@@ -238,9 +312,10 @@ export class SessionSnapshotStore {
       }
     }
 
-    if (report.failed.length > 0 || report.unrestorable.length > 0) {
+    if (report.failed.length > 0 || report.unrestorable.length > 0 || report.changedAfter.length > 0) {
       this.log(
-        `会话 ${sessionId} 回滚未完全成功：失败 ${report.failed.length}、不可还原 ${report.unrestorable.length}`
+        `会话 ${sessionId} 回滚未完全成功：失败 ${report.failed.length}、不可还原 ${report.unrestorable.length}、` +
+          `内容已变 ${report.changedAfter.length}`
       );
     }
     return report;
@@ -258,6 +333,41 @@ export class SessionSnapshotStore {
   }
 
   // ------------------------------------------------------------------ 内部
+
+  /**
+   * 判定「文件在本次会话之后是否被别的通路改过」（文件头 ⑤）。
+   *
+   * 返回非空字符串 = 已漂移（连同给用户看的原因）；`null` = 未发现漂移**或无法判定**。
+   *
+   * 无法判定（没有写入指纹：老索引 / 编辑器通路）时返回 `null` 而不是保守跳过 ——
+   * 否则这两个常见情形会让回滚整体失效，那比"可能覆盖"更糟。
+   */
+  private detectDrift(resolved: string, entry: SnapshotEntry, dir: string): string | null {
+    if (typeof entry.afterHash !== 'string') return null;
+    let current: string;
+    try {
+      current = fs.readFileSync(resolved, 'utf8');
+    } catch {
+      // 读不到：会话**新建**的文件已消失 = 回滚目标（不存在）已达成，交给删除通路（它容忍缺失）；
+      // 原本就存在的文件消失则确有变化，必须陈述，不能静默当成"还原成功"。
+      return entry.existed ? '文件当前不存在（已被删除或改名），未还原' : null;
+    }
+    if (hashContent(current) === entry.afterHash) return null; // 正是本次会话写入的样子
+    // 已经处于"会话开始前"：多半是刚刚回滚过一次（快照只增不改，重复点回滚是常见动作）。
+    // 再还一次是幂等的，不该报成"内容已变"去吓用户。
+    if (this.matchesSnapshot(dir, entry, current)) return null;
+    return '文件内容在本次会话之后被修改过（如手工编辑并保存），未覆盖';
+  }
+
+  /** 当前内容是否已等同于快照留存的那份（即"已在会话开始前的状态"）。 */
+  private matchesSnapshot(dir: string, entry: SnapshotEntry, current: string): boolean {
+    if (!entry.existed || !entry.blob || !isSafeBlobName(entry.blob)) return false;
+    try {
+      return fs.readFileSync(path.join(dir, entry.blob), 'utf8') === current;
+    } catch {
+      return false;
+    }
+  }
 
   private ensureDir(sessionId: string): string {
     const dir = this.dirOf(sessionId);
@@ -281,7 +391,11 @@ export class SessionSnapshotStore {
       return {
         version: INDEX_VERSION,
         dropped: typeof raw.dropped === 'number' && raw.dropped > 0 ? raw.dropped : 0,
-        entries: entries.map((e) => ({ ...e, blob: typeof e.blob === 'string' ? e.blob : null })),
+        entries: entries.map((e) => ({
+          ...e,
+          blob: typeof e.blob === 'string' ? e.blob : null,
+          afterHash: typeof e.afterHash === 'string' ? e.afterHash : null,
+        })),
       };
     } catch {
       return emptyIndex();

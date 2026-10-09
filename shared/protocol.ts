@@ -345,6 +345,11 @@ export interface SessionRollbackResult {
   deleted: string[];
   /** 因编辑器有未保存改动而跳过（绝不覆盖用户正在编辑的内容） */
   skippedDirty: string[];
+  /**
+   * 因文件在本次会话之后被别的通路改过（用户手工编辑并保存 / 外部工具 / 另一会话）而跳过。
+   * 与 `skippedDirty` 分开列：前者要先保存，后者要先看这些改动是什么、再决定是否仍然回滚。
+   */
+  changedAfter: { path: string; reason: string }[];
   /** 记录时就未能留存内容（文件过大等），无法回滚 */
   unrestorable: { path: string; reason: string }[];
   /** 还原过程中写盘 / 删除失败 */

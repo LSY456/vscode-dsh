@@ -462,9 +462,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             },
             // P0-1：本补丁是否已由客户端应用到编辑器缓冲区（为 true 时 agent 不写盘）
             isPatchAppliedInEditor: (patchId) => session.getPatchApplyInEditor(patchId),
-            // P2-6 会话回滚：改动发生**之前**留一份影子快照（首写优先，实现侧保证不抛）
-            recordSnapshot: (resolvedPath, originalContent) =>
-              snapshots.record(session.id, resolvedPath, originalContent),
+            // P2-6 会话回滚：改动发生**之前**留一份影子快照（改动前内容首写优先、写入指纹末次覆盖、不抛）
+            recordSnapshot: (resolvedPath, originalContent, writtenContent) =>
+              snapshots.record(session.id, resolvedPath, originalContent, writtenContent),
           };
           // P3.6：auto 切换 —— 有 apiKey（或显式 real）走真实模型，否则回退内置模拟
           const agentMode = resolveAgentMode(conn.runtime);
@@ -546,8 +546,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           );
           console.log(
             `[rollback] 会话 ${session.id}：还原 ${result.restored.length}、删除 ${result.deleted.length}、` +
-              `脏跳过 ${result.skippedDirty.length}、不可还原 ${result.unrestorable.length}、` +
-              `失败 ${result.failed.length}${result.unrecorded > 0 ? `、未记录 ${result.unrecorded}` : ''}`
+              `脏跳过 ${result.skippedDirty.length}、内容已变 ${result.changedAfter.length}、` +
+              `不可还原 ${result.unrestorable.length}、失败 ${result.failed.length}` +
+              `${result.unrecorded > 0 ? `、未记录 ${result.unrecorded}` : ''}`
           );
           sendResult(conn.ws, req.id, result);
           return;
