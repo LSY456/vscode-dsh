@@ -38,6 +38,7 @@ import {
   EventApprovalRequest,
   EventFilePatchPending,
   EventFilePatchResult,
+  EventPlanRequest,
   EventMessageDelta,
   EventSessionEnded,
   EventSessionStarted,
@@ -89,6 +90,7 @@ export const VIEW_ID = 'dsh.agentView';
 /** 待审批 / 待审查快照：surface 重建时用于恢复挂起卡片与待办条 */
 type PendingApproval = EventApprovalRequest & { expiresAt?: number };
 type PendingPatch = EventFilePatchPending & { expiresAt?: number };
+type PendingPlan = EventPlanRequest & { expiresAt?: number };
 
 interface ToWebview {
   kind: 'status' | 'event' | 'init' | 'session.reset';
@@ -107,7 +109,7 @@ interface ToWebview {
     agentReason?: 'no-api-key' | 'forced-mock';
     model?: string;
     daemonVersion?: string;
-    pending?: { approvals: PendingApproval[]; patches: PendingPatch[] };
+    pending?: { approvals: PendingApproval[]; patches: PendingPatch[]; plans: PendingPlan[] };
     /** 工作区信任状态快照：受限模式横幅据此显示（未声明 = 已信任） */
     trust?: TrustGate;
   };
@@ -120,6 +122,7 @@ interface FromWebview {
     | 'cancel'
     | 'session.new'
     | 'approval.respond'
+    | 'plan.respond'
     | 'patch.accept'
     | 'patch.reject'
     | 'patch.openDiff'
@@ -140,6 +143,12 @@ interface FromWebview {
   approved?: boolean;
   /** B1 信任记忆：审批通过并记住（免审批白名单） */
   trust?: boolean;
+  /** P2-7：计划卡的批准 / 拒绝 */
+  planId?: string;
+  /** P2-7：批准计划时附带的补充意见（执行阶段以它为准） */
+  note?: string;
+  /** P2-7：输入框的「计划」开关 —— 本轮先出计划、批准后才执行 */
+  planMode?: boolean;
   patchId?: string;
   sessionId?: string;
   /** 设置面板提交项；apiKey 留空表示不修改 */
@@ -168,6 +177,7 @@ export class WebviewPanelHost {
   /** 挂起项：approval.request / file.patch.pending 后登记，respond/result 后移除 */
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   private readonly pendingPatches = new Map<string, PendingPatch>();
+  private readonly pendingPlans = new Map<string, PendingPlan>();
   /** 正在重放的会话（断线重连 / 切换会话）：重放事件不回写历史，避免重复落库 */
   private replayingSessionId = '';
   /** 模型目录缓存（在线模型列表）：内存 + globalState 双写，避免每次打开设置面板都打网络 */
@@ -202,6 +212,9 @@ export class WebviewPanelHost {
       } else if (n.method === EVENTS.ApprovalRequest) {
         const a = n.params as PendingApproval;
         if (a?.approvalId) this.pendingApprovals.set(a.approvalId, a);
+      } else if (n.method === EVENTS.PlanRequest) {
+        const pl = n.params as PendingPlan;
+        if (pl?.planId) this.pendingPlans.set(pl.planId, pl);
       } else if (n.method === EVENTS.SessionEnded) {
         // 会话结束：挂起项已被 daemon 按拒绝解除
         this.clearPending();
@@ -686,6 +699,7 @@ export class WebviewPanelHost {
   private clearPending(): void {
     this.pendingApprovals.clear();
     this.pendingPatches.clear();
+    this.pendingPlans.clear();
   }
 
   /** 供 “dsh.sendSelection” 等命令使用：打开视图、等待就绪后直接发送。 */
@@ -715,7 +729,7 @@ export class WebviewPanelHost {
         void this.refreshBalance();
         return;
       case 'send':
-        await this.doSend((msg.prompt ?? '').trim());
+        await this.doSend((msg.prompt ?? '').trim(), !!msg.planMode);
         return;
       case 'session.new': {
         try {
@@ -762,6 +776,32 @@ export class WebviewPanelHost {
           }
         } finally {
           this.pendingApprovals.delete(msg.approvalId);
+        }
+        return;
+      }
+      case 'plan.respond': {
+        if (!msg.planId) return;
+        try {
+          await this.daemon.client.request(METHODS.PlanRespond, {
+            sessionId: this.daemon.getSessionId(),
+            planId: msg.planId,
+            approved: !!msg.approved,
+            note: msg.note,
+          });
+        } catch (err) {
+          const code = (err as { code?: number } | null)?.code;
+          if (code === ERROR_CODES.Expired) {
+            this.post({ kind: 'event', method: 'plan.expired', params: { planId: msg.planId } });
+            void vscode.window.showWarningMessage('计划已过期，按不同意处理');
+          } else if (code === ERROR_CODES.NotFound) {
+            this.post({ kind: 'event', method: 'plan.expired', params: { planId: msg.planId } });
+          } else {
+            void vscode.window.showErrorMessage(
+              `计划回传失败: ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
+        } finally {
+          this.pendingPlans.delete(msg.planId);
         }
         return;
       }
@@ -860,6 +900,9 @@ export class WebviewPanelHost {
     for (const [id, p] of this.pendingPatches) {
       if (typeof p.expiresAt === 'number' && p.expiresAt <= now) this.pendingPatches.delete(id);
     }
+    for (const [id, pl] of this.pendingPlans) {
+      if (typeof pl.expiresAt === 'number' && pl.expiresAt <= now) this.pendingPlans.delete(id);
+    }
     return {
       sessionId: this.daemon.getSessionId(),
       connected: this.daemon.client.isOpen,
@@ -868,6 +911,7 @@ export class WebviewPanelHost {
       pending: {
         approvals: [...this.pendingApprovals.values()],
         patches: [...this.pendingPatches.values()],
+        plans: [...this.pendingPlans.values()],
       },
       trust: resolveTrustGate(vscode.workspace.isTrusted),
     };
@@ -883,7 +927,7 @@ export class WebviewPanelHost {
     this.post({ kind: 'event', method: 'trust.info', params: resolveTrustGate(vscode.workspace.isTrusted) });
   }
 
-  private async doSend(prompt: string): Promise<void> {
+  private async doSend(prompt: string, planMode = false): Promise<void> {
     if (!prompt) {
       void vscode.window.showWarningMessage('请输入 Prompt');
       return;
@@ -910,14 +954,14 @@ export class WebviewPanelHost {
       this.post({
         kind: 'event',
         method: 'user.message',
-        params: { text: prompt, attachments: summarizeAttachments(attachments) },
+        params: { text: prompt, attachments: summarizeAttachments(attachments), planMode: planMode || undefined },
       });
       const sessionId = this.daemon.getSessionId();
       if (sessionId) this.history.appendUser(sessionId, prompt);
       // P0-1：把"此刻的未保存缓冲区"推给 daemon，再发消息——否则 Agent 读到的磁盘内容
       // 可能落后于用户刚刚敲下的改动（去抖窗口内尚未同步）。
       await this.dirty?.syncNow();
-      await this.daemon.client.request(METHODS.SessionSend, { sessionId, prompt, attachments });
+      await this.daemon.client.request(METHODS.SessionSend, { sessionId, prompt, attachments, planMode });
     } catch (err) {
       void vscode.window.showErrorMessage(
         `发送失败: ${err instanceof Error ? err.message : String(err)}`

@@ -420,6 +420,13 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 计划模式 chip：与普通上下文 chip 区分开——它描述的是"这条消息怎么发的"，
+   不是"Agent 看到了什么"，两者混在一起会让人以为是又捕获了一份上下文。 */
+.chip.chip-plan {
+  color: var(--dsh-accent-fg);
+  background: var(--dsh-accent);
+  border-color: var(--dsh-accent);
+}
 
 /* 回答流式期间显示光标，结束后一次性渲染 Markdown */
 .md.streaming::after {
@@ -655,6 +662,41 @@ body {
 .card.patch {
   border-left-color: var(--dsh-warn);
 }
+/* 计划卡（P2-7）：它决定的不是"某个动作做不做"，而是"这一轮做不做"，
+   所以用主色而不是警示色——它既不是危险动作，也不是错误。 */
+.card.plan {
+  border-left-color: var(--dsh-accent);
+}
+/* 计划正文：与回答同样按 Markdown 渲染（复用 .md 的排版），单独给一个上限高度，
+   否则一份长计划会把后面的内容全部顶出视野——而用户此刻要看的是"批不批"。 */
+.card-md {
+  font-size: var(--dsh-fs-md);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.card-note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dsh-sp-1);
+  font-size: var(--dsh-fs-sm);
+  color: var(--dsh-fg-dim);
+}
+.card-note textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font-family: inherit;
+  font-size: var(--dsh-fs-md);
+  color: var(--dsh-fg);
+  background: var(--dsh-field-bg);
+  border: 1px solid var(--dsh-field-line);
+  border-radius: var(--dsh-r-sm);
+  padding: var(--dsh-sp-1) var(--dsh-sp-2);
+}
+.card-note textarea:focus-visible {
+  outline: 1px solid var(--dsh-focus);
+  outline-offset: 1px;
+}
 .card.decided {
   opacity: 0.62;
 }
@@ -836,6 +878,32 @@ body {
   display: flex;
   align-items: center;
   gap: var(--dsh-sp-1);
+}
+/* 计划模式开关：默认是"关"的中性小按钮，开启后填主色。
+   不能做成复选框——输入框左下角的空间只够一个词，而"计划"这个词本身就已经是标签。 */
+.mode-toggle {
+  flex: 0 0 auto;
+  font-family: inherit;
+  font-size: var(--dsh-fs-xs);
+  line-height: 1.6;
+  color: var(--dsh-fg-dim);
+  background: transparent;
+  border: 1px solid var(--dsh-line);
+  border-radius: 999px;
+  padding: 0 var(--dsh-sp-2);
+  cursor: pointer;
+}
+.mode-toggle:hover {
+  background: var(--dsh-hover);
+}
+.mode-toggle.on {
+  color: var(--dsh-accent-fg);
+  background: var(--dsh-accent);
+  border-color: var(--dsh-accent);
+}
+.mode-toggle:focus-visible {
+  outline: 1px solid var(--dsh-focus);
+  outline-offset: 1px;
 }
 .hint {
   flex: 1 1 auto;

@@ -75,12 +75,20 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   const btnTrajectory = $('btn-trajectory');
   const btnTrajectoryClose = $('btn-trajectory-close');
   const trajBadge = $('traj-badge');
+  const btnPlanMode = $('btn-plan-mode');
 
   let running = false;
   let pinned = true;
   let trajCount = 0;
   /** 当前生效的 Agent 实现（''=未知）：驱动演示模式横幅与 mock 专属建议项 */
   let currentAgent = '';
+  /**
+   * 输入框的「计划」开关（P2-7）：本轮先出计划、批准后才执行。
+   *
+   * 状态留在 webview 本地而不是扩展侧：它是"下一条消息怎么发"的输入态，
+   * 与模型设置那种要落盘的项目不同，不该因为切了个面板就丢掉。
+   */
+  let planModeEnabled = false;
 
   // 当前回合的可变容器（新回合重置）
   let answerEl = null;
@@ -117,8 +125,10 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   const toolRows = new Map(); // tool -> { row, body, dur, startedAt }
   const approvals = new Map(); // approvalId -> entry
   const patches = new Map(); // patchId -> entry
+  const plans = new Map(); // planId -> entry（P2-7）
   const approvalTimers = new Map(); // approvalId -> interval id
   const patchTimers = new Map(); // patchId -> interval id
+  const planTimers = new Map(); // planId -> interval id
   let pendingTicker = null;
   let pendingCountdownEl = null;
 
@@ -452,21 +462,22 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   }
 
   // 用户回合：角色标记 + 消息体 + 「Agent 看到了什么」上下文 chip（上下文保真是这个插件的核心卖点）
-  function addUser(text, attachments) {
+  function addUser(text, attachments, planMode) {
     const turn = el('div', 'turn user');
     turn.appendChild(roleMark('你', 'user'));
     const bubble = el('div', 'message user');
     bubble.innerHTML = renderMarkdown(text);
     turn.appendChild(bubble);
+    const row = el('div', 'chips');
+    // 计划模式也占一个 chip：事后回看时，"这条为什么先出计划"必须能一眼看出来，
+    // 而开关状态本身只活在输入框上，滚动后早就看不见了。
+    if (planMode) row.appendChild(el('span', 'chip chip-plan', '计划模式'));
     const chips = Array.isArray(attachments) ? attachments : [];
-    if (chips.length) {
-      const row = el('div', 'chips');
-      for (const c of chips) {
-        const label = typeof c === 'string' ? c : c && c.label;
-        if (label) row.appendChild(el('span', 'chip', String(label)));
-      }
-      if (row.childNodes.length) turn.appendChild(row);
+    for (const c of chips) {
+      const label = typeof c === 'string' ? c : c && c.label;
+      if (label) row.appendChild(el('span', 'chip', String(label)));
     }
+    if (row.childNodes.length) turn.appendChild(row);
     addMessage(turn);
     return turn;
   }
@@ -898,6 +909,138 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   }
 
   // -------------------------------------------------------------------------
+  // 计划卡（P2-7：先出计划、批准后才执行）
+  // -------------------------------------------------------------------------
+
+  function stopPlanTimer(id) {
+    const t = planTimers.get(id);
+    if (t) {
+      clearInterval(t);
+      planTimers.delete(id);
+    }
+  }
+
+  function markPlanDecided(entry, outcome) {
+    entry.decided = true;
+    entry.card.classList.add('decided');
+    retireActions(entry);
+    // 补充意见输入框在决策后必须收掉：留一个还能打字、但内容再也送不出去的框，
+    // 用户会以为自己的意见已经生效了。
+    if (entry.noteRow) entry.noteRow.hidden = true;
+    if (entry.countdown) entry.countdown.textContent = '';
+    if (entry.badge) {
+      if (outcome === 'rejected') {
+        entry.badge.className = 'badge err';
+        entry.badge.textContent = '不同意';
+      } else if (outcome === 'expired') {
+        entry.badge.className = 'badge err';
+        entry.badge.textContent = '已过期';
+      } else {
+        entry.badge.className = 'badge ok';
+        entry.badge.textContent = '已批准';
+      }
+    }
+    collapseEntry(entry);
+  }
+
+  function decidePlan(planId, approved) {
+    const entry = plans.get(planId);
+    if (entry && entry.decided) return;
+    // 先取意见再置决策态：markPlanDecided 会把输入框藏起来，顺序反了就永远读到空串
+    const note = entry && entry.noteEl ? entry.noteEl.value.trim() : '';
+    if (entry) markPlanDecided(entry, approved ? 'approved' : 'rejected');
+    vscode.postMessage({
+      kind: 'plan.respond',
+      planId,
+      approved,
+      ...(note ? { note } : {}),
+    });
+    stopPlanTimer(planId);
+    updatePendingBar();
+  }
+
+  function addPlanCard(p) {
+    const card = el('div', 'card plan');
+    const title = el('div', 'card-title');
+    // 标题写**主题**、徽标写**结论**（与「⚠ 工具审批」「📝 文件补丁」同一约定）：
+    // 标题若写成"计划待批准"，决策后就会和徽标自相矛盾（"待批准"配"不同意"）。
+    title.appendChild(el('b', '', '📋 计划方案'));
+    const badge = el('span', 'badge warn', '待批准');
+    title.appendChild(badge);
+    card.appendChild(title);
+
+    // 正文单独成块：决策后整块折叠，标题行（含结论徽标）保持可见
+    const body = el('div', 'card-body');
+    const md = el('div', 'card-md md');
+    md.innerHTML = renderMarkdown(p.plan || '');
+    body.appendChild(md);
+
+    // 补充意见：批准时带上"但请改一处"，执行阶段以它为准（见 planApprovedInstruction）
+    const noteRow = el('label', 'card-note');
+    noteRow.appendChild(el('span', 'card-note-label', '补充意见（可选）'));
+    const noteEl = document.createElement('textarea');
+    noteEl.rows = 2;
+    noteEl.placeholder = '例如：第 2 步不要动 X 文件';
+    noteRow.appendChild(noteEl);
+    body.appendChild(noteRow);
+
+    const countdown = el('div', 'countdown', '');
+    const actions = el('div', 'card-actions');
+    const btnReject = el('button', 'danger', '不同意');
+    const btnApprove = el('button', 'ok-btn', '批准并执行');
+    btnReject.type = btnApprove.type = 'button';
+    btnReject.addEventListener('click', () => decidePlan(p.planId, false));
+    btnApprove.addEventListener('click', () => decidePlan(p.planId, true));
+    actions.append(btnReject, btnApprove);
+
+    if (p.expiresAt) body.appendChild(countdown);
+    body.appendChild(actions);
+    card.appendChild(body);
+    const collapse = attachCollapse(card, title);
+    addMessage(card);
+
+    const entry = {
+      data: p,
+      card,
+      badge,
+      countdown: p.expiresAt ? countdown : null,
+      noteRow,
+      noteEl,
+      actions,
+      buttons: [btnReject, btnApprove],
+      collapse,
+      decided: false,
+    };
+    plans.set(p.planId, entry);
+
+    if (p.expiresAt) {
+      const tick = () => {
+        const remain = Math.max(0, Math.ceil((p.expiresAt - Date.now()) / 1000));
+        if (remain <= 0) {
+          countdown.textContent = '⏱ 已过期（按不同意处理）';
+          expirePlan(p.planId);
+          return;
+        }
+        countdown.textContent = '⏱ 剩余 ' + remain + 's 未响应将按不同意处理';
+      };
+      planTimers.set(p.planId, setInterval(tick, 1000));
+      tick();
+    }
+    updatePendingBar();
+  }
+
+  function expirePlan(planId) {
+    stopPlanTimer(planId);
+    const entry = plans.get(planId);
+    if (entry && !entry.decided) markPlanDecided(entry, 'expired');
+    updatePendingBar();
+  }
+
+  function openPlans() {
+    return [...plans.values()].filter((e) => !e.decided);
+  }
+
+  // -------------------------------------------------------------------------
   // 文件补丁卡（Native Diff 预览入口）
   // -------------------------------------------------------------------------
 
@@ -1088,9 +1231,9 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     pendingCountdownEl.textContent = remain > 0 ? '⏱ ' + remain + 's' : '⏱ 已过期';
   }
 
-  /** 待办条倒计时取所有挂起项里最早到期的一个（审批与补丁同权）。 */
+  /** 待办条倒计时取所有挂起项里最早到期的一个（计划 / 审批 / 补丁同权）。 */
   function earliestExpiry() {
-    const values = [...openApprovals(), ...openPatches()]
+    const values = [...openPlans(), ...openApprovals(), ...openPatches()]
       .map((e) => e.data.expiresAt)
       .filter((v) => typeof v === 'number');
     return values.length ? Math.min(...values) : undefined;
@@ -1104,7 +1247,8 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
   function updatePendingBar() {
     const openA = openApprovals();
     const openP = openPatches();
-    const total = openA.length + openP.length;
+    const openPl = openPlans();
+    const total = openA.length + openP.length + openPl.length;
     pendingLabel.textContent = '';
     pendingActions.textContent = '';
     pendingCountdownEl = null;
@@ -1125,7 +1269,17 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
       return b;
     };
 
-    if (openA.length) {
+    // 计划排在最先：它不决定"某个动作做不做"，而决定"整轮做不做" ——
+    // 别的挂起项在计划被批准前根本不会产生，把它压在后面等于让用户猜先点哪个。
+    if (openPl.length) {
+      const id = openPl[0].data.planId;
+      pendingLabel.appendChild(el('b', '', '等待你批准计划'));
+      if (more) pendingLabel.appendChild(el('small', '', more));
+      pendingActions.append(
+        mkButton('不同意', 'danger', () => decidePlan(id, false)),
+        mkButton('批准并执行', 'primary', () => decidePlan(id, true))
+      );
+    } else if (openA.length) {
       const entry = openA[0];
       const d = entry.data;
       pendingLabel.appendChild(el('b', '', '等待你批准工具：' + d.tool));
@@ -1202,9 +1356,10 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     else if (reason === 'replay') addSystem('连接已恢复，正在重放会话内容…');
   }
 
-  /** surface 重建后恢复挂起项（审批 / 补丁卡与待办条） */
+  /** surface 重建后恢复挂起项（计划 / 审批 / 补丁卡与待办条） */
   function restorePending(pending) {
     if (!pending) return;
+    for (const p of pending.plans || []) addPlanCard(p);
     for (const p of pending.approvals || []) addApprovalCard(p);
     for (const p of pending.patches || []) addPatchCard(p);
   }
@@ -1221,10 +1376,13 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     toolRows.clear();
     approvals.clear();
     patches.clear();
+    plans.clear();
     for (const t of approvalTimers.values()) clearInterval(t);
     approvalTimers.clear();
     for (const t of patchTimers.values()) clearInterval(t);
     patchTimers.clear();
+    for (const t of planTimers.values()) clearInterval(t);
+    planTimers.clear();
     stopPendingTicker();
     pendingCountdownEl = null;
     updatePendingBar();
@@ -1417,7 +1575,7 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     switch (method) {
       case 'user.message':
         resetTurn();
-        addUser(params.text, params.attachments);
+        addUser(params.text, params.attachments, params.planMode);
         break;
       case 'session.started':
         setRunning(true);
@@ -1448,6 +1606,12 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
         break;
       case 'approval.responded':
         onApprovalResponded(params.approvalId);
+        break;
+      case 'plan.request':
+        addPlanCard(params);
+        break;
+      case 'plan.expired':
+        expirePlan(params.planId);
         break;
       case 'file.patch.pending':
         addPatchCard(params);
@@ -1560,7 +1724,18 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
     autosizeInput();
     setRunning(true);
     // 不在本地回显：扩展侧会带上下文 chip 回发 user.message，避免出现两条重复消息
-    vscode.postMessage({ kind: 'send', prompt: text });
+    vscode.postMessage({ kind: 'send', prompt: text, planMode: planModeEnabled });
+  }
+
+  /** 计划开关：只切换本地状态 + 视觉，真正的语义由 send() 带在消息里。 */
+  function setPlanMode(on) {
+    planModeEnabled = !!on;
+    if (!btnPlanMode) return;
+    btnPlanMode.classList.toggle('on', planModeEnabled);
+    btnPlanMode.setAttribute('aria-pressed', planModeEnabled ? 'true' : 'false');
+    btnPlanMode.title = planModeEnabled
+      ? '计划模式：本轮先给方案，你批准后才执行（点击关闭）'
+      : '计划模式：先给方案、批准后执行';
   }
 
   function cancel() {
@@ -1659,6 +1834,13 @@ import { daemonStateLabel } from '../src/statusLabel.ts';
       send();
     }
   });
+
+  // 计划开关（P2-7）：切换后保持到手动关掉 —— 它是"这一次会话想怎么干活"的模式，
+  // 而刷新/重连后从 input 里消失会让用户以为设置丢了，所以初始化时显式写一次文案。
+  if (btnPlanMode) {
+    btnPlanMode.addEventListener('click', () => setPlanMode(!planModeEnabled));
+    setPlanMode(false);
+  }
 
   // Esc：优先关闭覆盖面板，其次停止正在进行的会话
   document.addEventListener('keydown', (e) => {

@@ -1240,3 +1240,114 @@ describe('会话回滚结果的多行汇报', () => {
     expect(last.matches('.message.system')).toBe(true);
   });
 });
+
+/**
+ * Plan 模式（P2-7）：计划卡是"整轮做不做"的闸门，它的三条设计决策都要钉住 ——
+ *  ① 计划正文按 Markdown 渲染（计划里必然有编号步骤与路径，渲成纯文本等于让它不可读）；
+ *  ② 挂起时必须展开（与审批卡同一条"挂起项必须展开"的约定），决策后才折叠；
+ *  ③ 批准时携带的补充意见必须真的发出去 —— 那个输入框存在的唯一理由就是这个。
+ *  ④ 标题写主题、徽标写结论：卡片折叠后只剩标题行，若标题本身写着"待批准"，
+ *     决策后就会出现"待批准 + 不同意"这种自相矛盾的残留（审批/补丁卡都遵守这条）。
+ */
+describe('Plan 模式：计划卡', () => {
+  const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+
+  function requestPlan(planId) {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_plan_' + planId, reason: 'new' });
+    emitEvent('plan.request', {
+      planId,
+      plan: '## 计划\n\n1. 目标：改 `a.ts`。\n2. 步骤：读取 -> 打补丁。',
+      expiresAt: Date.now() + 60_000,
+    });
+    return document.querySelector('.card.plan:last-of-type') || document.querySelector('.card.plan');
+  }
+
+  it('计划正文按 Markdown 渲染，且决策后正文命中折叠规则', () => {
+    const card = requestPlan('plan_css');
+    // 标题与有序列表都要真的成为元素，而不是留在文本里的 #、1.
+    expect(card.querySelectorAll('.card-md h2').length).toBeGreaterThan(0);
+    expect(card.querySelectorAll('.card-md ol li').length).toBeGreaterThan(0);
+
+    const body = card.querySelector('.card-body');
+    expect(body.matches('.card.collapsed > .card-body')).toBe(false);
+
+    [...card.querySelectorAll('.card-actions button')].find((b) => b.textContent === '不同意').click();
+    expect(body.matches('.card.collapsed > .card-body')).toBe(true);
+  });
+
+  it('样式表声明了计划卡的主色边与正文高度上限', () => {
+    expect(css).toMatch(/\.card\.plan\s*\{[^}]*border-left-color:\s*var\(--dsh-accent\)/);
+    expect(css).toMatch(/\.card-md\s*\{[^}]*max-height/);
+    expect(css).toMatch(/\.mode-toggle\.on\s*\{[^}]*background:\s*var\(--dsh-accent\)/);
+  });
+
+  it('批准时带上补充意见，且决策后输入框被收起', () => {
+    const card = requestPlan('plan_note');
+    const note = card.querySelector('.card-note textarea');
+    note.value = '  第 2 步不要动 b.ts  ';
+    [...card.querySelectorAll('.card-actions button')].find((b) => b.textContent === '批准并执行').click();
+
+    const sent = lastMessageOfKind('plan.respond');
+    expect(sent.planId).toBe('plan_note');
+    expect(sent.approved).toBe(true);
+    expect(sent.note).toBe('第 2 步不要动 b.ts');
+    // 决策后再留一个还能打字、内容却再也送不出去的框，用户会以为意见已生效
+    expect(card.querySelector('.card-note').hidden).toBe(true);
+  });
+
+  it('不同意时不带 note，且待办条能直接批准（计划优先于审批显示）', () => {
+    const card = requestPlan('plan_bar');
+    const barBtn = pendingButton('批准并执行');
+    expect(barBtn).toBeTruthy();
+    pendingButton('不同意').click();
+    const sent = lastMessageOfKind('plan.respond');
+    expect(sent.planId).toBe('plan_bar');
+    expect(sent.approved).toBe(false);
+    expect(sent.note).toBeUndefined();
+    expect(card.querySelector('.badge').textContent).toBe('不同意');
+  });
+
+  it('标题写主题、徽标写结论（决策后标题不会和徽标打架）', () => {
+    const card = requestPlan('plan_title');
+    const title = card.querySelector('.card-title b');
+    expect(title.textContent).toContain('计划方案');
+    // 标题不是状态：决策前后都必须保持同一个主题词
+    expect(title.textContent).not.toContain('待批准');
+
+    // 挂起中：结论交给徽标
+    expect(card.querySelector('.badge').textContent).toBe('待批准');
+
+    [...card.querySelectorAll('.card-actions button')].find((b) => b.textContent === '批准并执行').click();
+    expect(card.querySelector('.badge').textContent).toBe('已批准');
+    expect(card.querySelector('.card-title b').textContent).toContain('计划方案');
+  });
+
+  it('计划模式的开关随 send 一起提交（它是"这条怎么发"，不是全局设置）', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_plan_toggle', reason: 'new' });
+    const toggle = document.getElementById('btn-plan-mode');
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+
+    // 关着的时候不能带上 planMode（缺省行为必须逐字节不变）
+    document.getElementById('input').value = '看一下 a.ts';
+    document.getElementById('btn-send').click();
+    expect(lastMessageOfKind('send').planMode).toBe(false);
+
+    // send() 会把输入区置为 running 并挡住重复提交，先结束这一轮才能再发一条
+    emitEvent('session.ended', { reason: 'completed' });
+
+    toggle.click();
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    document.getElementById('input').value = '再改一下 a.ts';
+    document.getElementById('btn-send').click();
+    expect(lastMessageOfKind('send').planMode).toBe(true);
+    expect(toggle.className).toContain('on');
+  });
+
+  it('用户气泡带「计划模式」chip（事后回看要能看出这条为什么先出计划）', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_plan_chip', reason: 'new' });
+    emitEvent('user.message', { text: '改一下 a.ts', attachments: [], planMode: true });
+    const chips = [...document.querySelectorAll('.chip.chip-plan')];
+    expect(chips.length).toBe(1);
+    expect(chips[0].textContent).toBe('计划模式');
+  });
+});

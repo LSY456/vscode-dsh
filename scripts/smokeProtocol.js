@@ -24,7 +24,7 @@
  * 运行：node scripts/smokeProtocol.js [--require]
  *   --require：找不到 Python 3 时判失败（CI 用；本地默认优雅跳过，退出 0）
  */
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -48,18 +48,42 @@ function section(title) {
   console.log('\n== ' + title + ' ==');
 }
 
-/** 找一个可用的 Python 3（DSH_PYTHON 可覆盖，支持带参数如 "py -3"）。 */
-function findPython() {
+/** 探一个候选解释器是不是 Python 3。失败（不存在/不可执行）一律当作"不是"。 */
+function probePython(exe, args) {
+  return new Promise((resolve) => {
+    let out = '';
+    let child;
+    try {
+      child = spawn(exe, [...args, '-c', 'import sys;print(sys.version_info[0])'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      });
+    } catch {
+      resolve(false);
+      return;
+    }
+    child.on('error', () => resolve(false));
+    child.stdout.on('data', (d) => {
+      out += d;
+    });
+    child.on('close', (code) => resolve(code === 0 && out.trim() === '3'));
+  });
+}
+
+/**
+ * 找一个可用的 Python 3（DSH_PYTHON 可覆盖，支持带参数如 "py -3"）。
+ *
+ * 用异步 `spawn` 而不是 `spawnSync`：本机（Windows）上 `spawnSync` 一律 EBUSY，
+ * 探针失败会让整个冒烟以"未找到 Python 3"为由**优雅跳过** —— 而解释器其实就在那儿。
+ * 这比没有探针更糟：它把"没验证"包装成"不适用的场景"，退出码还是 0。
+ * （`scripts/checkPackage.js` 出于同一原因也走异步 `spawn`。）
+ */
+async function findPython() {
   const candidates = [];
   if (process.env.DSH_PYTHON) candidates.push(process.env.DSH_PYTHON.split(/\s+/));
   candidates.push(['python3'], ['python'], ['py', '-3']);
   for (const c of candidates) {
-    const r = spawnSync(c[0], [...c.slice(1), '-c', 'import sys;print(sys.version_info[0])'], {
-      encoding: 'utf8',
-    });
-    if (r.status === 0 && String(r.stdout || '').trim() === '3') {
-      return { exe: c[0], args: c.slice(1) };
-    }
+    if (await probePython(c[0], c.slice(1))) return { exe: c[0], args: c.slice(1) };
   }
   return null;
 }
@@ -210,7 +234,7 @@ async function main() {
     process.exit(1);
   }
 
-  const python = findPython();
+  const python = await findPython();
   if (!python) {
     const msg = '未找到 Python 3，跳过协议「第二实现」冒烟。';
     if (REQUIRE_PYTHON) {

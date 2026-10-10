@@ -12,6 +12,7 @@
  */
 
 import { DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_TEMPERATURE } from '../../shared/protocol';
+import { isPlanPhase } from './planMode';
 import { ToolCall } from './toolcall';
 
 /**
@@ -795,6 +796,17 @@ export function createKeywordFakeModel(): ChatModel {
       .filter((m) => m.role === 'user')
       .map((m) => m.content)
       .join('\n');
+
+    // P2-7 计划阶段：只读调研 -> 直接给出一份计划正文（不发起写入调用）。
+    // 判定见 planMode.ts —— 标记与 realAgent 的 system 附加指令同源，不在这里另写一份字面量。
+    if (isPlanPhase(messages)) {
+      return {
+        reasoning: '计划模式：先做只读调研，产出一份计划供用户批准。',
+        content:
+          '## 计划\n\n1. 目标：按用户请求改动目标文件。\n2. 步骤：读取目标文件 -> 生成补丁 -> 提交审查。\n' +
+          '3. 涉及文件：目标文件将被写入（路径见用户请求）。\n4. 风险：写入前会经过 Diff 审查，未获批准不会落盘。',
+      };
+    }
 
     if (hasToolResult) {
       const lastTool = [...messages].reverse().find((m) => m.role === 'tool')?.content ?? '';

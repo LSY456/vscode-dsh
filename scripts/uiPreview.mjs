@@ -385,6 +385,74 @@ const settingsDom = await renderScenario(({ emitRaw }) => {
   });
 });
 
+// ---- 场景八：计划模式（P2-7）----
+// 一轮"先出方案"的对话：user 气泡带「计划模式」chip、agent 气泡带计划正文、计划卡排在最前。
+// 这里一次展示两种状态：先拒掉一份（折叠态：标题行 + 结论徽标），再挂起一份（完整正文 + 补充意见 + 倒计时）。
+const planDom = await renderScenario(({ emit, emitRaw }) => {
+  emitRaw({
+    kind: 'init',
+    state: {
+      sessionId: 'sess_preview_plan',
+      connected: true,
+      agent: 'real',
+      model: 'deepseek-flash',
+      history: [],
+    },
+  });
+  emitRaw({ kind: 'session.reset', sessionId: 'sess_preview_plan', reason: 'new' });
+  emit('session.started', { sessionId: 'sess_preview_plan', title: '给 tools.ts 补符号链接护栏' });
+  emit('user.message', { text: '帮我给 `tools.ts` 补上符号链接的越界校验。', planMode: true });
+  emit('reasoning.delta', {
+    delta: '计划模式：本轮只读调研、不改动文件，产出一份方案供你批准……',
+  });
+  emit('tool.started', { tool: 'read_file', input: { path: 'src/daemon/tools.ts' } });
+  emit('tool.executed', { tool: 'read_file', ok: true, output: '(文件内容略)', durationMs: 18 });
+  emit('tool.started', { tool: 'grep', input: { pattern: 'realpath', path: 'src/daemon' } });
+  emit('tool.executed', { tool: 'grep', ok: true, output: '2 处匹配', durationMs: 7 });
+
+  const doc = globalThis.document;
+  const clickBar = (label) => {
+    const b = [...doc.querySelectorAll('#pending-actions button')].find((n) => n.textContent === label);
+    if (!b) throw new Error('[uiPreview] 待办条上没有按钮：' + label);
+    b.click();
+  };
+
+  // ① 第一份计划被拒绝 —— 决策即折叠，但绝不删除（审计记录），标题行留「已拒绝」徽标
+  emit('plan.request', {
+    planId: 'plan_preview_rejected',
+    plan: '## 计划\n\n1. **目标**：让越界校验覆盖符号链接。\n2. **步骤**：直接改用 `fs.realpathSync` 比较。\n3. **涉及文件**：`src/daemon/tools.ts`',
+    expiresAt: Date.now() + EXPIRES,
+  });
+  clickBar('不同意');
+
+  // ② 第二份计划挂起中 —— 完整正文 + 补充意见输入框 + 倒计时
+  emit('plan.request', {
+    planId: 'plan_preview_pending',
+    plan: [
+      '## 计划',
+      '',
+      '### 1. 目标',
+      '让 `resolveInWorkspace` 在符号链接 / 目录联结指向工作区外时同样拒绝。',
+      '',
+      '### 2. 步骤',
+      '1. 读取 `tools.ts` 的 `resolveInWorkspace`（已完成）',
+      '2. 在字符串前缀比较**之前**插入 `fs.realpathSync`',
+      '3. 用解析后的规范路径重新比对工作区前缀',
+      '4. 保持既有 `..` / NUL / ADS 用例的行为不变',
+      '',
+      '### 3. 涉及文件',
+      '- 修改 `src/daemon/tools.ts`',
+      '- 新增用例 `src/daemon/tools.test.ts`',
+      '',
+      '### 4. 风险与待确认',
+      '- Windows junction 是否要单独处理？（建议一并补）',
+      '- `file.read` 是否也加同一道校验？（会影响既有测试，需你拍板）',
+    ].join('\n'),
+    expiresAt: Date.now() + EXPIRES,
+  });
+  if (!doc.querySelector('.card.plan')) throw new Error('[uiPreview] 没有渲染出计划卡');
+});
+
 // ---- 组装预览页 ----
 const esc = (s) => s.replace(/<\/(script)/gi, '<\\/$1');
 
@@ -450,6 +518,10 @@ const preview = `<!DOCTYPE html>
       <figcaption>⑦ 侧边栏 340px · 模型设置：模型名下拉 + 列表来源说明（浅色主题）</figcaption>
       <div class="frame narrow"><iframe id="f-narrow-settings"></iframe></div>
     </figure>
+    <figure>
+      <figcaption>⑧ 侧边栏 340px · 计划模式：方案待批准（上为已拒绝的折叠态）（浅色主题）</figcaption>
+      <div class="frame narrow"><iframe id="f-narrow-plan"></iframe></div>
+    </figure>
   </div>
 
 <script type="text/plain" id="panel-css">${esc(PANEL_CSS)}</script>
@@ -461,6 +533,7 @@ const preview = `<!DOCTYPE html>
 <script type="text/plain" id="dom-newsession">${esc(newSessionDom)}</script>
 <script type="text/plain" id="dom-restricted">${esc(restrictedDom)}</script>
 <script type="text/plain" id="dom-settings">${esc(settingsDom)}</script>
+<script type="text/plain" id="dom-plan">${esc(planDom)}</script>
 <script>
   const txt = (id) => document.getElementById(id).textContent;
   const panelCss = txt('panel-css');
@@ -474,6 +547,7 @@ const preview = `<!DOCTYPE html>
   const newsession = txt('dom-newsession');
   const restricted = txt('dom-restricted');
   const settings = txt('dom-settings');
+  const plan = txt('dom-plan');
   document.getElementById('f-narrow-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-wide-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-narrow-dark').srcdoc = build(empty, 'theme-dark');
@@ -481,6 +555,7 @@ const preview = `<!DOCTYPE html>
   document.getElementById('f-narrow-newsession').srcdoc = build(newsession, 'theme-light');
   document.getElementById('f-narrow-restricted').srcdoc = build(restricted, 'theme-light');
   document.getElementById('f-narrow-settings').srcdoc = build(settings, 'theme-light');
+  document.getElementById('f-narrow-plan').srcdoc = build(plan, 'theme-light');
 </script>
 </body>
 </html>

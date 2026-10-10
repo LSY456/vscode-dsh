@@ -27,12 +27,12 @@ afterAll(() => {
 
 interface MockCtx extends AgentContext {
   events: Array<{ method: string; params: any }>;
-  waiters: Array<{ kind: 'approval' | 'patch'; resolve: (v: boolean) => void }>;
+  waiters: Array<{ kind: 'approval' | 'patch' | 'plan'; resolve: (v: boolean) => void }>;
 }
 
 function makeCtx(overrides?: Partial<AgentContext>): MockCtx {
   const events: Array<{ method: string; params: any }> = [];
-  const waiters: Array<{ kind: 'approval' | 'patch'; resolve: (v: boolean) => void }> = [];
+  const waiters: Array<{ kind: 'approval' | 'patch' | 'plan'; resolve: (v: boolean) => void }> = [];
   let canceled = false;
   const ctx: MockCtx = {
     sessionId: 's1',
@@ -335,5 +335,57 @@ describe('Agent × P2-6：改动之后能回滚', () => {
 
     expect(fs.readFileSync(target, 'utf8')).toContain('TODO');
     expect(store.count('s2')).toBe(0);
+  });
+});
+
+describe('参考 Agent：Plan 模式（P2-7）', () => {
+  // 用独立的临时文件：共享的 sampleFile 在本文件里已被前面的用例改写过（那是有意的顺序依赖）
+  const mkPlanFile = (name: string) => {
+    const p = path.join(tmpDir, name);
+    fs.writeFileSync(p, 'line1\nTODO: fix\nline3\n', 'utf8');
+    return p;
+  };
+
+  it('批准计划后才继续；拒绝则本次不碰任何文件', async () => {
+    const target = mkPlanFile('plan-reject.txt');
+    const ctx = makeCtx();
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改文件（write edit）',
+      attachments: [{ kind: 'file', path: target, name: 'plan-reject.txt', content: fs.readFileSync(target, 'utf8') }],
+      planMode: true,
+    });
+
+    const plan = await waitEvent(ctx, EVENTS.PlanRequest);
+    expect(String(plan.params.plan)).toContain('计划');
+    // 计划阶段不许产生任何改动
+    expect(ctx.events.some((e) => e.method === EVENTS.FilePatchPending)).toBe(false);
+
+    ctx.waiters.shift()!.resolve(false); // 不同意
+    await run;
+
+    expect(ctx.events.some((e) => e.method === EVENTS.FilePatchPending)).toBe(false);
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('canceled');
+    expect(fs.readFileSync(target, 'utf8')).toContain('TODO');
+  });
+
+  it('批准后照常走补丁流程（计划不是终点，只是闸门）', async () => {
+    const target = mkPlanFile('plan-approve.txt');
+    const ctx = makeCtx();
+    const run = runFakeAgent(ctx, {
+      sessionId: 's1',
+      prompt: '请修改文件（write edit）',
+      attachments: [{ kind: 'file', path: target, name: 'plan-approve.txt', content: fs.readFileSync(target, 'utf8') }],
+      planMode: true,
+    });
+
+    await waitEvent(ctx, EVENTS.PlanRequest);
+    ctx.waiters.shift()!.resolve(true);
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters.shift()!.resolve(true);
+    await run;
+
+    expect(fs.readFileSync(target, 'utf8')).toContain('DONE');
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('completed');
   });
 });

@@ -6,6 +6,7 @@ import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
 import { ChatCompletionResult, ChatMessage, ChatModel, ChatStreamOptions, FakeChatModel, FakeTurn, formatToolCallContent } from './model';
 import { applyTokenBudget, estimateTokens, generateTitle, RealAgentConfig, runRealAgent, TITLE_SYSTEM_PROMPT } from './realAgent';
+import { PLAN_MODE_MARKER } from './planMode';
 
 let root = '';
 let file = '';
@@ -24,7 +25,7 @@ afterAll(() => {
 
 interface MockCtx extends AgentContext {
   events: Array<{ method: string; params: any }>;
-  waiters: Array<{ kind: 'approval' | 'patch'; resolve: (v: boolean) => void }>;
+  waiters: Array<{ kind: 'approval' | 'patch' | 'plan'; resolve: (v: boolean) => void }>;
   setCanceled(): void;
   /** P0-1：模拟 daemon 脏文档覆盖层（canonical 路径 -> 缓冲区内容；null = 脏但未上报内容） */
   overlay: Map<string, string | null>;
@@ -34,7 +35,7 @@ interface MockCtx extends AgentContext {
 
 function makeCtx(caps?: AgentCapabilities): MockCtx {
   const events: Array<{ method: string; params: any }> = [];
-  const waiters: Array<{ kind: 'approval' | 'patch'; resolve: (v: boolean) => void }> = [];
+  const waiters: Array<{ kind: 'approval' | 'patch' | 'plan'; resolve: (v: boolean) => void }> = [];
   let canceled = false;
   // P0-3：模拟 server 的取消订阅语义（cancel 时同步触发，供 Agent abort 在途请求）
   const cancelHooks = new Set<() => void>();
@@ -945,5 +946,158 @@ describe('realAgent：工具调用围栏不落进答案区', () => {
     seen.length = 0;
     await runRealAgent(makeCtx(), { prompt: '你好' }, { model });
     expect(seen).toEqual([{ temperature: undefined, maxTokens: undefined }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 模式（P2-7）
+// ---------------------------------------------------------------------------
+
+/** 记录每次模型调用看到的 tools 与 messages，用于断言"计划阶段没有写入类工具"。 */
+function recording(inner: ChatModel): {
+  model: ChatModel;
+  toolSets: Array<string[] | undefined>;
+  calls: Array<{ tools?: string[]; messages: Array<{ role: string; content: string }> }>;
+} {
+  const toolSets: Array<string[] | undefined> = [];
+  const calls: Array<{ tools?: string[]; messages: Array<{ role: string; content: string }> }> = [];
+  return {
+    toolSets,
+    calls,
+    model: {
+      chat: (messages, opts) => {
+        const tools = opts?.tools?.map((t) => t.name);
+        toolSets.push(tools);
+        calls.push({ tools, messages: messages.map((m) => ({ role: m.role, content: m.content })) });
+        return inner.chat(messages, opts);
+      },
+    },
+  };
+}
+
+/** 只保留真正带工具清单的调用（标题生成那次没有 tools）。 */
+function toolCallsOf(rec: ReturnType<typeof recording>): Array<string[] | undefined> {
+  return rec.calls.filter((c) => c.tools !== undefined).map((c) => c.tools);
+}
+
+describe('realAgent：Plan 模式（P2-7）', () => {
+  const original = 'TODO\nline2\n';
+
+  it('调研阶段只提供只读工具：写入类工具压根不在清单里', async () => {
+    const ctx = makeCtx();
+    const rec = recording(scripted([{ content: '## 计划\n1. 改 a.txt' }]));
+    const run = runRealAgent(ctx, { ...baseParams, planMode: true }, { model: rec.model });
+
+    const planEvt = await waitEvent(ctx, EVENTS.PlanRequest);
+    expect(String(planEvt.params.plan)).toContain('计划');
+    // 承诺必须落在工具清单这一层：提示词说"别改文件"是不可靠的
+    expect(toolCallsOf(rec)[0]!.slice().sort()).toEqual(['glob', 'grep', 'list_dir', 'read_file']);
+    // 还没批准 -> 不可能已经有补丁请求
+    expect(ctx.events.some((e) => e.method === EVENTS.FilePatchPending)).toBe(false);
+
+    ctx.waiters.find((w) => w.kind === 'plan')!.resolve(false);
+    await run;
+  });
+
+  it('批准后进入执行阶段：工具集恢复完整，计划与系统提示词各自归位', async () => {
+    const ctx = makeCtx();
+    const rec = recording(
+      scripted([
+        { content: '## 计划\n1. 改 a.txt' }, // 调研阶段
+        { toolcall: { tool: 'write_file', input: { path: file, content: 'NEW' } } }, // 执行阶段
+        { content: '已完成' },
+      ])
+    );
+    const run = runRealAgent(ctx, { ...baseParams, planMode: true }, { model: rec.model });
+
+    await waitEvent(ctx, EVENTS.PlanRequest);
+    ctx.waiters.find((w) => w.kind === 'plan')!.resolve(true);
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters.find((w) => w.kind === 'patch')!.resolve(true);
+    await run;
+
+    const toolSets = toolCallsOf(rec);
+    expect(toolSets[0]!.slice().sort()).toEqual(['glob', 'grep', 'list_dir', 'read_file']);
+    expect(toolSets[1]).toContain('write_file');
+    expect(fs.readFileSync(file, 'utf8')).toBe('NEW');
+
+    // 执行阶段的首条 system 必须是完整提示词（计划标记只在调研阶段出现），
+    // 否则"计划模式"的约束会一路带到执行阶段，模型会继续不敢动手。
+    const execCall = rec.calls.find((c) => c.tools?.includes('write_file'))!;
+    expect(execCall.messages[0].role).toBe('system');
+    expect(execCall.messages[0].content).not.toContain(PLAN_MODE_MARKER);
+    expect(execCall.messages[0].content).toContain('你是 dsh');
+    // 调研阶段的上下文要留下（不然执行阶段会把同一批文件再读一遍）
+    expect(execCall.messages.some((m) => m.content.startsWith('【已批准的计划】'))).toBe(true);
+  });
+
+  it('拒绝计划：一个文件都不碰，按「已取消」收尾而不是谎报已完成', async () => {
+    // 用例间共用同一个临时文件，先复位（否则读到的是上一条用例写进去的内容）
+    fs.writeFileSync(file, original, 'utf8');
+    const ctx = makeCtx();
+    const rec = recording(scripted([{ content: '## 计划\n1. 改 a.txt' }]));
+    const run = runRealAgent(ctx, { ...baseParams, planMode: true }, { model: rec.model });
+
+    await waitEvent(ctx, EVENTS.PlanRequest);
+    ctx.waiters.find((w) => w.kind === 'plan')!.resolve(false);
+    await run;
+
+    expect(ctx.events.some((e) => e.method === EVENTS.FilePatchPending)).toBe(false);
+    const deltas = ctx.events
+      .filter((e) => e.method === EVENTS.MessageDelta)
+      .map((e) => String(e.params.delta))
+      .join('');
+    expect(deltas).toContain('没有改动任何文件');
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('canceled');
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+  });
+
+  it('批准时带的补充意见回灌进执行指令（"批准但要求改一处"是常见表态）', async () => {
+    const ctx = makeCtx();
+    ctx.getPlanNote = () => '第 2 步不要动 b.ts';
+    const rec = recording(
+      scripted([{ content: '## 计划' }, { toolcall: { tool: 'write_file', input: { path: file, content: 'X' } } }, { content: 'ok' }])
+    );
+    const run = runRealAgent(ctx, { ...baseParams, planMode: true }, { model: rec.model });
+
+    await waitEvent(ctx, EVENTS.PlanRequest);
+    ctx.waiters.find((w) => w.kind === 'plan')!.resolve(true);
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters.find((w) => w.kind === 'patch')!.resolve(false);
+    await run;
+
+    const execCall = rec.calls.find((c) => c.tools?.includes('write_file'))!;
+    const text = execCall.messages.map((m) => m.content).join('\n');
+    expect(text).toContain('第 2 步不要动 b.ts');
+  });
+
+  it('调研预算用尽仍未产出计划时收束一次；收束仍为空则明确告知（不静默收场）', async () => {
+    const ctx = makeCtx();
+    // 4 轮都发起只读调用 -> 调研预算用尽 -> 收束请求（不传 tools）返回空内容
+    const turns: FakeTurn[] = Array.from({ length: 4 }, () => ({
+      toolcall: { tool: 'list_dir', input: { path: '.' } },
+    }));
+    turns.push({ content: '' });
+    const rec = recording(scripted(turns));
+    await runRealAgent(ctx, { ...baseParams, planMode: true }, { model: rec.model });
+
+    // 收束请求必须**不带工具**（与主循环轮次耗尽时同一条纪律）
+    expect(rec.calls[rec.calls.length - 1].tools).toBeUndefined();
+    // 「没产出计划」要说出来，否则用户只看到一屏工具行然后会话就结束了
+    const deltas = ctx.events
+      .filter((e) => e.method === EVENTS.MessageDelta)
+      .map((e) => String(e.params.delta))
+      .join('');
+    expect(deltas).toContain('未能产出计划');
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('error');
+  });
+
+  it('不开 planMode 时行为与原路径一致：不出现 plan.request，工具集从头就是完整的', async () => {
+    const ctx = makeCtx();
+    const rec = recording(scripted([{ content: '直接作答' }]));
+    await runRealAgent(ctx, baseParams, { model: rec.model });
+
+    expect(ctx.events.some((e) => e.method === EVENTS.PlanRequest)).toBe(false);
+    expect(toolCallsOf(rec)[0]).toContain('write_file');
   });
 });

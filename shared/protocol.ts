@@ -48,6 +48,7 @@ export const METHODS = {
   SessionCancel: 'session.cancel',
   SessionResume: 'session.resume',
   SessionRollback: 'session.rollback',
+  PlanRespond: 'plan.respond',
   ApprovalRespond: 'approval.respond',
   FilePatchRespond: 'file.patch.respond',
   FileRead: 'file.read',
@@ -85,6 +86,7 @@ export const EVENTS = {
   ToolStarted: 'tool.started',
   ToolExecuted: 'tool.executed',
   ApprovalRequest: 'approval.request',
+  PlanRequest: 'plan.request',
   FilePatchPending: 'file.patch.pending',
   FilePatchResult: 'file.patch.result',
   Trajectory: 'trajectory.record',
@@ -202,6 +204,8 @@ export interface InitializeResult {
     fileRead: boolean;
     /** P2-6 会话级回滚（可选，向后兼容）：daemon 会为改动留影子快照并支持还原 */
     rollback?: boolean;
+    /** P2-7 Plan 模式（可选，向后兼容）：支持先出计划、待用户批准后再执行 */
+    plan?: boolean;
   };
   /** daemon 为本次连接分配/复用的默认会话 id */
   sessionId?: string;
@@ -276,6 +280,43 @@ export interface SessionSendParams {
   sessionId?: string;
   prompt: string;
   attachments?: Attachment[];
+  /**
+   * P2-7 Plan 模式：先只调研、产出一份计划交给用户批准，批准后才允许改动工作区。
+   *
+   * 缺省（`undefined` / `false`）= 现有行为，逐字节不变 —— 与批次 2 的采样参数同一条纪律：
+   * 新增可选项绝不改变缺省行为。
+   */
+  planMode?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Plan 模式（P2-7：先出方案、批准后执行）
+// ---------------------------------------------------------------------------
+
+/**
+ * 计划阶段的**只读**工具轮次上限。
+ *
+ * 与 `maxToolRounds`（执行阶段预算）**分开计数**：调研本来就要翻几处代码，若共用一份预算，
+ * 计划阶段读得越多、执行阶段可用的轮次越少，用户看到的会是"批准之后直接没轮次了"。
+ * 计划阶段本就不该改任何东西，成本天然更低，故取一个明显更小的固定值。
+ */
+export const DEFAULT_PLAN_MAX_ROUNDS = 4;
+
+export interface PlanRespondParams {
+  sessionId: string;
+  planId: string;
+  approved: boolean;
+  /** 用户的补充意见（可选，批准/拒绝都可带）；批准时会作为执行阶段的附加指令回灌给模型 */
+  note?: string;
+}
+
+export interface EventPlanRequest {
+  sessionId: string;
+  planId: string;
+  /** 计划的 Markdown 全文（计划阶段模型输出的正文） */
+  plan: string;
+  /** 过期时间（epoch ms），过期后按拒绝处理（daemon 盖戳，UI 用于显示倒计时） */
+  expiresAt?: number;
 }
 
 export interface SessionSendResult {
@@ -288,7 +329,7 @@ export interface SessionCancelParams {
 }
 
 /** 会话运行状态（断线续跑 / UI 状态同步用） */
-export type SessionState = 'idle' | 'running' | 'pending_approval' | 'pending_patch';
+export type SessionState = 'idle' | 'running' | 'pending_approval' | 'pending_patch' | 'pending_plan';
 
 export interface SessionResumeParams {
   sessionId: string;
@@ -314,6 +355,12 @@ export interface SessionResumeResult {
     oldContent?: string;
     newContent: string;
     description?: string;
+  };
+  /** 若处于 pending_plan，携带待批准的计划快照 */
+  pendingPlan?: {
+    planId: string;
+    expiresAt: number;
+    plan: string;
   };
 }
 
@@ -538,7 +585,7 @@ export interface EventFilePatchResult {
 export interface EventTrajectory {
   sessionId: string;
   step: number;
-  kind: 'reasoning' | 'message' | 'tool' | 'patch' | 'approval' | 'system';
+  kind: 'reasoning' | 'message' | 'tool' | 'patch' | 'approval' | 'plan' | 'system';
   detail: string;
   ts: number;
 }

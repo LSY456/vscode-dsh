@@ -667,6 +667,81 @@ async function main() {
   await conn2.rpc.request('session.cancel', { sessionId: busySession });
   await conn2.rpc.waitFor((m) => m.method === 'session.ended', '慢会话取消结束', 15000);
 
+  // ---- 10d. P2-7 Plan 模式：先出计划、批准后才执行
+  console.log('[smoke] Plan 模式…');
+  const planFile = path.join(tmpDir, 'plan-target.txt');
+  const planOriginal = 'PLAN-ORIGINAL\n';
+  const sendPlan = (prompt) =>
+    rconn.rpc.request('session.send', {
+      sessionId: rsessionId,
+      prompt,
+      attachments: [
+        { kind: 'file', path: planFile, name: 'plan-target.txt', content: fs.readFileSync(planFile, 'utf8') },
+      ],
+      planMode: true,
+    });
+
+  fs.writeFileSync(planFile, planOriginal, 'utf8');
+  rconn.rpc.resetEvents();
+  await sendPlan('请修改 plan-target.txt（write edit）');
+  const planReq = await rconn.rpc.waitFor((m) => m.method === 'plan.request', 'plan.request');
+  assert(typeof planReq.params.plan === 'string' && planReq.params.plan.length > 0, 'plan.request 带回了计划正文');
+  assert(typeof planReq.params.expiresAt === 'number', 'plan.request 由 daemon 盖上了过期时间戳');
+  // 计划模式的整个承诺：批准前什么都不改
+  assert(
+    !rconn.rpc.events.some((m) => m.method === 'file.patch.pending'),
+    '计划阶段没有任何补丁请求（方案未批不做改动）'
+  );
+
+  // 拒绝一次：应当一个文件都不碰，且按"已取消"收尾
+  await rconn.rpc.request('plan.respond', {
+    sessionId: rsessionId,
+    planId: planReq.params.planId,
+    approved: false,
+  });
+  let dupPlanCode;
+  try {
+    await rconn.rpc.request('plan.respond', {
+      sessionId: rsessionId,
+      planId: planReq.params.planId,
+      approved: true,
+    });
+  } catch (err) {
+    dupPlanCode = err.code;
+  }
+  assert(dupPlanCode === -32013, `重复 plan.respond 被拒（期望 -32013，实际 ${dupPlanCode}）`);
+  const planRejectedEnd = await rconn.rpc.waitFor((m) => m.method === 'session.ended', '计划被拒后的会话结束');
+  assert(planRejectedEnd.params.reason === 'canceled', '计划被拒 -> reason=canceled（不谎报"已完成"）');
+  assert(fs.readFileSync(planFile, 'utf8') === planOriginal, '计划被拒 -> 磁盘原样未动');
+
+  // 批准一次：走完整执行链路（计划只是闸门，不是终点）
+  rconn.rpc.resetEvents();
+  await sendPlan('请修改 plan-target.txt（write edit）');
+  const planReq2 = await rconn.rpc.waitFor((m) => m.method === 'plan.request', '第二次 plan.request');
+  await rconn.rpc.request('plan.respond', {
+    sessionId: rsessionId,
+    planId: planReq2.params.planId,
+    approved: true,
+    note: '只改这一行',
+  });
+  const planPatch = await rconn.rpc.waitFor((m) => m.method === 'file.patch.pending', '批准后的真实补丁');
+  await rconn.rpc.request('file.patch.respond', {
+    sessionId: rsessionId,
+    patchId: planPatch.params.patchId,
+    accept: true,
+  });
+  await rconn.rpc.waitFor(
+    (m) => m.method === 'file.patch.result' && m.params.patchId === planPatch.params.patchId,
+    '批准后的补丁结果'
+  );
+  assert(fs.readFileSync(planFile, 'utf8').includes('REAL-DAEMON-WRITE'), '计划批准后改动落盘');
+  const planApprovedEnd = await rconn.rpc.waitFor((m) => m.method === 'session.ended', '计划批准的会话结束');
+  assert(planApprovedEnd.params.reason === 'completed', '计划批准 -> reason=completed');
+  assert(
+    rconn.rpc.events.some((m) => m.method === 'trajectory.record' && m.params.kind === 'plan'),
+    '计划审批已进入执行迹线（kind=plan）'
+  );
+
   // 验证轨迹已持久化到 .dsh/trajectory
   const trajFile = path.join(tmpDir, '.dsh', 'trajectory', rsessionId + '.jsonl');
   assert(fs.existsSync(trajFile) && fs.statSync(trajFile).size > 0, '轨迹已持久化（.dsh/trajectory/*.jsonl）');
