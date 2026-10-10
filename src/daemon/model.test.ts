@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   AnthropicModel,
+  contentToText,
   createModel,
   describeHttpError,
   FakeChatModel,
@@ -493,5 +494,164 @@ describe('采样参数可配（批次 2）', () => {
 
     await model.chat([{ role: 'user', content: 'x' }], { temperature: -3 });
     expect(calls[2].temperature).toBe(0);
+  });
+});
+/**
+ * 多模态消息（P2-4 图片输入）。
+ *
+ * 这里锁的是两件事：
+ *  1. **两家的线上格式**：OpenAI 兼容要 `image_url` 的 data URL，Anthropic 要 `source.base64`
+ *     块 —— 上层只认一种表示（ChatContentPart），差异必须停在各自的序列化函数里；
+ *  2. **没有图片时请求体逐字节不变**：纯文本仍是裸字符串，不包装成 `[{type:'text'}]`。
+ *     一个"新增图片能力"的改动若顺手改了所有请求的形状，回归就只能靠肉眼看了。
+ */
+describe('多模态消息序列化（批次 6）', () => {
+  const PNG = 'iVBORw0KGgo='; // 8 字节 PNG 头，base64 形态合法
+  const withImage = [
+    { type: 'text' as const, text: '看这个报错' },
+    { type: 'image' as const, mimeType: 'image/png', dataBase64: PNG },
+  ];
+
+  /** 捕获请求体（fetch 被 stub 掉，不出网）。 */
+  function capture(): Array<Record<string, unknown>> {
+    const calls: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', async (_url: string, init: { body: string }) => {
+      calls.push(JSON.parse(init.body));
+      return { ok: true, body: sseChunks(['data: [DONE]']), text: async () => '' };
+    });
+    return calls;
+  }
+
+  describe('contentToText：把内容当文本用的唯一出口', () => {
+    it('字符串原样返回', () => {
+      expect(contentToText('hi')).toBe('hi');
+    });
+
+    it('数组只拼文本块，图片被丢弃（图片不是"文本"）', () => {
+      expect(contentToText(withImage)).toBe('看这个报错');
+      expect(
+        contentToText([
+          { type: 'image', mimeType: 'image/png', dataBase64: PNG },
+          { type: 'text', text: 'a' },
+          { type: 'text', text: 'b' },
+        ])
+      ).toBe('a\nb');
+    });
+
+    it('只有图片时得到空串（不抛出、不产出 "undefined" 之类字样）', () => {
+      expect(contentToText([{ type: 'image', mimeType: 'image/png', dataBase64: PNG }])).toBe('');
+    });
+  });
+
+  describe('OpenAI 兼容', () => {
+    it('图文混排 -> text 块 + image_url 的 data URL', async () => {
+      const calls = capture();
+      const model = new OpenAICompatibleModel({ apiKey: 'k' });
+      await model.chat([{ role: 'user', content: withImage }]);
+
+      expect((calls[0].messages as any[])[0]).toEqual({
+        role: 'user',
+        content: [
+          { type: 'text', text: '看这个报错' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${PNG}` } },
+        ],
+      });
+    });
+
+    it('纯文本仍是**裸字符串**：不包装成内容块数组（无图片的请求体逐字节不变）', async () => {
+      const calls = capture();
+      const model = new OpenAICompatibleModel({ apiKey: 'k' });
+      await model.chat([{ role: 'user', content: 'hi' }]);
+      expect((calls[0].messages as any[])[0].content).toBe('hi');
+      expect(typeof (calls[0].messages as any[])[0].content).toBe('string');
+    });
+
+    it('assistant 原生 tool_calls 与 tool 结果也走 contentToText（图片不会漏成 "[object Object]"）', async () => {
+      const calls = capture();
+      const model = new OpenAICompatibleModel({ apiKey: 'k' });
+      await model.chat([
+        { role: 'user', content: withImage },
+        {
+          role: 'assistant',
+          content: withImage,
+          toolCalls: [{ id: 'c1', tool: 'read_file', input: { path: 'a.ts' } }],
+        },
+        { role: 'tool', content: withImage, toolCallId: 'c1' },
+      ]);
+
+      const messages = calls[0].messages as any[];
+      expect(messages[1].content).toBe('看这个报错');
+      expect(messages[1].tool_calls[0].id).toBe('c1');
+      expect(messages[2].content).toBe('看这个报错');
+      expect(JSON.stringify(messages)).not.toContain('[object Object]');
+    });
+  });
+
+  describe('Anthropic', () => {
+    const anthropic = () => new AnthropicModel({ baseURL: 'https://a.example', apiKey: 'ak', model: 'claude-x' });
+
+    it('图文混排 -> text 块 + base64 source 块（media_type 逐字传递）', async () => {
+      const calls = capture();
+      await anthropic().chat([{ role: 'user', content: withImage }]);
+
+      expect((calls[0].messages as any[])[0]).toEqual({
+        role: 'user',
+        content: [
+          { type: 'text', text: '看这个报错' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } },
+        ],
+      });
+    });
+
+    it('用 base64 源而**不是** url：图片字节来自本机，没有也不该有可指的外部地址', async () => {
+      const calls = capture();
+      await anthropic().chat([{ role: 'user', content: withImage }]);
+      const block = (calls[0].messages as any[])[0].content[1];
+      expect(block.source.type).toBe('base64');
+      expect(JSON.stringify(calls[0])).not.toContain('"url"');
+      expect(JSON.stringify(calls[0])).not.toContain('data:image');
+    });
+
+    it('纯文本仍是裸字符串', async () => {
+      const calls = capture();
+      await anthropic().chat([{ role: 'user', content: 'hi' }]);
+      expect((calls[0].messages as any[])[0].content).toBe('hi');
+    });
+
+    it('system 是数组时只取文本：顶层 system 字段只能是字符串', async () => {
+      const calls = capture();
+      await anthropic().chat([
+        { role: 'system', content: withImage },
+        { role: 'user', content: 'hi' },
+      ]);
+      expect(calls[0].system).toBe('看这个报错');
+    });
+
+    it('assistant tool_use 的正文取自文本块（与 OpenAI 链路同源）', async () => {
+      const calls = capture();
+      await anthropic().chat([
+        { role: 'user', content: 'x' },
+        {
+          role: 'assistant',
+          content: withImage,
+          toolCalls: [{ id: 'tu1', tool: 'read_file', input: {} }],
+        },
+      ]);
+      const blocks = (calls[0].messages as any[])[1].content;
+      expect(blocks[0]).toEqual({ type: 'text', text: '看这个报错' });
+      expect(blocks[1]).toEqual({ type: 'tool_use', id: 'tu1', name: 'read_file', input: {} });
+    });
+
+    it('tool 结果回灌为 tool_result 时取文本（工具结果是文本，不存在图片）', async () => {
+      const calls = capture();
+      await anthropic().chat([
+        { role: 'user', content: 'x' },
+        { role: 'tool', content: withImage, toolCallId: 'tu1' },
+      ]);
+      expect((calls[0].messages as any[])[1]).toEqual({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'tu1', content: '看这个报错' }],
+      });
+    });
   });
 });

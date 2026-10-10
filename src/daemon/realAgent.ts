@@ -6,6 +6,7 @@
  * 分派真实工具（路径护栏 + 审批门控）→ 回灌工具结果 → 继续，直至不再调用工具或取消。
  */
 import {
+  Attachment,
   DEFAULT_MAX_CONTEXT_TOKENS,
   DEFAULT_MAX_TOOL_ROUNDS,
   DEFAULT_PLAN_MAX_ROUNDS,
@@ -16,9 +17,10 @@ import {
   EventPlanRequest,
   SessionSendParams,
 } from '../../shared/protocol';
+import { sanitizeImageAttachments } from '../../shared/imageAttachment';
 import * as path from 'path';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatMessage, ChatModel, StreamChunk, ToolDefinition } from './model';
+import { ChatContentPart, ChatMessage, ChatModel, StreamChunk, ToolDefinition } from './model';
 import { createToolCallFenceFilter, parseToolCalls, ToolCall, ToolCallFenceFilter } from './toolcall';
 import {
   CommandPolicy,
@@ -228,11 +230,34 @@ export async function runRealAgent(
       ts: Date.now(),
     });
 
+  // 图片附件的**最后一道**校验。daemon 是安全边界，不采信"上游已经校验过" —— 协议允许
+  // 任意客户端接入（examples/python-daemon 就是活证据），凡是要发给模型的内容必须在真正
+  // 使用它的那一刻再验一次。不合规就**整条消息明确拒绝**，不静默丢掉那一张：这类消息里的
+  // 图片往往就是提问本身，少发一张会让模型对着不存在的图作答、用户拿到一段看似正常的胡话。
+  const imageCheck = sanitizeImageAttachments(attachments.filter((a) => a.kind === 'image'));
+  if (!imageCheck.ok) {
+    ctx.notify(EVENTS.Error, {
+      sessionId: ctx.sessionId,
+      code: ERROR_CODES.InvalidParams,
+      message: `图片附件被拒绝：${imageCheck.reason}`,
+    });
+    ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: `\n\n> ⚠️ ${imageCheck.reason}\n\n` });
+    ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'error' });
+    trajectory('system', `session 结束：error（图片附件被拒：${imageCheck.reason}）`);
+    unsubscribeCancel?.();
+    return;
+  }
+  // 用校验后的图片替换原附件（体积换成实测值、非法字段被剔除），非图片附件保持原样与原顺序
+  const safeImages = [...imageCheck.images];
+  const safeAttachments: Attachment[] = attachments.map((a) =>
+    a.kind === 'image' ? (safeImages.shift() as Attachment) : a
+  );
+
   const title = ctx.isCanceled() ? prompt.slice(0, TITLE_MAX) : await generateTitle(config.model, prompt);
   ctx.notify(EVENTS.SessionStarted, { sessionId: ctx.sessionId, title });
   trajectory('system', `session 开始（real agent）：${prompt.slice(0, 80)}`);
 
-  const messages: ChatMessage[] = buildMessages(prompt, attachments);
+  const messages: ChatMessage[] = buildMessages(prompt, safeAttachments);
   const maxContextTokens = config.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS;
 
   /**
@@ -862,6 +887,7 @@ function disabledTool(ctx: AgentContext, sessionId: string, caps: AgentCapabilit
 
 function buildMessages(prompt: string, attachments: SessionSendParams['attachments']): ChatMessage[] {
   const parts: string[] = [`用户请求：\n${prompt}`];
+  const images: ChatContentPart[] = [];
   for (const a of attachments ?? []) {
     switch (a.kind) {
       case 'file':
@@ -883,11 +909,25 @@ function buildMessages(prompt: string, attachments: SessionSendParams['attachmen
       case 'text':
         parts.push(`\n<text>${a.text ?? ''}</text>`);
         break;
+      case 'image':
+        // 图片不能折进文本里（base64 塞进 <file> 只会变成噪声）。它以独立内容块参与请求，
+        // 文本侧只留一行**位置标记**：多张图时模型据此知道"第 2 张"指的是哪一张。
+        if (a.mimeType && a.dataBase64) {
+          images.push({ type: 'image', mimeType: a.mimeType, dataBase64: a.dataBase64 });
+          parts.push(`\n[图片 ${images.length}${a.name ? `：${a.name}` : ''}]`);
+        }
+        break;
     }
   }
+  const text = parts.join('\n');
   return [
     { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: parts.join('\n') },
+    {
+      role: 'user',
+      // 没有图片时**保持纯字符串**：改造前后请求体逐字节一致（"加一个能力"不该
+      // 动到不使用它的请求）。有图片才升格为内容块数组。
+      content: images.length > 0 ? [{ type: 'text' as const, text }, ...images] : text,
+    },
   ];
 }
 
@@ -940,10 +980,28 @@ export function estimateTokens(text: string): number {
   return Math.ceil(cjk + (text.length - cjk) / 4);
 }
 
+/**
+ * 单张图片的 token 估算（保守常量）。
+ *
+ * 精确值要按像素算（Anthropic 约 `宽 × 高 / 750`），而 daemon 手里只有 base64 ——
+ * 要拿尺寸就得解 PNG/JPEG 头，为一次估算引入半个图片解析器不划算。
+ * 前端已把长边压到 1568px 以内（最坏约 3.3k），这里取 2048 作为典型截图
+ * （约 1500×800 ≈ 1.6k）偏保守的估计。
+ * 偏向保守是有理由的：**估松了**请求会被服务端以超长拒绝（用户看到的是"模型报错"），
+ * **估紧了**只是多裁掉一轮旧工具结果 —— 后者的代价小得多，而且方向可预期。
+ */
+export const IMAGE_TOKEN_ESTIMATE = 2048;
+
 function estimateMessageTokens(messages: ChatMessage[]): number {
   let total = 0;
   for (const m of messages) {
-    total += estimateTokens(m.content);
+    if (typeof m.content === 'string') {
+      total += estimateTokens(m.content);
+    } else {
+      for (const p of m.content) {
+        total += p.type === 'text' ? estimateTokens(p.text) : IMAGE_TOKEN_ESTIMATE;
+      }
+    }
     if (m.toolCalls) total += estimateTokens(JSON.stringify(m.toolCalls));
   }
   return total;

@@ -98,8 +98,9 @@
   </div>
 
   <footer id="composer">
-    <div class="composer-box">
-      <textarea id="input" rows="1" placeholder="问点什么，或描述你想改的地方…" aria-label="输入 Prompt"></textarea>
+    <div id="composer-box" class="composer-box">
+      <div id="image-staging" class="image-staging" role="group" aria-label="待发送的图片" hidden></div>
+      <textarea id="input" rows="1" placeholder="问点什么，或描述你想改的地方…" aria-label="输入 Prompt" title="可以直接把截图粘贴进来（Ctrl+V），或把图片文件拖进输入框，也可以点左侧的图片按钮选择文件"></textarea>
       <div class="composer-row">
         <!-- 计划模式开关（P2-7）：开=先给方案、你批准后才动手。放在输入框左下角，
              因为它是"这条消息怎么发"的属性，不是全局设置。 -->
@@ -110,10 +111,13 @@
           aria-pressed="false"
           title="计划模式：先给方案、批准后执行"
         >计划</button>
+        <button id="btn-attach" class="icon-btn" type="button" title="附加图片（也可以直接粘贴截图，或把图片拖进输入框）" aria-label="附加图片">🖼</button>
+        <input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
         <span id="composer-hint" class="hint">Enter 发送 · Shift+Enter 换行</span>
         <button id="btn-cancel" class="btn danger" type="button" hidden>停止</button>
         <button id="btn-send" class="btn primary" type="button">发送</button>
       </div>
+      <div id="composer-notice" class="composer-notice" role="status" hidden></div>
     </div>
   </footer>
 

@@ -405,6 +405,9 @@ body {
 .chips {
   display: flex;
   flex-wrap: wrap;
+  /* 图片 chip 比文字 chip 高得多，默认的 stretch 会把文字 chip 抻成同高的椭圆
+     （圆角 999px 下就是个大圆点）。对齐到中线，两种 chip 各保持自己的高度。 */
+  align-items: center;
   gap: var(--dsh-sp-1);
 }
 .chip {
@@ -1488,4 +1491,98 @@ button.icon-btn.has-badge {
 #main::-webkit-scrollbar-thumb:hover,
 .sheet-body::-webkit-scrollbar-thumb:hover {
   background: var(--vscode-scrollbarSlider-hoverBackground, rgba(128, 128, 128, 0.55));
+}
+
+/* =====================================================================
+ * 图片附件（P2-4）：暂存区、缩略图、拖放提示
+ *
+ * 缩略图走 data: URL 内联 —— CSP 只放行了 img-src data:，用具名资源反而会被拦。
+ * ===================================================================== */
+
+.icon-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--dsh-fg-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--dsh-r-sm);
+  cursor: pointer;
+}
+.icon-btn:hover {
+  color: var(--dsh-fg);
+  background: var(--dsh-hover);
+}
+
+.image-staging {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dsh-sp-1);
+  padding: 0 var(--dsh-sp-1) var(--dsh-sp-1);
+}
+.image-thumb {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  border: 1px solid var(--dsh-line);
+  border-radius: var(--dsh-r-sm);
+  overflow: hidden;
+  background: var(--dsh-bg-raised);
+}
+.image-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.image-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 13px;
+  text-align: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.62);
+  border: 0;
+  border-bottom-left-radius: var(--dsh-r-sm);
+  cursor: pointer;
+}
+.image-remove:hover {
+  background: var(--dsh-err);
+}
+
+/* 拖放悬停：给出"松手就会附上"的即时反馈，否则用户不敢松手 */
+.composer-box.drop-target {
+  border-color: var(--dsh-focus);
+  box-shadow: 0 0 0 1px var(--dsh-focus);
+}
+
+.composer-notice {
+  padding: 0 var(--dsh-sp-1);
+  font-size: var(--dsh-fs-xs);
+  color: var(--dsh-err);
+}
+
+/* 用户气泡里的图片 chip：不写字，直接显示缩略图（"发了哪张图"用看得见的方式回答） */
+.chip.chip-image {
+  padding: 0;
+  border-radius: var(--dsh-r-sm);
+  overflow: hidden;
+  line-height: 0;
+}
+.chip.chip-image img {
+  display: block;
+  max-width: 132px;
+  max-height: 96px;
+  object-fit: cover;
 }

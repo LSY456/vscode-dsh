@@ -48,6 +48,7 @@ import {
   SessionRollbackResult,
 } from '../shared/protocol';
 import { captureContext } from './contextCapture';
+import { sanitizeImageAttachments, type ImageAttachmentInput } from '../shared/imageAttachment';
 import { ConfigAccessor } from './configAccessor';
 import {
   BALANCE_TTL_MS,
@@ -139,6 +140,12 @@ interface FromWebview {
   /** webview 侧诊断（事件渲染抛错 / 未知事件）：只落 OutputChannel，不改变产品行为 */
   diag?: { level: 'warn' | 'debug'; method?: string; message?: string };
   prompt?: string;
+  /**
+   * 面板暂存的图片（粘贴 / 拖放 / 选择文件）。
+   * 到这里**还没校验过** —— 它是 webview 传来的任意数据，doSend 里一律先过
+   * `sanitizeImageAttachments` 再用，绝不直接转发给 daemon。
+   */
+  images?: ImageAttachmentInput[];
   approvalId?: string;
   approved?: boolean;
   /** B1 信任记忆：审批通过并记住（免审批白名单） */
@@ -729,7 +736,7 @@ export class WebviewPanelHost {
         void this.refreshBalance();
         return;
       case 'send':
-        await this.doSend((msg.prompt ?? '').trim(), !!msg.planMode);
+        await this.doSend((msg.prompt ?? '').trim(), !!msg.planMode, msg.images);
         return;
       case 'session.new': {
         try {
@@ -927,9 +934,30 @@ export class WebviewPanelHost {
     this.post({ kind: 'event', method: 'trust.info', params: resolveTrustGate(vscode.workspace.isTrusted) });
   }
 
-  private async doSend(prompt: string, planMode = false): Promise<void> {
-    if (!prompt) {
-      void vscode.window.showWarningMessage('请输入 Prompt');
+  private async doSend(
+    prompt: string,
+    planMode = false,
+    images?: ImageAttachmentInput[]
+  ): Promise<void> {
+    // 图片先过校验。越限时**拒绝整条消息**而不是"丢掉那张继续发"：这类消息里的图片
+    // 往往就是提问本身（"看这个报错截图"），少发一张会让模型对着一张根本不存在的图作答，
+    // 而用户拿到的是一段看起来完全正常的胡话 —— 比直接报错难发现得多。
+    const imageCheck = sanitizeImageAttachments(images);
+    if (!imageCheck.ok) {
+      void vscode.window.showErrorMessage(`图片附件：${imageCheck.reason}`);
+      this.post({
+        kind: 'event',
+        method: EVENTS.Error,
+        params: { message: `图片附件：${imageCheck.reason}` },
+      });
+      // 不清理面板暂存：用户删掉/换掉那一张就能直接重发
+      return;
+    }
+    const images_ = imageCheck.images;
+    // "空消息"要连同图片一起看：只粘一张截图直接发送是常见用法，要求必须凑一句文字，
+    // 只会让人把图存下来再翻回去贴。
+    if (!prompt && images_.length === 0) {
+      void vscode.window.showWarningMessage('请输入 Prompt，或附加一张图片');
       return;
     }
     if (!this.daemon.client.isOpen) {
@@ -951,6 +979,9 @@ export class WebviewPanelHost {
       } catch (err) {
         logger.warn(`上下文捕获失败，按无附件发送: ${err instanceof Error ? err.message : String(err)}`);
       }
+      // 面板粘的图片排在**最前**：它是用户主动给的、直接对应问题本身，
+      // 而自动捕获的上下文只是背景。顺序也决定 daemon 侧 [图片 N] 标记的位置。
+      attachments = [...images_, ...attachments];
       this.post({
         kind: 'event',
         method: 'user.message',
@@ -1010,8 +1041,8 @@ export class WebviewPanelHost {
  * 把捕获到的附件折叠为 UI chip 文案，让用户一眼看到 Agent 实际拿到了什么上下文。
  * 只做展示，不影响发送给 daemon 的原始附件。
  */
-function summarizeAttachments(attachments: Attachment[]): { label: string }[] {
-  const chips: { label: string }[] = [];
+function summarizeAttachments(attachments: Attachment[]): { label: string; imageId?: string }[] {
+  const chips: { label: string; imageId?: string }[] = [];
   let gitChip: string | undefined;
 
   for (const a of attachments) {
@@ -1022,6 +1053,14 @@ function summarizeAttachments(attachments: Attachment[]): { label: string }[] {
       case 'selection':
         chips.push({
           label: a.range ? `选区 L${a.range.startLine}-${a.range.endLine}` : '选区',
+        });
+        break;
+      case 'image':
+        // 只回传 clientId，**不回传 base64**：缩略图数据本来就在面板手里，
+        // 来回搬一趟等于把几 MB 的图片复制进消息桥与 DOM。
+        chips.push({
+          label: `🖼 ${a.name || '图片'}${a.sizeBytes ? `（${(a.sizeBytes / 1024).toFixed(0)} KB）` : ''}`,
+          ...(a.clientId ? { imageId: a.clientId } : {}),
         });
         break;
       case 'diagnostics': {

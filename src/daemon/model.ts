@@ -25,13 +25,40 @@ import { ToolCall } from './toolcall';
  */
 export const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 
+/**
+ * 多模态消息内容块。
+ *
+ * `ChatMessage.content` 平时是纯文本，**只有用户附了图片的那条消息**会变成数组。
+ * 这样"99% 的情况"完全不受影响（仍是字符串、请求体逐字节不变），而两家 provider 的差异
+ * （OpenAI 的 `image_url` data URL / Anthropic 的 base64 `source` 块）被收敛在各自的
+ * 序列化函数里 —— 与 `toolCalls` 的处理方式同源：**上层只认一种表示，provider 负责适配**。
+ */
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; mimeType: string; dataBase64: string };
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: string | ChatContentPart[];
   /** 原生工具调用（assistant 消息）；fenced 场景不设此字段 */
   toolCalls?: ToolCall[];
   /** tool 消息对应的原生调用 id（OpenAI tool_call_id / Anthropic tool_use_id） */
   toolCallId?: string;
+}
+
+/**
+ * 把消息内容取成纯文本（多模态时拼接其中的文本块，**丢弃图片**）。
+ *
+ * 所有"把内容当文本用"的地方（system 拼接、假模型的关键字匹配、token 估算）都走这里。
+ * 单独抽成函数的价值在于：`content` 一旦变成联合类型，TypeScript 会把每一处误用都指出来，
+ * 而这里是那些误用的**唯一出口** —— 谁也别再自己 `String(m.content)` 或 `m.content.includes`。
+ */
+export function contentToText(content: string | ChatContentPart[]): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((p): p is Extract<ChatContentPart, { type: 'text' }> => p.type === 'text')
+    .map((p) => p.text)
+    .join('\n');
 }
 
 export type StreamChunkType = 'reasoning' | 'content';
@@ -427,11 +454,31 @@ export class AnthropicModel implements ChatModel {
   }
 }
 
-/** Anthropic Messages 中一条消息 content 的块形状（text / tool_use / tool_result）。 */
+/** Anthropic Messages 中一条消息 content 的块形状（text / image / tool_use / tool_result）。 */
 type AnthropicContentBlock =
   | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string };
+
+/**
+ * 统一 content → Anthropic 内容块。
+ *
+ * 图片用 `source.type = 'base64'`（而非 url）：图片字节是本进程从用户剪贴板
+ * 直接拿到的，**没有任何 URL 可指**；而且让模型端点去拉一个 URL，等于把
+ * "谁在何时看到这张图"变成第三方可见的请求 —— 用户粘一张内部截图时这不可接受。
+ */
+function toAnthropicContent(content: string | ChatContentPart[]): AnthropicContent {
+  if (typeof content === 'string') return content;
+  return content.map((p) =>
+    p.type === 'text'
+      ? { type: 'text' as const, text: p.text }
+      : {
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: p.mimeType, data: p.dataBase64 },
+        }
+  );
+}
 
 /** Anthropic 消息 content：纯文本或块数组。 */
 type AnthropicContent = string | AnthropicContentBlock[];
@@ -446,28 +493,32 @@ function toAnthropicMessages(messages: ChatMessage[]): {
 } {
   const system = messages
     .filter((m) => m.role === 'system')
-    .map((m) => m.content)
+    .map((m) => contentToText(m.content))
     .join('\n\n');
   const out: Array<{ role: 'user' | 'assistant'; content: AnthropicContent }> = [];
   for (const m of messages) {
     if (m.role === 'system') continue;
     if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
       // 原生：assistant 的 tool_use 块（正文为可选的 text 块）
+      const answer = contentToText(m.content);
       out.push({
         role: 'assistant',
         content: [
-          ...(m.content ? [{ type: 'text' as const, text: m.content }] : []),
+          ...(answer ? [{ type: 'text' as const, text: answer }] : []),
           ...m.toolCalls.map((tc) => ({ type: 'tool_use' as const, id: tc.id ?? '', name: tc.tool, input: tc.input })),
         ],
       });
     } else if (m.role === 'tool' && m.toolCallId) {
-      // 原生：tool 结果回灌为 user 的 tool_result 块
-      out.push({ role: 'user', content: [{ type: 'tool_result' as const, tool_use_id: m.toolCallId, content: m.content }] });
+      // 原生：tool 结果回灌为 user 的 tool_result 块（工具结果是文本，不存在图片）
+      out.push({
+        role: 'user',
+        content: [{ type: 'tool_result' as const, tool_use_id: m.toolCallId, content: contentToText(m.content) }],
+      });
     } else if (m.role === 'tool') {
       // 向后兼容（fenced 场景无 id）：工具结果作为 user 文本回灌
-      out.push({ role: 'user', content: `${TOOL_RESULT_PREFIX}${m.content}` });
+      out.push({ role: 'user', content: `${TOOL_RESULT_PREFIX}${contentToText(m.content)}` });
     } else {
-      out.push({ role: m.role, content: m.content });
+      out.push({ role: m.role, content: toAnthropicContent(m.content) });
     }
   }
   return { system, messages: out };
@@ -583,13 +634,28 @@ function toOpenAIBody(model: string, messages: ChatMessage[], opts: ChatStreamOp
   return body;
 }
 
+/**
+ * 统一 content → OpenAI 兼容内容。
+ *
+ * 纯文本**不加包装**：改成 `[{type:'text',...}]` 虽然同样合法，但会让改造前后
+ * 每一轮的请求体逐字节不同 —— 一个"支持图片"的改动不该动到没有图片的请求。
+ */
+function toOpenAIContent(content: string | ChatContentPart[]): unknown {
+  if (typeof content === 'string') return content;
+  return content.map((p) =>
+    p.type === 'text'
+      ? { type: 'text', text: p.text }
+      : { type: 'image_url', image_url: { url: `data:${p.mimeType};base64,${p.dataBase64}` } }
+  );
+}
+
 /** 序列化 OpenAI 消息：assistant 的原生 tool_calls；tool 原生带 tool_call_id、fenced 兜底降级为 user 文本。 */
 function toOpenAIMessages(messages: ChatMessage[]): unknown[] {
   return messages.map((m) => {
     if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
       return {
         role: 'assistant',
-        content: m.content || null,
+        content: contentToText(m.content) || null,
         tool_calls: m.toolCalls.map((tc) => ({
           id: tc.id ?? '',
           type: 'function',
@@ -598,11 +664,11 @@ function toOpenAIMessages(messages: ChatMessage[]): unknown[] {
       };
     }
     if (m.role === 'tool') {
-      if (m.toolCallId) return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };
+      if (m.toolCallId) return { role: 'tool', tool_call_id: m.toolCallId, content: contentToText(m.content) };
       // fenced 兜底（无原生 tool_call id）：作为 user 文本回灌
-      return { role: 'user', content: `${TOOL_RESULT_PREFIX}${m.content}` };
+      return { role: 'user', content: `${TOOL_RESULT_PREFIX}${contentToText(m.content)}` };
     }
-    return { role: m.role, content: m.content };
+    return { role: m.role, content: toOpenAIContent(m.content) };
   });
 }
 
@@ -794,12 +860,15 @@ export function createKeywordFakeModel(): ChatModel {
     const hasToolResult = messages.some((m) => m.role === 'tool');
     const userText = messages
       .filter((m) => m.role === 'user')
-      .map((m) => m.content)
+      .map((m) => contentToText(m.content))
       .join('\n');
 
     // P2-7 计划阶段：只读调研 -> 直接给出一份计划正文（不发起写入调用）。
     // 判定见 planMode.ts —— 标记与 realAgent 的 system 附加指令同源，不在这里另写一份字面量。
-    if (isPlanPhase(messages)) {
+    // 入参显式投影成文本：planMode 只关心 system 文案，而"把内容当文本用"的出口只有
+    // contentToText 一个。若反过来把 isPlanPhase 改成收多模态，planMode.ts 就得 import
+    // model.ts，而 model.ts 已经 import 它 —— 又转回本模块开头注释里要避免的那个循环。
+    if (isPlanPhase(messages.map((m) => ({ role: m.role, content: contentToText(m.content) })))) {
       return {
         reasoning: '计划模式：先做只读调研，产出一份计划供用户批准。',
         content:
@@ -809,8 +878,31 @@ export function createKeywordFakeModel(): ChatModel {
     }
 
     if (hasToolResult) {
-      const lastTool = [...messages].reverse().find((m) => m.role === 'tool')?.content ?? '';
+      const lastToolMsg = [...messages].reverse().find((m) => m.role === 'tool');
+      const lastTool = lastToolMsg ? contentToText(lastToolMsg.content) : '';
       return { content: `工具已执行完毕：${lastTool.slice(0, 80)}` };
+    }
+
+    // 图片输入（P2-4）：把"模型侧究竟收到了几张图"变成**可从外部观察**的事实。
+    // 假模型存在的意义就是把不可见的链路变得可断言 —— 冒烟脚本只能读 SSE 正文、
+    // 看不见请求体，而 `[图片 N]` 位置标记只能证明文本到了，证明不了 image 内容块到了。
+    const imageParts = messages.reduce(
+      (n, m) => (m.role === 'user' && Array.isArray(m.content)
+        ? n + m.content.filter((p) => p.type === 'image').length
+        : n),
+      0
+    );
+    if (imageParts > 0) {
+      // 回显两件事：请求体里真有几个 image 内容块，以及文本侧留下的位置标记。
+      // 后者证明"第 N 张"的位置信息确实到了模型，前者证明图片本身到了 —— 缺任何一半，
+      // "支持图片输入"就只是个说法。
+      // 注意 `[^\]]` 的转义：JS 里 `[^]]` **不是**"非 ]"（那是 Perl 语义），
+      // 实际会被解析成"任意字符 + 字面 ]"，于是永远匹配不到 —— 正是踩过的坑。
+      const markers = (userText.match(/\[图片 [0-9]+[^\]]*\]/g) || []).join(' ');
+      return {
+        reasoning: `请求体里有 ${imageParts} 个 image 内容块。`,
+        content: `（fake real-agent）已收到 ${imageParts} 张图片：${markers}`,
+      };
     }
 
     const file = findAttachmentPath(userText);
