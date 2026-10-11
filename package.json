@@ -396,8 +396,9 @@
     "smoke:protocol": "node scripts/smokeProtocol.js",
     "smoke:real": "node esbuild.js && node scripts/smokeReal.js",
     "test:integration": "node scripts/runIntegrationTests.js",
-    "check": "npm run typecheck && npm run build && npm test && npm run smoke && npm run check:package",
+    "check": "npm run check:workflows && npm run typecheck && npm run build && npm test && npm run smoke && npm run check:package",
     "check:package": "node scripts/checkPackage.js",
+    "check:workflows": "node scripts/checkWorkflows.js",
     "package": "vsce package --out dist",
     "vscode:prepublish": "npm run build"
   },

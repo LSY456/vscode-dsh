@@ -6,16 +6,32 @@ on:
   push:
     tags: ['v*']
 
+# 默认只读；release job 需要 contents: write 才能创建 Release，由它自己声明。
+permissions:
+  contents: read
+
+# 同一 tag 的重复触发排队而不互相取消：发布做到一半被取消会留下
+# "tag 已存在但没有 Release / 没有附件"的中间态，比多跑一次代价更大。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: tag 触发发布 VSIX
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      # 所有 action 一律 pin 到 commit SHA（理由同 ci.yml：tag 可被移动）。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Release 走 softprops/action-gh-release 的 GITHUB_TOKEN 环境变量，
+          # 不需要把凭据留在 .git/config 里。
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -30,7 +46,7 @@ jobs:
         run: npx vsce package --out dist
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/*.vsix
           generate_release_notes: true

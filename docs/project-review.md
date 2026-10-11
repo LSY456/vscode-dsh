@@ -198,7 +198,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | P1-8 | `stepCounter` 是模块级全局（`agent.ts:53`、`realAgent.ts:51`） | `PROTOCOL.md:135` 定义 `step` 为"会话内单调递增"，实际是全局递增；多会话并发时 UI 迹线的步骤号跳跃、不连续 | 计数器挂到 `Session` |
 | P1-9 | `docs` 类漂移：`SECURITY.md:7-8` 写支持 `0.3.x/0.2.x`，而 `package.json:5` 是 `0.4.0`；`CONTRIBUTING.md:28` 硬编码"244 用例" | 文档与代码不一致，削弱可信度；用例数会持续漂移 | 版本从 `shared/version.ts` 注入文档；用例数改为脚本生成或直接删除数字 |
 | P1-10 | `tsconfig.json:17` 只 include `src/**/*.ts`、`shared/**/*.ts`；`allowJs` 未开 | `media/webview.js`(1155 行)、`src/webview/*.js`、`scripts/*.js`、`esbuild.js` **全部在类型检查之外**，且仓库无 ESLint/vitest 配置文件 | 单独加 `tsconfig.web.json`（`allowJs + checkJs`）覆盖前端与脚本；引入 ESLint + Prettier 并接入 CI |
-| P1-11 | CI 硬化缺口（`.github/workflows/ci.yml`）：action 仅用 tag 未 pin SHA（L13/15/27）；无 `permissions:`；无 `concurrency`；无 `timeout-minutes`；无 lint 步骤；integration 每次重下 stable VSCode 无缓存（L78）；OSV 无 SARIF 上报 | 供应链风险 + 卡死可跑满 6h + 反馈慢 | pin SHA、最小权限、`concurrency: cancel-in-progress`、`timeout-minutes: 20`、缓存 `.vscode-test`、OSV 上传 SARIF |
+| P1-11 | ~~CI 硬化缺口（`.github/workflows/ci.yml`）：action 仅用 tag 未 pin SHA（L13/15/27）；无 `permissions:`；无 `concurrency`；无 `timeout-minutes`；无 lint 步骤；integration 每次重下 stable VSCode 无缓存（L78）；OSV 无 SARIF 上报~~ | 原判风险：供应链风险 + 卡死可跑满 6h + 反馈慢。**【2026-10-11 追记：已实现，口径见本节末尾「CI 硬化追记」。唯一没做的是 lint 步骤 —— 仓库至今没有 linter（属 P1-10），不该在这一批里顺手引入** | 已实施：pin SHA、顶层最小权限 + job 级提权、`concurrency`（仅 PR 取消在跑）、逐 job `timeout-minutes`、缓存 `.vscode-test`、OSV 改官方可复用工作流（含 SARIF 上报），并新增工作流守卫把它们锁住 |
 | P1-12 | Webview 巨石单文件 + 无类型（`media/webview.js` 1155 行承载事件分发/审批/补丁/历史/设置） | 修改成本高、回归风险大 | 拆为 `events/approvals/patches/history/settings/composer` 模块（浏览器端 ESM 原生支持，esbuild 会合并） |
 | P1-13 | `handleEvent` 无 try/catch（`media/webview.js:1020-1026` 附近），默认分支静默吞未知事件 | 单条事件抛错即静默丢失，协议漂移被掩盖成"UI 没反应" | 包 try/catch + 上报到扩展 logger；未知事件在 debug 级别打点 |
 | P1-14 | `resetTurn()` 不重置 `answerEl/answerBody/answerBatcher`（`media/webview.js:414-421`），而 `clearMessages()` 才做（L816-844） | **窗口期**：若上一轮既没收到 `message.done` 也没收到 `session.ended`（daemon 流式中崩溃、事件丢失），下一轮 `ensureAnswer()` early-return（L270），新回答续写进旧气泡 | `resetTurn()` 首行调用 `finishAssistant()`（幂等），或在 `user.message` 分支统一走 `finishAssistant()` |
@@ -332,6 +332,20 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 **没做**：图片的保存/落盘（截图仍只存在于会话消息中）、GIF 压缩（一缩就丢动画）、按像素精确估算 token
 （daemon 手里只有 base64，取尺寸要解 PNG/JPEG 头，为一次估算引入半个图片解析器不划算，改取保守常量）。
 
+#### CI 硬化追记（2026-10-11）
+
+**已实现：pin SHA / 最小权限 / 并发 / 超时 / 缓存 / SARIF 上报，并新增一条把上述约束锁住的守卫。** 原文把七件事并列，落地时最大的发现不在清单里：
+
+1. **`uses: google/osv-scanner-action@v1` 指向的 ref 已经不存在了。** 该仓库后来把 `v1` 整个删掉（标签与分支都没有，只剩 `v1.7.x` / `v1.8.x` / `v1.9.x` 与 `v2.x`），所以这一步在 **ref 解析阶段**就会失败 —— 不是"扫描发现漏洞"，而是"这一步根本没跑起来"。原文写的是"OSV 无 SARIF 上报"，实际情况比这更靠前一步。现改用官方现行的可复用工作流并 pin 到 `v2.6.0` 的 commit，顺带拿到 SARIF 上报（Security → Code scanning）与 PR 上的增量注解。
+   > 这条恰好就是 pin SHA 要防的那类事：当初 pin 的若是 SHA，上游删 ref 对我们毫无影响。"pin SHA"不是洁癖，它是**让上游的改动无法在无提示的情况下改变我们的行为**。
+2. **最小权限与"被调用工作流"的配合要点。** 可复用工作流里自己声明的 `security-events: write` **只能被降级、不能被升级**：调用方不给足，SARIF 上传会因权限不足失败，而失败点在它内部，从我们的 workflow 里看不出来。所以顶层给 `contents: read`，`osv-scan` job 单独提到三项。
+3. **`concurrency` 只对 PR 取消在跑。** 无脑 `cancel-in-progress: true` 会连 main 上的运行一起取消，而 main 的运行持有 package job 产出的 VSIX 构件 —— 取消了，那次提交就没有可下载的包。要取消的是"已经过时的结论"，不是"产物"。
+4. **调用可复用工作流的 job 不能带 `timeout-minutes`。** 这类 job 只接受 `name` / `uses` / `with` / `secrets` / `permissions` / `needs` / `if` / `concurrency` / `strategy`，多一个键就是语法错误。所以超时只加在其余四个 job 上；`osv-scan` 的时长由它自己的步骤决定。
+
+**新增守卫 `npm run check:workflows`**（`scripts/checkWorkflows.js`，零第三方依赖，与 `checkPackage.js` 同源做法）。理由：这些约束都属于"看着像已经满足"的类型（`@v4` 很像锁住了、job 里写了 `permissions` 很像工作流级也写了），靠人记住必然退化。它做三件事 —— 每个 `uses:` 必须 pin 到 40 位 SHA（`./` 本地 action 与 `docker://` 放行）、每个工作流必须有顶层 `permissions:`、禁止 `pull_request_target` / `workflow_run`；pin 了但缺 `# vX.Y.Z` 注释只告警。**做过反向自测**：故意写一个含四种错法的临时工作流，确认四种都被报出且退出码非零 —— 守卫若不能失败就等于没有。已接入 `npm run check` 与 CI 的 test job。
+
+**没做**：lint 步骤。仓库至今没有 linter / formatter（属 P1-10），在一批"CI 配置改动"里顺手引入一套 lint 规则会把改动半径拉得过大，留到 P1-10 一起做。
+
 ### 战略层面的三个判断
 
 1. **"真实 daemon 缺席"是最大的目标—现状落差**（见 §1.4）。要么补齐 Cordis 版真实 daemon（工程量大），要么把产品定位诚实地调整为"**协议 SDK + 完整参考实现 + 可直接用的 VSCode 前端**"，把 mock 降级为测试夹具而非卖点。目前 README 的表述会让用户误以为拿到的是完整产品。
@@ -364,7 +378,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 3. **类型与门禁**：新增 `tsconfig.web.json`（`allowJs+checkJs`）覆盖 webview/scripts；引入 ESLint + Prettier 并接入 CI（P1-10）。
 4. **补上安全边界的单测**：把 `server.ts` 的握手判定、能力收敛、错误码映射抽为纯函数并单测；`wsClient` 用本地 ws server 做真实连接测试（P1-17）。
 5. **测试提速**：`agent.test.ts` 改用假定时器，把全套从 ~28s 压到 <5s（P1-18）。
-6. **CI 硬化**：pin SHA、`permissions`、`concurrency`、`timeout-minutes`、缓存 `.vscode-test`、OSV SARIF（P1-11）。
+6. **CI 硬化**：pin SHA、`permissions`、`concurrency`、`timeout-minutes`、缓存 `.vscode-test`、OSV SARIF（P1-11）。**【2026-10-11 已实现；顺带发现并修掉 `osv-scanner-action@v1` 这个已不存在的 ref，见 §4「CI 硬化追记」】**
 7. **Webview 重构**：拆分为 6 个 ESM 模块；`handleEvent` 加错误边界；`resetTurn` 修正（P1-12/13/14）。
 8. **文档同步**：`SECURITY.md` 版本矩阵、用例数自动化（P1-9）；下调"跨窗口存活"的表述（战略判断 2）。
 
