@@ -291,6 +291,11 @@ vscode-dsh/
   顶层 `permissions: contents: read` + job 级提权、逐 job `timeout-minutes`、
   缓存 `@vscode/test-electron` 下载的 VSCode；并有**工作流守卫** `npm run check:workflows`
   把这些约束变成可执行断言，防止 `@v4` 这类浮动引用悄悄溜回来。
+- **前端结构**：面板脚本 `media/webview.js` 是**薄入口**（建壳 / 组装 / 接线 / 启动），业务逻辑在
+  `src/webview/`：`panelCore`（DOM 引用 + 可变 state + 原语）+ `statusBar` / `messages` / `cards` /
+  `history` / `composer` / `events` 六个特性模块。esbuild 以入口打包成**单个 bundle、外链为零**（符合
+  webview CSP），模块内联不改变这一点；测试与静态预览仍直接 `import` 入口跑**真实代码**（不是 mock）。
+  可变状态集中在一个 `state` 对象里 —— 闭包里的 `let` 无法跨模块共享，各模块各自 `let` 一份会静默分叉。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
 - **打包**：`npm run package` 产出约 248KB 的 VSIX（`dist/`，38 文件）。
 

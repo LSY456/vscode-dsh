@@ -95,6 +95,18 @@
 
 ### 变更
 
+- **Webview 巨型单文件拆分（P1-12）**：`media/webview.js` 从 **2244 行**（两个功能批次各堆了数百行，
+  已从 1155 翻近一倍）拆成**薄入口 + 共享壳 + 6 个特性模块**。入口只剩三件事（建壳 / 组装 / 接线 + 启动），
+  业务逻辑落在 `src/webview/`：`panelCore`（DOM 引用 + 可变 state + 原语）、`statusBar`、`messages`、
+  `cards`（审批 / 计划 / 补丁 + 待办条）、`history`、`composer`（含图片附件）、`events`（事件分发 + 会话重置）。
+  ① **为什么要显式搞一个 `state` 对象**：原来所有状态都是 IIFE 闭包里的 `let`（`running` / `answerEl` /
+  `approvals` …）。闭包变量**无法跨模块共享** —— 若各模块各自 `let` 一份，读到的就是各自的快照，状态会
+  **静默分叉**（`ensureAnswer()` 判空失效，新一轮回答续写进上一轮气泡，正是 P1-14 那类 bug 的温床），
+  故全部可变状态集中到一个共享对象、各模块走 `state.x`。
+  ② **行为不变的证据**：拆分前后 `scripts/uiPreview.mjs`（真实 HTML + 真实脚本渲染）产物**同为 163.2 KB**；
+  面板 DOM 契约测试 **102 例**、全套 **691 例**、冒烟、构建、`check:package` 全绿。
+  ③ **没顺带解决的**：前端仍**无类型检查** —— `tsconfig.json` 只 include `src/**/*.ts`，这些 `.js` 模块
+  与拆之前一样在 `tsc` 之外（属 P1-10，需要 `tsconfig.web.json` 的 `allowJs + checkJs`）。
 - **CI 全流程硬化（P1-11）**：所有 action 一律 pin 到 commit SHA —— 原先 `actions/checkout@v4` 这类
   tag 是**可被移动**的引用，上游改了指向，我们下次跑的就是别人的新代码，没有 diff、没有提示、
   也不会失败。另补：顶层 `permissions: contents: read` + job 级提权（OSV 上传 SARIF 需要
