@@ -199,7 +199,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | P1-9 | `docs` 类漂移：`SECURITY.md:7-8` 写支持 `0.3.x/0.2.x`，而 `package.json:5` 是 `0.4.0`；`CONTRIBUTING.md:28` 硬编码"244 用例" | 文档与代码不一致，削弱可信度；用例数会持续漂移 | 版本从 `shared/version.ts` 注入文档；用例数改为脚本生成或直接删除数字 |
 | P1-10 | `tsconfig.json:17` 只 include `src/**/*.ts`、`shared/**/*.ts`；`allowJs` 未开 | `media/webview.js`(1155 行)、`src/webview/*.js`、`scripts/*.js`、`esbuild.js` **全部在类型检查之外**，且仓库无 ESLint/vitest 配置文件 | 单独加 `tsconfig.web.json`（`allowJs + checkJs`）覆盖前端与脚本；引入 ESLint + Prettier 并接入 CI |
 | P1-11 | ~~CI 硬化缺口（`.github/workflows/ci.yml`）：action 仅用 tag 未 pin SHA（L13/15/27）；无 `permissions:`；无 `concurrency`；无 `timeout-minutes`；无 lint 步骤；integration 每次重下 stable VSCode 无缓存（L78）；OSV 无 SARIF 上报~~ | 原判风险：供应链风险 + 卡死可跑满 6h + 反馈慢。**【2026-10-11 追记：已实现，口径见本节末尾「CI 硬化追记」。唯一没做的是 lint 步骤 —— 仓库至今没有 linter（属 P1-10），不该在这一批里顺手引入** | 已实施：pin SHA、顶层最小权限 + job 级提权、`concurrency`（仅 PR 取消在跑）、逐 job `timeout-minutes`、缓存 `.vscode-test`、OSV 改官方可复用工作流（含 SARIF 上报），并新增工作流守卫把它们锁住 |
-| P1-12 | Webview 巨石单文件 + 无类型（`media/webview.js` 1155 行承载事件分发/审批/补丁/历史/设置） | 修改成本高、回归风险大 | 拆为 `events/approvals/patches/history/settings/composer` 模块（浏览器端 ESM 原生支持，esbuild 会合并） |
+| P1-12 | ~~Webview 巨石单文件 + 无类型（`media/webview.js` 1155 行承载事件分发/审批/补丁/历史/设置）~~ | 原判风险：修改成本高、回归风险大。**【2026-10-11 追记：已拆分，口径见本节末尾「Webview 拆分追记」。注意拆出模块**并不**顺带解决"无类型"——`tsconfig.json` 仍只 include `src/**/*.ts`，这些 `.js` 模块依旧在 `tsc` 之外（属 P1-10）】** | 已实施：拆为 `panelCore`（共享壳）+ `statusBar` / `messages` / `cards` / `history` / `composer` / `events` 六个特性模块 + 薄入口；可变状态集中到一个 `state` 对象（闭包里的 `let` 无法跨模块共享） |
 | P1-13 | `handleEvent` 无 try/catch（`media/webview.js:1020-1026` 附近），默认分支静默吞未知事件 | 单条事件抛错即静默丢失，协议漂移被掩盖成"UI 没反应" | 包 try/catch + 上报到扩展 logger；未知事件在 debug 级别打点 |
 | P1-14 | `resetTurn()` 不重置 `answerEl/answerBody/answerBatcher`（`media/webview.js:414-421`），而 `clearMessages()` 才做（L816-844） | **窗口期**：若上一轮既没收到 `message.done` 也没收到 `session.ended`（daemon 流式中崩溃、事件丢失），下一轮 `ensureAnswer()` early-return（L270），新回答续写进旧气泡 | `resetTurn()` 首行调用 `finishAssistant()`（幂等），或在 `user.message` 分支统一走 `finishAssistant()` |
 | P1-15 | `.dsh` 各子目录创建权限不统一：`trajectory` 0700（`trajectoryStore.ts:76`）、`logs` 0700（`logFile.ts:52`）、`trust.json` 直接写（`trust.ts:109-117`）、`history.json` 0700（`history.json` 写入路径 `sessionHistory.ts:44`） | `.dsh` 目录本身可能以默认 umask 创建，权限语义不一致 | 统一 `ensureDshDir()` 以 0700 创建 `.dsh` 及各子目录 |
@@ -346,6 +346,17 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 
 **没做**：lint 步骤。仓库至今没有 linter / formatter（属 P1-10），在一批"CI 配置改动"里顺手引入一套 lint 规则会把改动半径拉得过大，留到 P1-10 一起做。
 
+#### Webview 拆分追记（2026-10-11）
+
+**已实现：2244 行的 `media/webview.js` 拆成「薄入口 + 共享壳 + 6 个特性模块」。** 原文把模块名写成 `events/approvals/patches/history/settings/composer`，落地时按**真实耦合**调整了两处：审批与补丁**合并**为 `cards`（两者共享"决策即折叠"的审计语义与同一条待办条投影，拆散只会让这段共享逻辑复制三份）；另立 `panelCore`（DOM 引用 + 可变 state + 原语）与 `statusBar` / `messages`，把"面板的被动显示面"和"消息流"从入口分出去。
+
+1. **唯一的硬约束是可变状态，不是函数。** 原实现是一个 IIFE，所有状态都是闭包里的 `let`（`running` / `answerEl` / `approvals` / `stagedImages` …）。函数可以照搬，闭包变量不行 —— 各自 `let` 一份，读到的就是各自的**快照**，状态会静默分叉。而这里的分叉恰好是最难查的那类：`ensureAnswer()` 一旦判空失效，新一轮回答会被续写进上一轮的气泡（P1-14 的成因）。故全部可变状态集中到一个共享 `state` 对象，各模块统一走 `state.x`；DOM 引用（只读）集中到 `dom` 表，元素 id 改名只动一处。
+2. **模块间只经 `ctx.api` 互调，且都发生在回调期。** 装配时先建一个空 `api`，各模块 `Object.assign` 把自己的公开函数挂上去；模块之间**只在事件回调 / 启动阶段**互相调用（那时 `api` 已填满，闭包持有的是同一引用）。这是"模块能互相调用"与"没有循环 import"的调和点 —— 拆分**没有引入任何新的运行时机制**，esbuild 仍以入口打成单个 IIFE bundle，外链为零（符合 CSP）。
+3. **行为不变的判据是"产物逐字节同尺寸"，不是"测试都过了"。** `scripts/uiPreview.mjs` 用**真实** `webview.html` + `webview.js` 渲染九个场景，拆分前后产物**同为 163.2 KB**；配合面板 DOM 契约测试 102 例、全套 691 例、冒烟、`check:package`，构成"拆分不改行为"的证据链。另用无头 Chrome 目视确认九个场景的排布（审批 / 计划 / 补丁卡、待办条、图片暂存区）无回归。
+4. **顺带确认 P1-13 / P1-14 已修、且没在拆分中丢失**：`handleEvent` 的错误边界现在落在 `events.js`（`event` 分支的 try/catch + 未知事件 debug 打点），`resetTurn` 的首行 `finishAssistant()` 落在 `messages.js`。这两处是"旧行号指向的位置在拆分后不复存在"的典型，故点名新位置。
+
+**没做**：仍**无类型检查**。`tsconfig.json` 只 include `src/**/*.ts`、`shared/**/*.ts`，拆出来的 `.js` 模块与拆之前的 `media/webview.js` 一样在 `tsc` 之外 —— 拆分改善的是**可导航性**，不是类型安全。要动就得上 P1-10 的 `tsconfig.web.json`（`allowJs + checkJs`），不该在这一批里顺手引入。
+
 ### 战略层面的三个判断
 
 1. **"真实 daemon 缺席"是最大的目标—现状落差**（见 §1.4）。要么补齐 Cordis 版真实 daemon（工程量大），要么把产品定位诚实地调整为"**协议 SDK + 完整参考实现 + 可直接用的 VSCode 前端**"，把 mock 降级为测试夹具而非卖点。目前 README 的表述会让用户误以为拿到的是完整产品。
@@ -379,7 +390,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 4. **补上安全边界的单测**：把 `server.ts` 的握手判定、能力收敛、错误码映射抽为纯函数并单测；`wsClient` 用本地 ws server 做真实连接测试（P1-17）。
 5. **测试提速**：`agent.test.ts` 改用假定时器，把全套从 ~28s 压到 <5s（P1-18）。
 6. **CI 硬化**：pin SHA、`permissions`、`concurrency`、`timeout-minutes`、缓存 `.vscode-test`、OSV SARIF（P1-11）。**【2026-10-11 已实现；顺带发现并修掉 `osv-scanner-action@v1` 这个已不存在的 ref，见 §4「CI 硬化追记」】**
-7. **Webview 重构**：拆分为 6 个 ESM 模块；`handleEvent` 加错误边界；`resetTurn` 修正（P1-12/13/14）。
+7. **Webview 重构**：拆分为 6 个 ESM 模块；`handleEvent` 加错误边界；`resetTurn` 修正（P1-12/13/14）。**【2026-10-11：拆分已实现，见 §4「Webview 拆分追记」；`handleEvent` 错误边界（P1-13）与 `resetTurn` 修正（P1-14）在更早批次已修，本次拆分确认二者分别落在 `events.js` / `messages.js` 且未丢失】**
 8. **文档同步**：`SECURITY.md` 版本矩阵、用例数自动化（P1-9）；下调"跨窗口存活"的表述（战略判断 2）。
 
 ### 阶段 3：产品化与差异化（P2，建议 1–2 个月）
@@ -412,7 +423,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | 象限 | 高影响 | 中影响 |
 | --- | --- | --- |
 | **低工作量** | **1.4 能力下沉**、**1.2 补丁乐观锁**、`walkFiles` 上限、`recycleStaleDaemon` 校验、CI 硬化 | `resetTurn` 修正、`step` 会话化、过期项清理、provider/baseURL 联动、`spawnExternal` 解析 |
-| **高工作量** | **1.1 脏文档一致性**、**1.3 可中断请求**、~~**MCP 客户端**~~【2026-10-01 已决策不接入，见 §4「MCP 追记」】 | Webview 模块化、`server.ts` 纯函数抽取 + 单测、会话 TTL 回收、结构化轨迹 |
+| **高工作量** | **1.1 脏文档一致性**、**1.3 可中断请求**、~~**MCP 客户端**~~【2026-10-01 已决策不接入，见 §4「MCP 追记」】 | ~~Webview 模块化~~【2026-10-11 已实现，见 §4「Webview 拆分追记」】、`server.ts` 纯函数抽取 + 单测、会话 TTL 回收、结构化轨迹 |
 
 **建议执行顺序**：1.4 → 1.2 → 1.3 → 1.1 → 阶段 2 全部 → 阶段 3。
 
