@@ -287,6 +287,10 @@ vscode-dsh/
 - **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 security（npm audit + osv-scanner）、
   typecheck → build → unit → smoke → 协议第二实现（win/ubuntu，显式 setup-python）、
   integration（vscode extension host，ubuntu）；main 分支额外产出 VSIX 构件。
+  流水线自身也按最小权限与固定版本搭建：所有 action **pin 到 commit SHA**（tag 可被移动）、
+  顶层 `permissions: contents: read` + job 级提权、逐 job `timeout-minutes`、
+  缓存 `@vscode/test-electron` 下载的 VSCode；并有**工作流守卫** `npm run check:workflows`
+  把这些约束变成可执行断言，防止 `@v4` 这类浮动引用悄悄溜回来。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
 - **打包**：`npm run package` 产出约 248KB 的 VSIX（`dist/`，38 文件）。
 

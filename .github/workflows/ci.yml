@@ -5,14 +5,34 @@ on:
     branches: [main]
   pull_request:
 
+# 最小权限：默认只读，需要写权限的 job 自己声明（见 osv-scan 的 security-events: write）。
+# 不声明的话，仓库设置里的默认值（常见是读写全开）会原样发给每个 job，包括那些只跑第三方 action 的 job。
+permissions:
+  contents: read
+
+# 同一 ref 的重复触发互相取消 —— 连续 push 时上一次的结论已经过时，跑完只是白占 runner。
+# 但**只对 PR 生效**：main 上的运行持有 package job 产出的 VSIX artifact，
+# 中途取消会让那次提交没有可下载的包。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   security:
-    name: security audit（npm audit + osv-scanner）
+    name: security audit（npm audit）
     runs-on: ubuntu-latest
+    # 这些步骤都是分钟级的。不设上限时 GitHub 默认给 6 小时，
+    # 一旦某步卡住（网络挂起、依赖解析死循环）就是白占 runner 直到超时。
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      # 所有 action 一律 pin 到 commit SHA：tag 是可以被移动的，
+      # 上游改了 tag 指向，我们下次跑的就是别人的新代码，而且不会有任何提示。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # 不把 GITHUB_TOKEN 留在 .git/config 里：后续步骤（含第三方 action）就取不到它。
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -23,8 +43,34 @@ jobs:
       - name: npm audit（生产依赖，高危阻断）
         run: npm audit --omit=dev --audit-level=high
 
-      - name: OSV-Scanner 漏洞扫描
-        uses: google/osv-scanner-action@v1
+  osv-scan:
+    name: OSV-Scanner（SARIF → Code Scanning）
+    # 用官方可复用工作流，而不是自己串「扫描 → 转 SARIF → 上传」三步：
+    # 官方那份内部同样 pin 了每个 action，并自带 PR 注解、Code Scanning 上传
+    # 与 --new 增量比对（PR 上只报本次新增的漏洞）。手写等于重复维护它的接线。
+    #
+    # 这里原先写的是 google/osv-scanner-action@v1 —— 该仓库现在**没有 v1 这个 ref**
+    # （标签和分支都没有，只有 v1.7.x / v1.8.x / v1.9.x 与 v2.x），
+    # 所以这一步在 ref 解析阶段就会失败。官方现行为 v2.x + 可复用工作流。
+    #
+    # permissions 必须由调用方给足：被调用工作流里声明的 security-events: write
+    # 只能被"降级"、不能被"升级"，调用方不给的话 SARIF 上传会因权限不足而失败。
+    #
+    # 不设 timeout-minutes：调用可复用工作流的 job 只接受
+    # name / uses / with / secrets / permissions / needs / if / concurrency / strategy，
+    # 加别的键会直接报语法错误。扫描时长由它自己的步骤决定，不涉及长期挂起。
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@a345acffa64b0eaede81a3d9aae6141214d9c8fc # v2.6.0
+    with:
+      # 递归发现 lockfile（本仓库为 package-lock.json）。
+      # 注意不能在这里传 --format / --output —— 官方工作流自己接管输出与 SARIF 转换。
+      scan-args: |-
+        -r
+        ./
+      upload-sarif: true
 
   test:
     name: typecheck / build / unit / smoke
@@ -33,21 +79,30 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
 
       # 供「协议第二实现」冒烟使用（examples/python-daemon，仅标准库，无 pip 依赖）
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
       - name: Install dependencies
         run: npm ci
+
+      # 工作流守卫：CI 配置本身也是要守的代码。这条断言"全部 uses 都 pin 到 SHA、
+      # 有顶层 permissions、没有 pull_request_target"，否则未来某次
+      # `uses: actions/checkout@v4` 又会悄悄混回来（tag 可被移动）。
+      - name: Workflow guard（pin SHA / permissions / 触发方式）
+        run: npm run check:workflows
 
       - name: Type check
         run: npm run typecheck
@@ -75,16 +130,29 @@ jobs:
     name: integration test（vscode extension host）
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      # 缓存 @vscode/test-electron 下载的 VSCode。它的默认缓存目录是 <cwd>/.vscode-test
+      # （`extensionRoot = process.cwd()`），CI 从仓库根跑，所以就是 .vscode-test/。
+      # 每次重下 stable 是数百 MB，是这个 job 里最大的一笔固定开销。
+      # key 绑 package-lock：依赖变动时换新 key，避免把一个陈旧缓存长期挂住。
+      - name: 缓存 VSCode（@vscode/test-electron）
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .vscode-test
+          key: vscode-test-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Build
         run: npm run build
@@ -97,10 +165,13 @@ jobs:
     needs: test
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -114,7 +185,7 @@ jobs:
       - name: Package VSIX
         run: npx vsce package --out dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: vscode-dsh-vsix
           path: dist/*.vsix

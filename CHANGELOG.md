@@ -95,6 +95,21 @@
 
 ### 变更
 
+- **CI 全流程硬化（P1-11）**：所有 action 一律 pin 到 commit SHA —— 原先 `actions/checkout@v4` 这类
+  tag 是**可被移动**的引用，上游改了指向，我们下次跑的就是别人的新代码，没有 diff、没有提示、
+  也不会失败。另补：顶层 `permissions: contents: read` + job 级提权（OSV 上传 SARIF 需要
+  `security-events: write`，而调用可复用工作流时这份权限**只能由调用方给足**，被调用方降不了也升不了）；
+  `concurrency` 只对 PR 取消在跑的运行（main 的运行持有 VSIX 构件，取消会让那次提交没有可下载的包）；
+  逐 job 加 `timeout-minutes`（原先卡死可以白占 runner 到 GitHub 默认的 6 小时）；
+  integration 缓存 `@vscode/test-electron` 下载的 `.vscode-test`（每次重下 stable 是数百 MB，
+  是这个 job 里最大的一笔固定开销）；`checkout` 加 `persist-credentials: false`，
+  不让 token 留在 `.git/config` 里被后续步骤（含第三方 action）取走。
+- **新增工作流守卫 `npm run check:workflows`**（`scripts/checkWorkflows.js`，零第三方依赖）：
+  把上面那些约束变成**可执行断言** —— 每个 `uses:` 必须 pin 到 40 位 SHA、每个工作流必须有顶层
+  `permissions:`、禁止 `pull_request_target` / `workflow_run`（两者都会把带写权限的 token 与 secrets
+  交给不可信代码）。这类约束靠人记是记不住的：`@v4` 看上去很像"已经锁住了"，而它恰恰是最容易
+  悄悄退化的那一类改动。已接入 `npm run check` 与 CI（并做过反向自测：故意写回 `@v4` / `@main` /
+  缺 `permissions` / `pull_request_target` 四种错法，确认四种都被拦下且退出码非零）。
 - **系统消息保留换行**（`.message.system` 加 `white-space: pre-line`）：回滚结果是**分项汇报**，
   而它在 DOM 里是纯 `textContent` —— 没有这条规则，HTML 会把换行折叠成空格，六类信息糊成一整行，
   而这个功能在界面上的全部价值恰恰就是把它们分清楚。只影响多行文案的显示，单行系统消息观感不变。
@@ -109,6 +124,12 @@
 
 ### 修复
 
+- **CI 的 OSV-Scanner 步骤指向一个已不存在的 ref**：`uses: google/osv-scanner-action@v1` ——
+  该仓库后来把 `v1` 整个删了（标签与分支都没有，只剩 `v1.7.x` / `v1.8.x` / `v1.9.x` 与 `v2.x`），
+  于是这一步在 **ref 解析阶段**就失败：它不属于"扫描发现漏洞"，而是"这一步根本没跑起来"。
+  现改用官方现行的可复用工作流（pin 到 `v2.6.0` 的 commit），并补上原先没有的 SARIF 上报
+  （Security → Code scanning）与 PR 上的增量注解。这条恰好就是 pin SHA 要防的事：
+  当初若 pin 的是 SHA，上游删 ref 对我们毫无影响。
 - **计划卡标题写出状态、与结论徽标自相矛盾**：折叠后卡片只剩标题行，而标题原先写的是「📋 计划待批准」——
   一张**已被拒绝**的计划卡于是显示成"待批准 + 不同意"。现按审批卡（「⚠ 工具审批」）、补丁卡
   （「📝 文件补丁」）同一约定改成主题词「📋 计划方案」，结论一律交给徽标（待批准 / 已批准 / 不同意 / 已过期）。
