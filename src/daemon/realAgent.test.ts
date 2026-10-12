@@ -1315,3 +1315,120 @@ describe('realAgent：图片输入（P2-4）', () => {
     }
   });
 });
+
+/**
+ * P2-8 结构化轨迹。
+ *
+ * 目的不是"多记几个字段"，而是让"哪类工具最容易失败""单会话成本"能直接聚合出来 ——
+ * 因此这里逐条钉住 ok / durationMs / errorKind 三种失败分类，以及 token 估算记录。
+ */
+describe('realAgent：结构化轨迹（P2-8）', () => {
+  const trajs = (ctx: MockCtx): any[] =>
+    ctx.events.filter((e) => e.method === EVENTS.Trajectory).map((e) => e.params);
+
+  it('工具成功 -> 记录带 tool / ok:true / durationMs', async () => {
+    const ctx = makeCtx();
+    const model = scripted([
+      { toolcall: { tool: 'read_file', input: { path: file } } },
+      { content: '完成' },
+    ]);
+    await runRealAgent(ctx, baseParams, { model });
+
+    const done = trajs(ctx).find((t) => t.tool === 'read_file' && t.ok === true);
+    expect(done).toBeTruthy();
+    expect(typeof done.durationMs).toBe('number');
+    expect(done.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('工具被 allowedTools 禁用 -> errorKind=tool-disabled（不并进"执行失败"）', async () => {
+    const ctx = makeCtx({ allowedTools: ['list_dir'] });
+    const model = scripted([
+      { toolcall: { tool: 'read_file', input: { path: file } } },
+      { content: '完成' },
+    ]);
+    await runRealAgent(ctx, baseParams, { model });
+
+    const rec = trajs(ctx).find((t) => t.errorKind === 'tool-disabled');
+    expect(rec).toBeTruthy();
+    expect(rec.tool).toBe('read_file');
+    expect(rec.ok).toBe(false);
+  });
+
+  it('命令被策略拒绝 -> errorKind=policy-denied', async () => {
+    const ctx = makeCtx();
+    const model = scripted([
+      { toolcall: { tool: 'bash_execute', input: { command: 'rm -rf /' } } },
+      { content: '完成' },
+    ]);
+    await runRealAgent(ctx, baseParams, { model, commandPolicy: { denyPatterns: [/rm\s+-rf/] } });
+
+    const rec = trajs(ctx).find((t) => t.errorKind === 'policy-denied');
+    expect(rec).toBeTruthy();
+    expect(rec.tool).toBe('bash_execute');
+    expect(rec.ok).toBe(false);
+  });
+
+  it('用户拒绝审批 -> errorKind=approval-denied（与"执行失败"分开计数）', async () => {
+    const ctx = makeCtx();
+    const model = scripted([
+      { toolcall: { tool: 'bash_execute', input: { command: 'npm run build' } } },
+      { content: '完成' },
+    ]);
+    const run = runRealAgent(ctx, baseParams, {
+      model,
+      commandRunner: async () => ({ exitCode: 0, stdout: 'ok', stderr: '' }),
+    });
+    await waitEvent(ctx, EVENTS.ApprovalRequest);
+    ctx.waiters[0].resolve(false);
+    await run;
+
+    const rec = trajs(ctx).find((t) => t.errorKind === 'approval-denied');
+    expect(rec).toBeTruthy();
+    expect(rec.ok).toBe(false);
+  });
+
+  it('每轮模型调用 -> 一条 token 估算（estimated 恒为 true，不得当账单用）', async () => {
+    const ctx = makeCtx();
+    const model = scripted([
+      { toolcall: { tool: 'read_file', input: { path: file } } },
+      { content: '完成' },
+    ]);
+    await runRealAgent(ctx, baseParams, { model });
+
+    const withTokens = trajs(ctx).filter((t) => t.tokens && typeof t.tokens.total === 'number');
+    expect(withTokens.length).toBeGreaterThanOrEqual(2); // 工具轮 + 收尾轮
+    for (const t of withTokens) {
+      expect(t.tokens.estimated).toBe(true);
+      expect(t.tokens.total).toBe((t.tokens.prompt ?? 0) + (t.tokens.completion ?? 0));
+    }
+  });
+
+  it('未带结构化字段的记录保持原形态（reasoning 记录不得被塞入 tool/ok）', async () => {
+    const ctx = makeCtx();
+    const model = scripted([{ reasoning: '思考中', content: '完成' }]);
+    await runRealAgent(ctx, baseParams, { model });
+
+    const reasoning = trajs(ctx).find((t) => t.kind === 'reasoning');
+    expect(reasoning.detail).toContain('思考中');
+    expect(reasoning.tool).toBeUndefined();
+    expect(reasoning.ok).toBeUndefined();
+    expect(reasoning.durationMs).toBeUndefined();
+  });
+
+  it('审批记录带风险等级对应的 tool 字段（与 9b 的分级配套）', async () => {
+    const ctx = makeCtx();
+    const model = scripted([
+      { toolcall: { tool: 'bash_execute', input: { command: 'npm run build' } } },
+      { content: '完成' },
+    ]);
+    const run = runRealAgent(ctx, baseParams, {
+      model,
+      commandRunner: async () => ({ exitCode: 0, stdout: 'ok', stderr: '' }),
+    });
+    await waitEvent(ctx, EVENTS.ApprovalRequest);
+    const req = trajs(ctx).find((t) => t.kind === 'approval' && t.detail.includes('approval.request'));
+    expect(req.tool).toBe('bash_execute');
+    ctx.waiters[0].resolve(true);
+    await run;
+  });
+});

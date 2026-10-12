@@ -21,8 +21,10 @@ import { sanitizeImageAttachments } from '../../shared/imageAttachment';
 import * as path from 'path';
 import { AgentCapabilities, AgentContext } from './agent';
 import { ChatContentPart, ChatMessage, ChatModel, StreamChunk, ToolDefinition } from './model';
+import { TrajectoryMeta } from '../../shared/protocol';
 import { createToolCallFenceFilter, parseToolCalls, ToolCall, ToolCallFenceFilter } from './toolcall';
 import {
+  classifyCommandRisk,
   CommandPolicy,
   CommandRunner,
   evaluateCommandPolicy,
@@ -34,6 +36,7 @@ import {
   listDirectory,
   MAX_RANGE_FILE_BYTES,
   resolveTarget,
+  riskReason,
   sliceLines,
 } from './tools';
 import { applyPatchDecision, describePatchOutcome } from './patchApply';
@@ -220,7 +223,7 @@ export async function runRealAgent(
   const caps: AgentCapabilities = ctx.capabilities ?? {};
   // P0-3：订阅会话取消，在途模型请求可被立即中断（不必等 onChunk 才察觉取消）
   const unsubscribeCancel = ctx.onCancel?.(() => abort.abort());
-  const trajectory = (kind: string, detail: string) =>
+  const trajectory = (kind: string, detail: string, meta?: TrajectoryMeta) =>
     ctx.notify(EVENTS.Trajectory, {
       sessionId: ctx.sessionId,
       // 步号优先取**会话**计数（会话内单调递增）；只有裸 context 才回落到进程内兜底
@@ -228,7 +231,29 @@ export async function runRealAgent(
       kind,
       detail,
       ts: Date.now(),
+      // P2-8：结构化字段（tool / ok / durationMs / errorKind / tokens）随记录一起下发；
+      // undefined 字段在 JSON 序列化时消失，因此不带 meta 的调用点行为与之前完全一致。
+      ...meta,
     });
+
+  /**
+   * P2-8：把一轮模型调用的 token 用量记入轨迹，供"单会话成本"聚合。
+   *
+   * 用量是**本地估算**（`estimateTokens` 的宽字符启发式）：网关并未声明 usage，
+   * 拿真实计数要解析各家流式响应里格式不同的 usage 字段（OpenAI 需 `stream_options.include_usage`，
+   * Anthropic 在 message_start/message_delta 里）。因此 `estimated` 恒为 true ——
+   * 消费方据此知道这是**量级参考、不是账单**，不会拿它去对账。
+   */
+  const recordModelUsage = (
+    sent: ChatMessage[],
+    out: { content?: string; reasoning?: string }
+  ): void => {
+    const prompt = estimateMessageTokens(sent);
+    const completion = estimateTokens(out.content ?? '') + estimateTokens(out.reasoning ?? '');
+    trajectory('system', `model 调用（约 ${prompt + completion} token）`, {
+      tokens: { prompt, completion, total: prompt + completion, estimated: true },
+    });
+  };
 
   // 图片附件的**最后一道**校验。daemon 是安全边界，不采信"上游已经校验过" —— 协议允许
   // 任意客户端接入（examples/python-daemon 就是活证据），凡是要发给模型的内容必须在真正
@@ -338,6 +363,7 @@ export async function runRealAgent(
         // 刻意不传 tools：模型无法再发起工具调用，只能作答。
         onChunk: streamChunk,
       });
+      recordModelUsage(messages, result); // P2-8：收束请求同样计入成本
       if (ctx.isCanceled() || abort.signal.aborted) return true; // 取消由调用方另行判定
       ctx.notify(EVENTS.MessageDone, { sessionId: ctx.sessionId });
       if (!(result.content ?? '').trim()) {
@@ -403,6 +429,7 @@ export async function runRealAgent(
           });
           content = result.content;
           nativeToolCalls = result.toolCalls;
+          recordModelUsage(messages, result); // P2-8：计划阶段调研的 token 也计入
         } catch (err) {
           failed = err instanceof Error ? err : new Error(String(err));
         }
@@ -457,6 +484,7 @@ export async function runRealAgent(
           });
           if (ctx.isCanceled() || abort.signal.aborted) failure = { ok: false, reason: 'canceled' };
           else {
+            recordModelUsage(messages, r); // P2-8：计划收束请求
             ctx.notify(EVENTS.MessageDone, { sessionId: ctx.sessionId });
             plan = (r.content ?? '').trim();
           }
@@ -513,7 +541,11 @@ export async function runRealAgent(
     trajectory('plan', `plan.request ${planId}`);
 
     const approved = await ctx.waitForUser('plan', planPayload);
-    trajectory('plan', `plan.respond ${approved ? 'approved' : 'rejected'}`);
+    trajectory('plan', `plan.respond ${approved ? 'approved' : 'rejected'}`, {
+      // P2-8：计划被拒与审批被拒同属"用户说 no"，用同一个分类聚合（但这里没有 tool 维度）
+      ok: approved,
+      errorKind: approved ? undefined : 'approval-denied',
+    });
 
     if (!approved) {
       // 用户不同意这份计划 => 未做任何改动就收尾。用 canceled 而不是 completed：
@@ -566,6 +598,7 @@ export async function runRealAgent(
       reasoning = result.reasoning;
       content = result.content;
       nativeToolCalls = result.toolCalls;
+      recordModelUsage(messages, result); // P2-8：主循环每轮的 token 用量
     } catch (err) {
       streamFailed = err instanceof Error ? err : new Error(String(err));
     }
@@ -653,7 +686,7 @@ async function dispatchTool(
   call: ToolCall,
   caps: AgentCapabilities,
   config: RealAgentConfig,
-  trajectory: (kind: string, detail: string) => void
+  trajectory: (kind: string, detail: string, meta?: TrajectoryMeta) => void
 ): Promise<string> {
   const { tool, input } = call;
   const sessionId = ctx.sessionId;
@@ -662,9 +695,13 @@ async function dispatchTool(
 
   // ---- 只读：read_file / list_dir / grep / glob
   if (tool === 'read_file' || tool === 'list_dir' || tool === 'grep' || tool === 'glob') {
-    if (!toolAllowed(caps, tool)) return disabledTool(ctx, sessionId, caps, tool);
+    if (!toolAllowed(caps, tool)) {
+      // P2-8：把"工具被禁用"作为**可分类的失败**记入轨迹，否则统计工具失败率时会漏掉这一类
+      trajectory('tool', `${tool} 被禁用`, { tool, ok: false, durationMs: 0, errorKind: 'tool-disabled' });
+      return disabledTool(ctx, sessionId, caps, tool);
+    }
     ctx.notify(EVENTS.ToolStarted, { sessionId, tool, input });
-    trajectory('tool', `${tool} ${JSON.stringify(input)}`);
+    trajectory('tool', `${tool} ${JSON.stringify(input)}`, { tool });
     try {
       let output: string;
       if (tool === 'list_dir') {
@@ -708,19 +745,28 @@ async function dispatchTool(
         throw new Error(`未知只读工具：${tool}`);
       }
       ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: true, output, durationMs: Date.now() - start });
-      trajectory('tool', `${tool} 完成`);
+      trajectory('tool', `${tool} 完成`, { tool, ok: true, durationMs: Date.now() - start });
       return output;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: false, output: msg, durationMs: Date.now() - start });
-      trajectory('tool', `${tool} 失败：${msg}`);
+      trajectory('tool', `${tool} 失败：${msg}`, {
+        tool,
+        ok: false,
+        durationMs: Date.now() - start,
+        errorKind: 'exec-failed',
+      });
       return `${tool} 失败：${msg}`;
     }
   }
 
   // ---- 修改：write_file / apply_patch（经 Diff 审查）
   if (tool === 'write_file' || tool === 'apply_patch') {
-    if (!toolAllowed(caps, tool)) return disabledTool(ctx, sessionId, caps, tool);
+    if (!toolAllowed(caps, tool)) {
+      // P2-8：把"工具被禁用"作为**可分类的失败**记入轨迹，否则统计工具失败率时会漏掉这一类
+      trajectory('tool', `${tool} 被禁用`, { tool, ok: false, durationMs: 0, errorKind: 'tool-disabled' });
+      return disabledTool(ctx, sessionId, caps, tool);
+    }
     const target = String(input.path ?? '');
     let newContent: string;
     try {
@@ -748,10 +794,15 @@ async function dispatchTool(
         description: `Agent 提议${tool === 'write_file' ? '写入' : '修改'} ${path.basename(resolved)}`,
       };
       ctx.notify(EVENTS.FilePatchPending, patchPayload);
-      trajectory('patch', `file.patch.pending ${resolved}`);
+      trajectory('patch', `file.patch.pending ${resolved}`, { tool, durationMs: Date.now() - start });
 
       const accepted = await ctx.waitForUser('patch', patchPayload);
-      trajectory('patch', `file.patch.respond ${accepted ? 'accept' : 'reject'}`);
+      trajectory('patch', `file.patch.respond ${accepted ? 'accept' : 'reject'}`, {
+        tool,
+        ok: accepted,
+        durationMs: Date.now() - start,
+        errorKind: accepted ? undefined : 'approval-denied',
+      });
 
       // P0-1 / P0-2 / P2 统一落地裁决（脏文档走编辑器、普通文件走乐观锁）
       const result = accepted
@@ -775,10 +826,18 @@ async function dispatchTool(
 
   // ---- 高危命令：bash_execute（审批 + 策略门控）
   if (tool === 'bash_execute' || tool === 'bash' || tool === 'run_command') {
-    if (!toolAllowed(caps, 'bash_execute')) return disabledTool(ctx, sessionId, caps, 'bash_execute');
+    if (!toolAllowed(caps, 'bash_execute')) {
+      trajectory('tool', 'bash_execute 被禁用', {
+        tool: 'bash_execute',
+        ok: false,
+        durationMs: 0,
+        errorKind: 'tool-disabled',
+      });
+      return disabledTool(ctx, sessionId, caps, 'bash_execute');
+    }
     const command = String(input.command ?? '');
     ctx.notify(EVENTS.ToolStarted, { sessionId, tool: 'bash_execute', input });
-    trajectory('tool', `bash_execute ${JSON.stringify(input)}`);
+    trajectory('tool', `bash_execute ${JSON.stringify(input)}`, { tool: 'bash_execute' });
 
     const decision = evaluateCommandPolicy(command, config.commandPolicy ?? {});
     if (!decision.allowed) {
@@ -789,18 +848,26 @@ async function dispatchTool(
         output: `命令被策略拒绝：${decision.reason}`,
         durationMs: Date.now() - start,
       });
-      trajectory('tool', `bash_execute 策略拒绝：${decision.reason}`);
+      trajectory('tool', `bash_execute 策略拒绝：${decision.reason}`, {
+        tool: 'bash_execute',
+        ok: false,
+        durationMs: Date.now() - start,
+        errorKind: 'policy-denied',
+      });
       return `命令被策略拒绝：${decision.reason}`;
     }
 
+    // P2-9：风险等级按命令内容分级（删除/破坏 = high；写/网络 = medium；只读 = low）。
+    // 分级只影响 UI 呈现强度，**不改变"仍要审批"这一事实** —— 免审批只由信任白名单决定。
+    const commandRisk = classifyCommandRisk(command);
     const approvalId = `approval_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
     const approvalParams: EventApprovalRequest = {
       sessionId,
       approvalId,
       tool: 'bash_execute',
       input: { command },
-      risk: 'high',
-      reason: `高危命令需要人工审批：${command.slice(0, 200)}`,
+      risk: commandRisk,
+      reason: riskReason(commandRisk, command),
       // expiresAt 由 daemon 按 approvalTtlMs 统一盖戳（见 server.ts notify）
     };
     // B1 信任记忆：命中白名单 -> 免审批直接执行（不发起 approval.request）
@@ -814,14 +881,24 @@ async function dispatchTool(
         durationMs: run.durationMs,
         trusted: true,
       });
-      trajectory('tool', `bash_execute 命中信任规则，免审批（${run.ok ? 'ok' : '失败'}）`);
+      trajectory('tool', `bash_execute 命中信任规则，免审批（${run.ok ? 'ok' : '失败'}）`, {
+        tool: 'bash_execute',
+        ok: run.ok,
+        durationMs: run.durationMs,
+        errorKind: run.ok ? undefined : 'exec-failed',
+      });
       return run.output;
     }
     ctx.notify(EVENTS.ApprovalRequest, approvalParams);
-    trajectory('approval', 'approval.request bash_execute');
+    trajectory('approval', 'approval.request bash_execute', { tool: 'bash_execute' });
 
     const approved = await ctx.waitForUser('approval', approvalParams);
-    trajectory('approval', `approval.respond ${approved ? 'approved' : 'rejected'}`);
+    trajectory('approval', `approval.respond ${approved ? 'approved' : 'rejected'}`, {
+      tool: 'bash_execute',
+      ok: approved,
+      durationMs: Date.now() - start,
+      errorKind: approved ? undefined : 'approval-denied',
+    });
     if (!approved) {
       ctx.notify(EVENTS.ToolExecuted, {
         sessionId,
@@ -835,7 +912,12 @@ async function dispatchTool(
 
     const run = await executeCommand(command, ctx.workspaceRoot, { timeoutMs: 30_000, runner: config.commandRunner, sandbox: config.sandbox });
     ctx.notify(EVENTS.ToolExecuted, { sessionId, tool: 'bash_execute', ok: run.ok, output: run.output, durationMs: run.durationMs });
-    trajectory('tool', 'bash_execute 完成');
+    trajectory('tool', 'bash_execute 完成', {
+      tool: 'bash_execute',
+      ok: run.ok,
+      durationMs: run.durationMs,
+      errorKind: run.ok ? undefined : 'exec-failed',
+    });
     return run.output;
   }
 

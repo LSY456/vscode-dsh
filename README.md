@@ -104,7 +104,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test                    # 单元测试（vitest，636 用例）
+npm test                    # 单元测试（vitest，746 用例）
 npm run smoke               # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemon 跑通同一份协议
                             #（缺 Python 3 时优雅跳过；`npm run smoke:protocol -- --require` 则判失败）
@@ -255,9 +255,13 @@ vscode-dsh/
 - **路径护栏（canonical）**：patch / `file.read` / 附件读取目标以 `fs.realpathSync` 解析后的
   **规范路径**做包含判断，拒绝 `..` 逃逸、符号链接/目录联结（junction）逃逸、NUL 与 Windows ADS。
 - **审批/补丁/计划强校验**：id 归属校验（`-32013`）+ 60s 过期（`-32010`，UI 倒计时置灰）。
-- **命令默认拒绝**：`bash_execute` 在内置高危拒绝规则（`rm -rf`、fork bomb、格式化、`curl|sh`、
-  shutdown 等）之外，还需人工审批；普通命令亦须审批。
-- **密钥脱敏 + 权限**：轨迹持久化前统一脱敏密钥 / Token / 密码词面；轨迹目录 `0700`、文件 `0600`。
+- **命令默认拒绝 + 审批风险分级**：`bash_execute` 在内置高危拒绝规则（`rm -rf`、fork bomb、格式化、
+  `curl|sh`、shutdown 等）之外，还需人工审批；普通命令亦须审批。审批卡不再一律显示"高危"——
+  按命令内容分**删除/破坏 → 高、写文件/网络/未识别 → 中、只读 → 低**三档，复合命令（`&&`/`||`/`;`/`|`）
+  取各片段**最高级**，未识别命令按**中**兜底（把未知当低危，等于让没见过的写法自动获得更弱的提示）。
+  **低危不等于免审批**：等级只影响界面提示强度，免审批仍然只由信任白名单决定。
+- **密钥脱敏 + 权限**：轨迹持久化前统一脱敏密钥 / Token / 密码词面，且**遍历记录里所有字符串字段**
+  （每新增一个字段都可能是一条新的明文旁路）；轨迹目录 `0700`、文件 `0600`。
 - **余额只在官方端点取**：账户余额（`GET /user/balance`）只在 `api.deepseek.com` 上请求 —— 它是
   DeepSeek 的**账户级**接口，用户自配的第三方网关未必有它，也不该为"锦上添花的展示"把 API Key
   送到第三方去。非官方端点直接视为「不适用」（界面隐藏该 chip），不产生必然的 404。
@@ -267,14 +271,17 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，636 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，746 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+  **daemon 安全边界纯函数**（握手鉴权 / 浏览器 Origin 拒绝 / 能力收敛 / 挂起项错误码映射 / `allowedDirs` 再收窄）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
-  工具沙箱（护栏/策略/默认拒绝/命令沙箱）、轨迹持久化（脱敏/缓冲/轮转）、真实 Agent 循环、
+  工具沙箱（护栏/策略/默认拒绝/命令沙箱）与**命令风险分级**（档位判定顺序、复合命令取最高级）、
+  轨迹持久化（脱敏/缓冲/轮转/**结构化字段**/旧记录向后兼容）、真实 Agent 循环、
   会话级回滚（快照/写入指纹/幂等与防覆盖）、计划模式（只读工具集/挂起/批准与拒绝分支）、
   Webview Markdown 渲染与净化（XSS 安全）、以及面板 DOM 契约（jsdom 载入真实 `media/webview.html`）。
 - **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
   `file.read` 越界拒绝、真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘）、
-  计划模式全流程（出方案 → 反复挂起被拒 → 拒绝不改盘 → 批准后落盘），
+  计划模式全流程（出方案 → 反复挂起被拒 → 拒绝不改盘 → 批准后落盘）、
+  结构化轨迹回读（工具 / 成功标志 / 耗时 / token 估算）与审批风险等级（只读命令判为低危、文案随等级变化），
   以及真实 `bash_execute`（审批 → spawn 执行 → cwd 约束校验）。
 - **集成测试**：`npm run test:integration` 用 `@vscode/test-electron` 启动真实 VSCode Extension Host，
   覆盖扩展宿主层 ↔ daemon 的完整闭环（T1 激活连接 / T2 补丁 / T3 审批 / T4 路径护栏 / T5 编辑后应用）。
@@ -297,13 +304,16 @@ vscode-dsh/
   webview CSP），模块内联不改变这一点；测试与静态预览仍直接 `import` 入口跑**真实代码**（不是 mock）。
   可变状态集中在一个 `state` 对象里 —— 闭包里的 `let` 无法跨模块共享，各模块各自 `let` 一份会静默分叉。
 - **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
-- **打包**：`npm run package` 产出约 248KB 的 VSIX（`dist/`，38 文件）。
+- **打包**：`npm run package` 产出约 300KB 的 VSIX（`dist/`，35 文件）。
 
 ## 迹线（Trajectory）数据映射
 
 daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每条含
-`step / kind(reasoning|message|tool|patch|approval|system) / detail / ts`；UI 渲染为可折叠的
-"执行迹线"面板，用于审计、回放与失败定位。详见 [PROTOCOL.md §6](PROTOCOL.md#6-迹线trajectory数据映射)。
+`step / kind(reasoning|message|tool|patch|approval|plan|system) / detail / ts`，并可带**可选结构化字段**
+（`tool` / `ok` / `durationMs` / `errorKind` / `tokens`）—— 为"哪类工具最容易失败""单会话 token 成本"
+这类统计铺路，旧记录缺这些字段照常解析；UI 渲染为可折叠的"执行迹线"面板（行尾显示失败分类 / 耗时 /
+`≈N tok` 徽标），用于审计、回放与失败定位。其中 `tokens` 是 daemon 侧的**本地估算**（`estimated: true`），
+**不是账单**。详见 [PROTOCOL.md §6](PROTOCOL.md#6-迹线trajectory数据映射)。
 
 ## 接入自己的 Agent 内核
 
@@ -338,7 +348,8 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
 - [x] **P0 一致性加固**：脏文档一致性（未保存缓冲区优先读取 + 补丁改走编辑器，避免覆盖用户编辑）、
       补丁乐观并发校验（防静默覆盖并发修改）、取消可中断在途模型请求 + 模型请求空闲超时、
       能力/运行时配置与脏文档覆盖层下沉到**连接**作用域（多窗口复用 daemon 互不污染）
-- [x] **P0 工程质量**：vitest 单元测试（615 用例）、GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
+- [x] **P0 工程质量**：vitest 单元测试（覆盖协议守卫 / 路径护栏 / 状态机 / Agent / 模型 / 工具 / 轨迹 / 面板契约）、
+      GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
 - [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
       断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
       多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
@@ -393,7 +404,16 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
   不发 `session.started`；`capabilities.image` 供第三方客户端判断。缩略图留面板本地（回显只带 `clientId`），
   发送后等回显才清暂存（被拒时那张图还在，可重发）
 
+- [x] **安全边界单测 + 审批风险分级 + 结构化轨迹（P1-17 部分 / P2-9 / P2-8）**：`server.ts` 的握手鉴权、
+      Origin 拒绝、能力收敛、路径护栏、挂起项错误码映射抽为纯函数（`src/daemon/serverGuards.ts`）并补 27 例
+      单测 —— 此前这段是**安全边界**却只靠冒烟间接覆盖，能证明"通"、证不了"穷尽"；审批风险不再一律"高危"，
+      按命令内容分高 / 中 / 低三档（复合命令取最高级、未识别按中兜底、**低危不等于免审批**）；
+      轨迹记录增加结构化字段（工具 / 成功标志 / 耗时 / 错误分类 / token 估算），脱敏覆盖所有字符串字段，
+      旧记录向后兼容（`.dsh/trajectory/*.jsonl` 是已落盘的审计数据）
+
 ### 待办
+- [ ] P1-17（余下）：`wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger` 五个文件仍无单测
+      （本批只补了 `server.ts` 里**安全边界**那一段；`server.ts` 与 `daemonManager.ts` 此前已有单测）
 - [ ] P4a：Remote-SSH / WSL / Containers 场景实测（核心链路已由 CI Linux 拓扑覆盖，待真实环境确认 drvfs 路径 / remote server 环境 / 容器网络等边界）
 - [ ] P4b：跨主机 TLS + 鉴权升级（仅当 daemon 需监听非 127.0.0.1 供跨机访问时；标准 Remote 场景 extension 与 daemon 同在 remote 走 localhost，不需要）
 

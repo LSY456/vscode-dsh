@@ -43,12 +43,20 @@ import {
   SessionRollbackResult,
   WorkspaceSyncDirtyParams,
 } from '../../shared/protocol';
-import { AgentCapabilities, AgentContext, runFakeAgent } from './agent';
+import { AgentContext, runFakeAgent } from './agent';
 import { DirtyOverlay } from './dirtyOverlay';
 import { ChatModel, createKeywordFakeModel, createModel as createProviderModel, withRetry } from './model';
-import { assertPathInside } from './paths';
 import { RealAgentConfig, runRealAgent } from './realAgent';
-import { DEFAULT_APPROVAL_TTL_MS, clampApprovalTtlMs, Session, SessionManager } from './sessionManager';
+import { DEFAULT_APPROVAL_TTL_MS, Session, SessionManager } from './sessionManager';
+import {
+  defaultCapabilities,
+  HandshakeInfo,
+  normalizeDeclaration,
+  NormalizedCapabilities,
+  pendingRespondError,
+  resolvePathWithin,
+  verifyHandshake,
+} from './serverGuards';
 import { SessionSnapshotStore } from './sessionSnapshot';
 import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';
@@ -107,7 +115,7 @@ export interface RuntimeConfig {
  * 跨窗口静默污染。现改为每个 WebSocket 连接各持一份，互不影响。
  */
 export interface ConnectionRuntime {
-  capabilities: Required<AgentCapabilities> & { maxConcurrency: number };
+  capabilities: NormalizedCapabilities;
   approvalTtlMs: number;
   runtime: RuntimeConfig;
 }
@@ -138,7 +146,7 @@ export function resolveAgentMode(rt: RuntimeConfig): 'mock' | 'real' {
 /** 连接级运行状态初值：以 CLI 参数为缺省，等待该连接的 initialize 覆盖。 */
 export function createConnectionRuntime(opts: DaemonServerOptions): ConnectionRuntime {
   return {
-    capabilities: { allowedTools: [], allowedDirs: [], maxConcurrency: 0 },
+    capabilities: defaultCapabilities(),
     approvalTtlMs: DEFAULT_APPROVAL_TTL_MS,
     runtime: {
       apiKey: opts.apiKey ?? '',
@@ -199,15 +207,13 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
     server,
     host: '127.0.0.1',
     verifyClient: (info: { origin: string; req: http.IncomingMessage }) => {
-      // 1) Bearer token 校验
-      const auth = info.req.headers.authorization ?? '';
-      const okToken = auth === `Bearer ${opts.token}`;
-      // 2) 浏览器 Origin 拒绝（扩展宿主不携带 Origin）
-      const origin = info.origin ?? info.req.headers.origin;
-      if (origin) {
-        return false;
-      }
-      return okToken;
+      // 判定本身抽到 serverGuards.verifyHandshake（P1-17）：那里能离线穷举 token/Origin 边界，
+      // 这里只负责把 ws 给的两处来源摘成 HandshakeInfo（origin 缺失时回落请求头）。
+      const hs: HandshakeInfo = {
+        authorization: info.req.headers.authorization,
+        origin: info.origin ?? info.req.headers.origin,
+      };
+      return verifyHandshake(hs, opts.token);
     },
   });
 
@@ -268,28 +274,11 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
    * capabilities 为连接级（P0-4），因此必须由调用方传入，不可读实例状态。
    */
   function resolvePath(
-    caps: Required<AgentCapabilities> & { maxConcurrency: number },
+    caps: NormalizedCapabilities,
     target: string
   ): { resolved: string } | { error: string } {
-    try {
-      const resolved = assertPathInside(opts.workspaceRoot, target);
-      if (caps.allowedDirs.length > 0) {
-        const ok = caps.allowedDirs.some((d) => {
-          try {
-            assertPathInside(d, resolved);
-            return true;
-          } catch {
-            return false;
-          }
-        });
-        if (!ok) {
-          return { error: `路径越界：${target} 不在 allowedDirs ${caps.allowedDirs.join(', ')} 内` };
-        }
-      }
-      return { resolved };
-    } catch (e) {
-      return { error: e instanceof Error ? e.message : String(e) };
-    }
+    // 双重约束（工作区 + allowedDirs）抽到 serverGuards.resolvePathWithin（P1-17），此处只注入本实例的工作区根
+    return resolvePathWithin(opts.workspaceRoot, caps.allowedDirs, target);
   }
 
   /**
@@ -334,16 +323,12 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             sendError(conn.ws, req.id, ERROR_CODES.InvalidParams, 'initialize 需要 workspaceRoot');
             return;
           }
-          // 能力分级：**本连接**声明、本连接执行（P0-4：不再污染其他窗口/连接）
-          conn.capabilities = {
-            allowedTools: p.capabilities?.allowedTools ?? [],
-            allowedDirs: p.capabilities?.allowedDirs ?? [],
-            maxConcurrency: p.capabilities?.maxConcurrency ?? 0,
-          };
-          // 挂起项超时（审批 / 补丁）：越界或非法值收敛到 [10s, 60min]
-          if (p.capabilities?.approvalTtlMs !== undefined) {
-            conn.approvalTtlMs = clampApprovalTtlMs(p.capabilities.approvalTtlMs);
-          }
+          // 能力分级：**本连接**声明、本连接执行（P0-4：不再污染其他窗口/连接）。
+          // 收敛（字段类型校验 + TTL 钳制）在 serverGuards.normalizeDeclaration，见 P1-17。
+          const decl = normalizeDeclaration(p.capabilities);
+          conn.capabilities = decl.capabilities;
+          // 挂起项超时（审批 / 计划 / 补丁）：仅客户端**显式声明**时才覆盖，否则保持现状
+          if (decl.approvalTtlMs !== null) conn.approvalTtlMs = decl.approvalTtlMs;
           // 模型配置合并（CLI 缺省 < initialize 顶层 apiKey/preset < initialize.model）
           const rt = conn.runtime;
           if (p.apiKey) rt.apiKey = p.apiKey;
@@ -588,12 +573,10 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             }
           }
           const r = session.respondApproval(p?.approvalId ?? '', !!p?.approved);
-          if (r === 'not_found') {
-            sendError(conn.ws, req.id, ERROR_CODES.NotFound, `审批不存在或已处理: ${p?.approvalId}`);
-            return;
-          }
-          if (r === 'expired') {
-            sendError(conn.ws, req.id, ERROR_CODES.Expired, `审批已过期: ${p?.approvalId}`);
+          // 挂起项失败码映射集中在 serverGuards.pendingRespondError（P1-17）
+          const approvalErr = pendingRespondError('approval', r, p?.approvalId ?? '');
+          if (approvalErr) {
+            sendError(conn.ws, req.id, approvalErr.code, approvalErr.message);
             return;
           }
           sendResult(conn.ws, req.id, { ok: true });
@@ -607,12 +590,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             return;
           }
           const r = session.respondPlan(p?.planId ?? '', !!p?.approved, p?.note);
-          if (r === 'not_found') {
-            sendError(conn.ws, req.id, ERROR_CODES.NotFound, `计划不存在或已处理: ${p?.planId}`);
-            return;
-          }
-          if (r === 'expired') {
-            sendError(conn.ws, req.id, ERROR_CODES.Expired, `计划已过期: ${p?.planId}`);
+          const planErr = pendingRespondError('plan', r, p?.planId ?? '');
+          if (planErr) {
+            sendError(conn.ws, req.id, planErr.code, planErr.message);
             return;
           }
           sendResult(conn.ws, req.id, { ok: true });
@@ -650,12 +630,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           }
           // P0-1：applyInEditor = 客户端已把改动写进编辑器缓冲区，agent 侧据此跳过落盘
           const r = session.respondPatch(p?.patchId ?? '', !!p?.accept, p?.content, !!p?.applyInEditor);
-          if (r === 'not_found') {
-            sendError(conn.ws, req.id, ERROR_CODES.NotFound, `补丁不存在或已处理: ${p?.patchId}`);
-            return;
-          }
-          if (r === 'expired') {
-            sendError(conn.ws, req.id, ERROR_CODES.Expired, `补丁已过期: ${p?.patchId}`);
+          const patchErr = pendingRespondError('patch', r, p?.patchId ?? '');
+          if (patchErr) {
+            sendError(conn.ws, req.id, patchErr.code, patchErr.message);
             return;
           }
           sendResult(conn.ws, req.id, { ok: true });

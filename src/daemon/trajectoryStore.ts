@@ -37,7 +37,16 @@ export function redactSecrets(text: string): string {
 
 function redactRecord(record: EventTrajectory): EventTrajectory {
   const copy: EventTrajectory = { ...record };
-  if (typeof copy.detail === 'string') copy.detail = redactSecrets(copy.detail);
+  // P2-8：结构化字段（tool / detail / 未来新增项）都可能引用命令原文、路径或工具输出。
+  // 此前只对 `detail` 脱敏 —— 加字段时极易漏掉一处，而漏一处的后果是把密钥写进审计日志。
+  // 因此改为对**所有字符串值**统一脱敏：新增字段自动被覆盖，不需要记得来改这里。
+  for (const key of Object.keys(copy) as (keyof EventTrajectory)[]) {
+    const value = copy[key];
+    if (typeof value === 'string') {
+      // 经 unknown 中转：EventTrajectory 无索引签名，直接断言到 Record 会被 TS 判为"类型不相干"
+      (copy as unknown as Record<string, unknown>)[key] = redactSecrets(value);
+    }
+  }
   return copy;
 }
 

@@ -204,7 +204,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | P1-14 | `resetTurn()` 不重置 `answerEl/answerBody/answerBatcher`（`media/webview.js:414-421`），而 `clearMessages()` 才做（L816-844） | **窗口期**：若上一轮既没收到 `message.done` 也没收到 `session.ended`（daemon 流式中崩溃、事件丢失），下一轮 `ensureAnswer()` early-return（L270），新回答续写进旧气泡 | `resetTurn()` 首行调用 `finishAssistant()`（幂等），或在 `user.message` 分支统一走 `finishAssistant()` |
 | P1-15 | `.dsh` 各子目录创建权限不统一：`trajectory` 0700（`trajectoryStore.ts:76`）、`logs` 0700（`logFile.ts:52`）、`trust.json` 直接写（`trust.ts:109-117`）、`history.json` 0700（`history.json` 写入路径 `sessionHistory.ts:44`） | `.dsh` 目录本身可能以默认 umask 创建，权限语义不一致 | 统一 `ensureDshDir()` 以 0700 创建 `.dsh` 及各子目录 |
 | P1-16 | `getWorkspaceRoot()` 只取 `workspaceFolders[0]`（`daemonManager.ts:480-486`） | 多根工作区语义模糊，`.dsh/` 落在第一个文件夹 | 显式声明"仅支持单根"，或按文件夹起独立 daemon 与独立端口文件 |
-| P1-17 | 单测覆盖空白：`server.ts`、`daemonManager.ts`、`wsClient.ts`、`diffProvider.ts`、`contextCapture.ts`、`extension.ts`、`logger.ts` 均无单测 | **`server.ts` 是安全边界（握手/Origin/能力分级/错误码映射）却只靠 smoke 间接覆盖**，是最危险的空白 | 抽出纯函数（`verifyClient` 判定、能力收敛、路径解析、错误码映射）并补单测；`wsClient` 可用本地 `ws` server 做真实连接测试 |
+| P1-17 | 单测覆盖空白：原判 7 个文件（`server.ts`、`daemonManager.ts`、`wsClient.ts`、`diffProvider.ts`、`contextCapture.ts`、`extension.ts`、`logger.ts`）均无单测。**【2026-10-12 追记：其中 `server.ts` 与 `daemonManager.ts` 现已有单测（`server.test.ts` 覆盖连接级隔离与 `resolveAgentDecision`、`daemonManager.test.ts` 覆盖信任/无工作区门禁与命令行解析），**实际仍无单测的是 `wsClient.ts`、`diffProvider.ts`、`contextCapture.ts`、`extension.ts`、`logger.ts` 五个**】** | **`server.ts` 是安全边界（握手/Origin/能力分级/错误码映射）却只靠 smoke 间接覆盖**，是最危险的空白。**【2026-10-12 追记：`server.ts` 的**安全边界部分**已抽为纯函数并单测（`serverGuards.ts`，见本节末尾「daemon 安全边界与可观测性追记」）；本行**未整行关闭**，剩下的五个文件仍无单测】** | 抽出纯函数（`verifyHandshake` 判定、能力收敛、路径护栏、挂起项错误码映射）并补单测 **【已做】**；`wsClient` 可用本地 `ws` server 做真实连接测试 |
 | P1-18 | `agent.test.ts` 依赖真实 `sleep`（`agent.ts:87` 等），13 个用例耗时 **14.3s**，占全套 27.6s 的一半 | 测试套慢 → 反馈慢 | 注入可控时钟/假定时器（vitest `vi.useFakeTimers`），把 `sleep` 变为可注入依赖 |
 
 ### P2 —— 体验 / 打磨 / 战略
@@ -218,8 +218,8 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | P2-5 | ~~**无 MCP 客户端支持**~~ | 原建议：现代编码 Agent（Cline/Roo/Continue/Copilot）普遍支持 MCP Server，生态无法复用是产品短板，建议把 MCP 客户端放在 daemon 侧。**【2026-10-01 追记：已决策不接入 MCP，理由见本节末尾「MCP 追记」】** |
 | P2-6 | ~~无会话级事务回滚（只有单补丁 accept/reject）~~ | 原建议：会话开始时建立影子快照（git stash / 复制到 `.dsh/snapshots/`），提供"回滚本次会话的全部改动"。**【2026-10-08 追记：已实现，口径见本节末尾「会话回滚追记」】** |
 | P2-7 | ~~无 plan 模式~~ / 无 subagent / 无显式上下文压缩策略 | 原建议：至少补 plan（先出方案、批准后执行）——与现有审批基础设施天然契合。**【2026-10-09 追记：plan 已实现，口径见本节末尾「Plan 模式追记」；subagent 与显式上下文压缩仍未做】** |
-| P2-8 | 可观测性弱：`trajectory` 只有文本 `detail`，无结构化字段（工具、耗时、错误分类、token 用量） | 轨迹记录改为结构化 schema，便于统计"哪类工具最容易失败""单会话 token 成本" |
-| P2-9 | 审批风险等级硬编码 `risk: 'high'`（`realAgent.ts:395`） | 按命令类型分级（读/写/网络/删除），让 UI 能差异化呈现 |
+| P2-8 | ~~可观测性弱：`trajectory` 只有文本 `detail`，无结构化字段（工具、耗时、错误分类、token 用量）~~ | 原判风险：无法统计"哪类工具最容易失败""单会话 token 成本"。**【2026-10-12 追记：已实现，口径见本节末尾「daemon 安全边界与可观测性追记」。注意 token 是**本地估算**（`estimated: true`），不是网关返回的真实用量 —— 拿它对账是错的】** | ~~轨迹记录改为结构化 schema~~ **【已实施：`EventTrajectory` 增加可选 `tool` / `ok` / `durationMs` / `errorKind` / `tokens`，脱敏覆盖所有字符串字段，UI 行尾渲染紧凑徽标】** |
+| P2-9 | ~~审批风险等级硬编码 `risk: 'high'`（`realAgent.ts:395`）~~ | 原判风险：所有审批看起来一样重，用户无法据此分配注意力。**【2026-10-12 追记：已实现，分级只在 daemon 侧按命令内容推导；**低危不等于免审批**，免审批仍只由信任白名单决定】** | ~~按命令类型分级（读/写/网络/删除）~~ **【已实施：`classifyCommandRisk(command)`，删除/破坏 → `high`，写/网络/未知 → `medium`，只读 → `low`；复合命令取各片段最高级；`reason` 文案随等级变化】** |
 | P2-10 | `dist/` 里只有 `vscode-dsh-0.2.1.vsix`（约 390KB，Aug 23），落后于 0.4.0 源码 | 重新打包并清理陈旧产物 **【2026-10-01 追记：已随发行自然解决，`dist/` 现为 0.7.0 / 0.8.0】** |
 
 #### MCP 追记（2026-10-01）
@@ -357,6 +357,24 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 
 **没做**：仍**无类型检查**。`tsconfig.json` 只 include `src/**/*.ts`、`shared/**/*.ts`，拆出来的 `.js` 模块与拆之前的 `media/webview.js` 一样在 `tsc` 之外 —— 拆分改善的是**可导航性**，不是类型安全。要动就得上 P1-10 的 `tsconfig.web.json`（`allowJs + checkJs`），不该在这一批里顺手引入。
 
+#### daemon 安全边界与可观测性追记（2026-10-12）
+
+**已实现：`server.ts` 的安全边界抽为纯函数 + 单测；审批风险不再硬编码 `risk:'high'`；轨迹记录结构化。** 三件事同批做，因为它们是同一条判据的三次应用 —— **判定与 IO 分离**。
+
+1. **抽的是"判定"，不是"函数"。** 那几段逻辑（握手鉴权、能力收敛、路径护栏、挂起项错误码映射）原先与 socket / session 缠在 `startDaemonServer()` 里，端到端冒烟能证明"这条路径通"，证不了"穷尽"。抽法是切开判定与副作用：`verifyHandshake({ authorization, origin }, token)` 只吃两个头字段与 token、**不碰 socket**；`normalizeDeclaration()` 只吃声明体；`resolvePathWithin()` 只吃（工作区根、允许目录、目标）；`pendingRespondError()` 只吃（挂起项类型、结果）。发错误、改连接状态这些副作用全部留在 `server.ts`。边界即 `src/daemon/serverGuards.ts`：它只引类型与纯函数（`shared/protocol` 的 `ERROR_CODES`、`paths` 的 `assertPathInside`、`sessionManager` 的 `clampApprovalTtlMs`），**不 import `ws`、不碰 `vscode`、不持有任何连接状态**。
+   > 拆完的收益是能**穷举**：27 个用例里包含 `' '` 这种"看着像空"的 Origin、`bearer` 小写、尾随/双空格、多一个少一个字符、`token` 为空——这些恰是冒烟的盲区（冒烟只能挑一两条写）。另外要说清：**`server.ts` 并非完全没有单测**，`server.test.ts` 早就覆盖了连接级隔离（P0-4）与 `resolveAgentDecision()`；本次补的是此前唯一没有单测的**安全边界**这一段。
+2. **两处"宽容解析"被显式挡在门外。** token 比对坚持 `auth === 'Bearer ' + token`（不 trim、不忽略大小写、不收别的 scheme）；Origin 坚持"非空即拒"。**任何宽容化都把鉴权从"精确匹配"放大成"可探测面"**——攻击者只要拿到"差一点点"的反馈，就能二分出正确 token。测试里这几条是专为锁住该语义写的，不是凑数的重复用例。
+3. **`approvalTtlMs` "未声明" ≠ "用缺省覆盖"。** `normalizeDeclaration()` 返回 `null` 表示客户端**没声明**，调用方**保持现状**；若这里回落到缺省值，"没声明"与"声明成缺省"就被压成同一件事，而后者的语义是"客户端主动要求改成缺省"。同一条纪律在能力收敛里也成立：`allowedTools` 缺省是**空数组 = 不额外限制**，而不是"拒绝所有"。
+4. **路径护栏是双重约束，且失败不抛。** 工作区边界（挡 `/etc`）与客户端 `allowedDirs`（主动再收窄）缺一不可；`resolvePathWithin()` 失败返回 `{ error }` 而**不是抛异常**——抛出去会被外层 catch 统一降成 `InternalError`，于是"越界"这个精确原因在 UI 上就消失了。
+5. **风险分级的判定顺序本身就是语义。** 依次是 `high → medium → low → 兜底 medium`：`high` 先判，是防 `rm -rf` 被"洗白"（`rm -rf build/` 同时命中删除与常见命令）；`medium` 早于 `low`，使 `cat x > y` 归 medium（`cat` 只读，但 `>` 会截断目标文件）。**未知命令按 `medium` 兜底**——把未知当 `low`，等于让没见过的写法自动获得更弱的提示，而这个方向正好是危险的那一侧。复合命令（`&&` / `||` / `;` / `|`）**取各片段最高级**：取首片段是最危险的误判（`ls && rm -rf x` 会被判成 low）。
+   > **`low` 不等于免审批。** 等级只影响 UI 呈现强度（文案与徽标），免审批仍然**只**由信任白名单（`.dsh/trust.json`）决定。把两者混同，会让"更了解风险"顺手变成"降低门槛"。
+6. **结构化轨迹的硬要求是向后兼容。** `.dsh/trajectory/*.jsonl` 是**已落盘的审计数据**，新增字段（`tool` / `ok` / `durationMs` / `errorKind` / `tokens`，全部可选）不得让历史记录变得不可解析——单测里专门有一条"旧记录（不带任何结构化字段）原样回读"。
+7. **脱敏改为遍历所有字符串字段。** 此前只对 `detail` 脱敏，于是**每加一个字段就多一条明文旁路**（这次的 `tool` 字段本身就足以塞进 `sk-…`）。现遍历记录里的每个 string 值，并在测试里**故意把密钥塞进 `tool` 字段**验证。
+8. **token 用量是本地估算，不是账单。** `estimateTokens()` 是 CJK 启发式（daemon 手里没有 tokenizer），故 `estimated: true` 恒为真；UI 徽标以 `≈` 前缀区分"量级参考"。**拿它对账是错的**——这句话写进了 `PROTOCOL.md`，而不只是留在注释里。
+9. **顺带修掉两个真实缺陷。**（a）mock agent 的迹线步号原先只认模块级计数器，多会话并发时步号会互相穿插；现与 real agent 同源走 `ctx.nextStep?.()`。（b）迹线行尾徽标在 **340px 窄栏**下被长 `detail` 挤出容器——**这个 jsdom 测不出来**（它不做布局）。首次修复给正文加 `flex: 1 1 auto`，徽标是留住了，正文却被压成一字一行（更糟）。最终方案是 `.traj-line { flex-wrap: wrap }` + 正文 `flex: 0 1 auto` + 徽标 `align-self: flex-start`，靠无头 Chrome 截图迭代三轮确认，随后把结论固化成 DOM↔CSS 契约断言。
+
+**没做**：**P1-17 本行未整行关闭。** 仍需单测的是 `wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger` **五个**文件（`server.ts` 与 `daemonManager.ts` 此前已有单测，本次补的是 `server.ts` 里**唯一没有单测的**安全边界那一段）；`wsClient` 用本地 ws server 做真实连接测试也仍在待办。另：`normalizeCapabilities` 只负责"客户端声明什么就规范化成什么"（`maxConcurrency` 钳到正整数），**并发闸门本身在 `server.ts` 里另有一处判定**（`session.create` 时 `runningCount() >= maxConcurrency` 即回 `Busy`）——本次没有给那道闸门补单测，它仍只由冒烟间接覆盖。
+
 ### 战略层面的三个判断
 
 1. **"真实 daemon 缺席"是最大的目标—现状落差**（见 §1.4）。要么补齐 Cordis 版真实 daemon（工程量大），要么把产品定位诚实地调整为"**协议 SDK + 完整参考实现 + 可直接用的 VSCode 前端**"，把 mock 降级为测试夹具而非卖点。目前 README 的表述会让用户误以为拿到的是完整产品。
@@ -387,7 +405,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 1. **daemon 资源治理**：会话 TTL/LRU 回收（P1-1）、过期挂起项延迟清理（P1-7）、`step` 会话内计数（P1-8）。
 2. **配置与协议正确性**：provider/baseURL 联动（P1-3）、`spawnExternal` 参数解析（P1-4）、暴露 `maxToolRounds`/`maxContextTokens`（P2-2）。
 3. **类型与门禁**：新增 `tsconfig.web.json`（`allowJs+checkJs`）覆盖 webview/scripts；引入 ESLint + Prettier 并接入 CI（P1-10）。
-4. **补上安全边界的单测**：把 `server.ts` 的握手判定、能力收敛、错误码映射抽为纯函数并单测；`wsClient` 用本地 ws server 做真实连接测试（P1-17）。
+4. **补上安全边界的单测**（P1-17）：~~把 `server.ts` 的握手判定、能力收敛、错误码映射抽为纯函数并单测~~ **【2026-10-12 已实现（前半），口径见 §4「daemon 安全边界与可观测性追记」】**；`wsClient` 用本地 ws server 做真实连接测试 **【仍未做】**。
 5. **测试提速**：`agent.test.ts` 改用假定时器，把全套从 ~28s 压到 <5s（P1-18）。
 6. **CI 硬化**：pin SHA、`permissions`、`concurrency`、`timeout-minutes`、缓存 `.vscode-test`、OSV SARIF（P1-11）。**【2026-10-11 已实现；顺带发现并修掉 `osv-scanner-action@v1` 这个已不存在的 ref，见 §4「CI 硬化追记」】**
 7. **Webview 重构**：拆分为 6 个 ESM 模块；`handleEvent` 加错误边界；`resetTurn` 修正（P1-12/13/14）。**【2026-10-11：拆分已实现，见 §4「Webview 拆分追记」；`handleEvent` 错误边界（P1-13）与 `resetTurn` 修正（P1-14）在更早批次已修，本次拆分确认二者分别落在 `events.js` / `messages.js` 且未丢失】**
@@ -404,10 +422,8 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 3. ~~**会话级事务回滚**（P2-6）—— 与现有 Diff 审批天然互补：审批是"事前拦截"，回滚是"事后兜底"。~~ **【2026-10-08 已实现，2026-10-09 加固；见 §4「会话回滚追记」】**
 4. ~~**图片输入**（P2-4）—— 报错截图 → 让 Agent 直接看，是高频刚需。~~ **【2026-10-09 已实现，口径见 §4「图片输入追记」】**
 5. ~~**Plan 模式**（P2-7）—— 复用审批基础设施，代价小、感知强。~~ **【2026-10-09 已实现；见 §4「Plan 模式追记」】**
-3. **会话级事务回滚**（P2-6）—— 与现有 Diff 审批天然互补：审批是"事前拦截"，回滚是"事后兜底"。实现成本低（git stash / 影子目录），用户感知强。
-4. ~~**图片输入**（P2-4）—— 报错截图 → 让 Agent 直接看，是高频刚需。~~ **【2026-10-09 追记：已实现，口径见 §4「图片输入追记」】**
-5. **Plan 模式**（P2-7）—— 复用审批基础设施，代价小、感知强。
-6. **可观测性升级**（P2-8）—— 结构化轨迹，为后续"成本面板""工具失败率"等功能铺路。
+6. **可观测性升级**（P2-8）—— 结构化轨迹，为后续"成本面板""工具失败率"等功能铺路。**【2026-10-12 已实现，口径见 §4「daemon 安全边界与可观测性追记」。注意其中的 token 数是本地估算（`estimated: true`），不是网关返回的真实用量——拿它对账是错的】**
+7. **审批风险分级**（P2-9）—— 让"`ls` 一下"与"`rm -rf`"在界面上不再一样重。**【2026-10-12 已实现，同见该追记；低危不等于免审批】**
 
 ### 不建议做的事（避免走弯路）
 
@@ -423,7 +439,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | 象限 | 高影响 | 中影响 |
 | --- | --- | --- |
 | **低工作量** | **1.4 能力下沉**、**1.2 补丁乐观锁**、`walkFiles` 上限、`recycleStaleDaemon` 校验、CI 硬化 | `resetTurn` 修正、`step` 会话化、过期项清理、provider/baseURL 联动、`spawnExternal` 解析 |
-| **高工作量** | **1.1 脏文档一致性**、**1.3 可中断请求**、~~**MCP 客户端**~~【2026-10-01 已决策不接入，见 §4「MCP 追记」】 | ~~Webview 模块化~~【2026-10-11 已实现，见 §4「Webview 拆分追记」】、`server.ts` 纯函数抽取 + 单测、会话 TTL 回收、结构化轨迹 |
+| **高工作量** | **1.1 脏文档一致性**、**1.3 可中断请求**、~~**MCP 客户端**~~【2026-10-01 已决策不接入，见 §4「MCP 追记」】 | ~~Webview 模块化~~【2026-10-11 已实现，见 §4「Webview 拆分追记」】、~~`server.ts` 安全边界纯函数抽取 + 单测~~【2026-10-12 已实现（仅安全边界部分；其余 6 个文件仍未动），见 §4「daemon 安全边界与可观测性追记」】、会话 TTL 回收、【`daemonManager`/`wsClient`/`diffProvider`/`contextCapture`/`extension`/`logger` 的单测】（这是 P1-17 剩下的部分）、~~结构化轨迹~~【2026-10-12 已实现】 |
 
 **建议执行顺序**：1.4 → 1.2 → 1.3 → 1.1 → 阶段 2 全部 → 阶段 3。
 

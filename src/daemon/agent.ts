@@ -22,9 +22,11 @@ import {
   EventFilePatchPending,
   EventPlanRequest,
   SessionSendParams,
+  TrajectoryMeta,
 } from '../../shared/protocol';
 import { assertPathInside } from './paths';
 import { applyPatchDecision, describePatchOutcome, PatchApplyEnv } from './patchApply';
+import { classifyCommandRisk, riskReason } from './tools';
 
 export interface AgentCapabilities {
   allowedTools?: string[];
@@ -111,14 +113,19 @@ let stepCounter = 0;
 function trajectory(
   ctx: AgentContext,
   kind: 'reasoning' | 'message' | 'tool' | 'patch' | 'approval' | 'plan' | 'system',
-  detail: string
+  detail: string,
+  meta?: TrajectoryMeta
 ) {
   ctx.notify(EVENTS.Trajectory, {
     sessionId: ctx.sessionId,
-    step: ++stepCounter,
+    // 步号与 realAgent 同源：优先会话级计数（会话内单调递增），裸 context 才回落进程内计数器。
+    // 此前这里只认模块级计数器，多会话并发时步号会互相穿插。
+    step: ctx.nextStep?.() ?? ++stepCounter,
     kind,
     detail,
     ts: Date.now(),
+    // P2-8：结构化字段整体展开在后面，undefined 的字段在 JSON 序列化时自然消失
+    ...meta,
   });
 }
 
@@ -159,7 +166,10 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     trajectory(ctx, 'plan', `plan.request ${planId}`);
 
     const approved = await ctx.waitForUser('plan', planPayload);
-    trajectory(ctx, 'plan', `plan.respond ${approved ? 'approved' : 'rejected'}`);
+    trajectory(ctx, 'plan', `plan.respond ${approved ? 'approved' : 'rejected'}`, {
+      ok: approved,
+      errorKind: approved ? undefined : 'approval-denied',
+    });
 
     if (!approved || ctx.isCanceled()) {
       ctx.notify(EVENTS.MessageDelta, {
@@ -181,7 +191,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     const file = attachments.find((a) => a.path) ?? attachments[0];
     const target = file.path ?? file.uri ?? 'unknown';
     ctx.notify(EVENTS.ToolStarted, { sessionId: ctx.sessionId, tool: 'read_file', input: { path: target } });
-    trajectory(ctx, 'tool', `read_file ${JSON.stringify({ path: target })}`);
+    trajectory(ctx, 'tool', `read_file ${JSON.stringify({ path: target })}`, { tool: 'read_file' });
     await sleep(120);
     let content = file.content ?? '';
     if ((content === '' || file.contentOmitted) && file.path) {
@@ -194,7 +204,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
       output: content.split('\n').slice(0, 12).join('\n') || '(空文件)',
       durationMs: 120,
     });
-    trajectory(ctx, 'tool', 'read_file 完成');
+    trajectory(ctx, 'tool', 'read_file 完成', { tool: 'read_file', ok: true, durationMs: 120 });
   }
 
   // ---- 4. 文件修改（触发补丁审批，目标路径须在工作区内，canonical 校验防符号链接逃逸）
@@ -226,7 +236,10 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
       trajectory(ctx, 'patch', `file.patch.pending ${target}`);
 
       const accepted = await ctx.waitForUser('patch', patchPayload);
-      trajectory(ctx, 'patch', `file.patch.respond ${accepted ? 'accept' : 'reject'}`);
+      trajectory(ctx, 'patch', `file.patch.respond ${accepted ? 'accept' : 'reject'}`, {
+        ok: accepted,
+        errorKind: accepted ? undefined : 'approval-denied',
+      });
 
       // P0-1 / P0-2 / P2 统一落地裁决（脏文档走编辑器、普通文件走乐观锁）
       let applied = false;
@@ -265,10 +278,12 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     // 语义：allowedTools 缺省/空数组 = 全部允许；非空 = 仅白名单内允许
     const tools = ctx.capabilities?.allowedTools;
     const toolAllowed = !tools || tools.length === 0 || tools.includes('bash_execute');
+    // 演示用的固定高危命令：集中一处，避免"发给用户的命令"与"分级依据"各写一份而漂移
+    const dangerCommand = 'rm -rf build/ && npm run build';
     ctx.notify(EVENTS.ToolStarted, {
       sessionId: ctx.sessionId,
       tool: 'bash_execute',
-      input: { command: 'rm -rf build/ && npm run build' },
+      input: { command: dangerCommand },
     });
     if (!toolAllowed) {
       ctx.notify(EVENTS.ToolExecuted, {
@@ -278,8 +293,13 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
         output: '工具被禁用：capabilities.allowedTools 未包含 bash_execute。',
         durationMs: 0,
       });
-      trajectory(ctx, 'tool', 'bash_execute 被禁用');
-    } else if (ctx.isTrusted?.('rm -rf build/ && npm run build')) {
+      trajectory(ctx, 'tool', 'bash_execute 被禁用', {
+        tool: 'bash_execute',
+        ok: false,
+        durationMs: 0,
+        errorKind: 'tool-disabled',
+      });
+    } else if (ctx.isTrusted?.(dangerCommand)) {
       // B1 信任记忆：白名单命中 -> 免审批直接执行（不发起 approval.request）
       ctx.notify(EVENTS.ToolExecuted, {
         sessionId: ctx.sessionId,
@@ -289,23 +309,34 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
         durationMs: 0,
         trusted: true,
       });
-      trajectory(ctx, 'tool', 'bash_execute 命中信任规则，免审批');
+      trajectory(ctx, 'tool', 'bash_execute 命中信任规则，免审批', {
+        tool: 'bash_execute',
+        ok: true,
+        durationMs: 0,
+      });
     } else {
+      // P2-9：风险分级与文案均由命令内容推导，不再硬编码 'high'
+      const risk = classifyCommandRisk(dangerCommand);
       const approvalId = `approval_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
       const approvalParams: EventApprovalRequest = {
         sessionId: ctx.sessionId,
         approvalId,
         tool: 'bash_execute',
-        input: { command: 'rm -rf build/ && npm run build' },
-        risk: 'high',
-        reason: '高危命令：递归删除目录，可能造成不可恢复的数据丢失。',
+        input: { command: dangerCommand },
+        risk,
+        reason: riskReason(risk, dangerCommand),
         // expiresAt 由 daemon 按 approvalTtlMs 统一盖戳（见 server.ts notify）
       };
       ctx.notify(EVENTS.ApprovalRequest, approvalParams);
-      trajectory(ctx, 'approval', 'approval.request bash_execute');
+      trajectory(ctx, 'approval', 'approval.request bash_execute', { tool: 'bash_execute' });
 
       const approved = await ctx.waitForUser('approval', approvalParams);
-      trajectory(ctx, 'approval', `approval.respond ${approved ? 'approved' : 'rejected'}`);
+      trajectory(ctx, 'approval', `approval.respond ${approved ? 'approved' : 'rejected'}`, {
+        tool: 'bash_execute',
+        ok: approved,
+        durationMs: 200,
+        errorKind: approved ? undefined : 'approval-denied',
+      });
 
       await sleep(200);
       ctx.notify(EVENTS.ToolExecuted, {
@@ -315,7 +346,12 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
         output: approved ? 'mock: 已清理 build/ 并完成构建（演示输出）' : '已取消：用户拒绝了该命令。',
         durationMs: 200,
       });
-      trajectory(ctx, 'tool', 'bash_execute 完成');
+      trajectory(ctx, 'tool', 'bash_execute 完成', {
+        tool: 'bash_execute',
+        ok: approved,
+        durationMs: 200,
+        errorKind: approved ? undefined : 'approval-denied',
+      });
     }
   }
 

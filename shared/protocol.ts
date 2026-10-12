@@ -616,10 +616,56 @@ export interface EventFilePatchResult {
 }
 
 /**
+ * 工具/操作失败的分类（P2-8）。让"哪类工具最容易失败"可以按类别聚合，
+ * 而不是只能对着一堆自由文本 `detail` 做字符串猜测。
+ */
+export type TrajectoryErrorKind =
+  | 'policy-denied' // 被命令策略拒绝
+  | 'tool-disabled' // capabilities.allowedTools 未包含该工具
+  | 'approval-denied' // 用户拒绝了审批
+  | 'timeout' // 超时
+  | 'exec-failed' // 执行本身失败（非策略原因）
+  | 'internal'; // 其他内部错误
+
+/** 模型调用的 token 用量（P2-8）。 */
+export interface TrajectoryTokens {
+  prompt?: number;
+  completion?: number;
+  total?: number;
+  /**
+   * true = 本地估算值（模型/网关未返回 usage 时）。
+   * 消费方应据此区分"精确账单"与"量级参考"——把估算值当账单用会误导成本判断。
+   */
+  estimated?: boolean;
+}
+
+/**
+ * 轨迹记录的结构化附加字段（P2-8）。
+ *
+ * 全部可选：旧记录（只有 sessionId/step/kind/detail/ts）仍能原样解析 —— 这是刻意的，
+ * `.dsh/trajectory/*.jsonl` 是**已落盘的审计数据**，加字段不能以破坏历史可读性为代价。
+ */
+export interface TrajectoryMeta {
+  /** 工具名（kind 为 tool / approval 时） */
+  tool?: string;
+  /** 该步骤是否成功（kind 为 tool 时）；非工具步骤通常不填 */
+  ok?: boolean;
+  /** 耗时（ms） */
+  durationMs?: number;
+  /** 失败分类；仅在 `ok === false` 时有意义 */
+  errorKind?: TrajectoryErrorKind;
+  /** token 用量（模型调用相关记录） */
+  tokens?: TrajectoryTokens;
+}
+
+/**
  * 迹线（Trajectory）数据映射：daemon 内部的轨迹记录以统一事件流
  * 投影到 VSCode 侧，UI 可据此渲染"步骤时间线"，并用于回放与审计。
+ *
+ * P2-8：`detail` 仍是给人读的原文，结构化字段（tool / ok / durationMs / errorKind / tokens）
+ * 供统计与聚合使用。两者**并存而非替代** —— `detail` 里带命令原文，字段里带可聚合的结论。
  */
-export interface EventTrajectory {
+export interface EventTrajectory extends TrajectoryMeta {
   sessionId: string;
   step: number;
   kind: 'reasoning' | 'message' | 'tool' | 'patch' | 'approval' | 'plan' | 'system';
