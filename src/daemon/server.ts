@@ -50,13 +50,14 @@ import { RealAgentConfig, runRealAgent } from './realAgent';
 import { DEFAULT_APPROVAL_TTL_MS, Session, SessionManager } from './sessionManager';
 import {
   defaultCapabilities,
-  HandshakeInfo,
   normalizeDeclaration,
-  NormalizedCapabilities,
   pendingRespondError,
   resolvePathWithin,
   verifyHandshake,
 } from './serverGuards';
+// 仅作类型使用：显式 `import type` 表明 serverGuards 只借类型、不引入运行时依赖
+// （否则 serverGuards → agent → tools 的隐式值导入会凭空造出一条模块环）。
+import type { HandshakeInfo, NormalizedCapabilities } from './serverGuards';
 import { SessionSnapshotStore } from './sessionSnapshot';
 import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';

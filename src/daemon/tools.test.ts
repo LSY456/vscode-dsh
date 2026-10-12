@@ -603,4 +603,35 @@ describe('classifyCommandRisk（P2-9 风险分级）', () => {
     expect(reason.length).toBeLessThanOrEqual(300);
     expect(reason).not.toContain('a'.repeat(201));
   });
+
+  /**
+   * 复查（2026-10-12）中实测发现的两类问题，各留一条锁住：
+   *  - 误报：`\bkill\b` 会把 `--kill-after=5s`（timeout 的参数）当成杀进程 → 纯只读的测试运行被报高危；
+   *  - 死规则：LOW 里列了 `git remote -v`，但 MEDIUM 的 `remote` 先命中 → 该条永远轮不到，纯读取报中危。
+   */
+  it('杀进程只在命令位置算高危：`--kill-after` / `kill.sh` 不误报', () => {
+    // 命令位置的 kill 家族仍是 high
+    expect(classifyCommandRisk('kill -9 1234')).toBe('high');
+    expect(classifyCommandRisk('killall node')).toBe('high');
+    expect(classifyCommandRisk('sudo kill 1234')).toBe('high'); // 词前有空白即成立
+    // 只是"含 kill 字样"的不再误报
+    expect(classifyCommandRisk('timeout --kill-after=5s 30 npm test')).toBe('medium');
+    expect(classifyCommandRisk('node ./kill.sh')).toBe('medium');
+  });
+
+  it('git 只读子命令确实是 low（LOW 与 MEDIUM 两条规则不得互相覆盖成死规则）', () => {
+    expect(classifyCommandRisk('git remote -v')).toBe('low');
+    expect(classifyCommandRisk('git tag -l')).toBe('low');
+    expect(classifyCommandRisk('git branch')).toBe('low');
+    // 同名子命令的**写形态**仍是 medium —— 收窄的是形态，不是子命令本身
+    expect(classifyCommandRisk('git remote add origin url')).toBe('medium');
+    expect(classifyCommandRisk('git remote set-url origin url')).toBe('medium');
+    expect(classifyCommandRisk('git tag v1.0')).toBe('medium');
+  });
+
+  it('含"看起来像写命令的词"的只读管道按保守值 medium（宁可多提示，不静默降级）', () => {
+    // `grep cp` 里的 `cp` 是模式串而非命令；分级只看词面，因此保守判 medium。
+    // 这条是有意固化的"已知偏保守"，改判定规则时请显式更新本断言。
+    expect(classifyCommandRisk('ls | grep cp')).toBe('medium');
+  });
 });
