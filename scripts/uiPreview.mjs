@@ -223,15 +223,46 @@ const conversationDom = await renderScenario(({ emit, emitRaw }) => {
   });
   emit('message.done', {});
 
-  emit('trajectory.record', { step: 1, kind: 'tool', detail: 'read_file src/daemon/tools.ts' });
-  emit('trajectory.record', { step: 2, kind: 'tool', detail: 'grep realpath src/daemon' });
+  // P2-8：结构化轨迹 —— 成功 / 失败 / token 三种形态各来一条，让徽标排布在同一屏可核对
+  emit('trajectory.record', {
+    step: 1,
+    kind: 'tool',
+    detail: 'read_file src/daemon/tools.ts',
+    tool: 'read_file',
+    ok: true,
+    durationMs: 42,
+  });
+  emit('trajectory.record', {
+    step: 2,
+    kind: 'tool',
+    detail: 'grep realpath src/daemon',
+    tool: 'grep',
+    ok: true,
+    durationMs: 1180,
+  });
+  emit('trajectory.record', {
+    step: 3,
+    kind: 'tool',
+    detail: 'bash_execute 策略拒绝：命令命中拒绝规则：/\\brm\\s+(-rf|-fr)\\b/i',
+    tool: 'bash_execute',
+    ok: false,
+    durationMs: 3,
+    errorKind: 'policy-denied',
+  });
+  emit('trajectory.record', {
+    step: 4,
+    kind: 'system',
+    detail: 'model 调用（约 3120 token）',
+    tokens: { prompt: 2840, completion: 280, total: 3120, estimated: true },
+  });
 
   emit('approval.request', {
     approvalId: 'ap_preview',
     tool: 'bash_execute',
     input: { command: 'npm test -- tools' },
-    risk: 'high',
-    reason: '执行测试会启动子进程，需你确认',
+    // P2-9：npm test 属"未列出的命令"，分级按保守兜底记 medium（不再是固定 high）
+    risk: 'medium',
+    reason: '该命令会写入文件或访问网络，需要人工批准。命令：npm test -- tools',
     expiresAt: Date.now() + EXPIRES,
   });
   emit('file.patch.pending', {

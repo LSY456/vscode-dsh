@@ -220,7 +220,7 @@ VSCode 侧自动打包的结构化附件，`kind` 取值：
 | `file.patch.pending` | **挂起点**：文件修改待审查（path/oldContent/newContent/description/expiresAt） |
 | `plan.request` | **挂起点**：计划模式下方案待批准（planId/plan/expiresAt） |
 | `file.patch.result` | 补丁决策结果（accepted/applied/error） |
-| `trajectory.record` | 迹线步骤（step/kind/detail/ts；`kind` 取值含 `tool` / `approval` / `patch` / `plan` / `system`） |
+| `trajectory.record` | 迹线步骤（step/kind/detail/ts，另含可选结构化字段 tool/ok/durationMs/errorKind/tokens，见 §6；`kind` 取值含 `reasoning` / `message` / `tool` / `approval` / `patch` / `plan` / `system`） |
 | `session.ended` | 会话结束（reason: completed/canceled/error） |
 | `error` | 协议/运行错误（code 取值见错误码表） |
 
@@ -258,9 +258,42 @@ session.send ──> (流式事件...) ──> approval.request ──挂起─�
 以 **`trajectory.record` 事件流**投影到 VSCode 侧，每条记录包含：
 
 - `step`：会话内单调递增的步骤号（用于 UI 时间线与回放）
-- `kind`：`reasoning | message | tool | patch | approval | system`
+- `kind`：`reasoning | message | tool | patch | approval | plan | system`
 - `detail`：人类可读的步骤摘要
 - `ts`：epoch 毫秒时间戳
+
+**结构化字段（P2-8，全部可选）** —— `detail` 保留"给人读的原文"（含命令原文、路径），
+下列字段供**统计/聚合**使用。二者并存而非替代：只留 `detail` 则无法聚合，只留字段则失去可核对的原始记录。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `tool` | `string` | 工具名（`kind` 为 `tool` / `approval` 时） |
+| `ok` | `boolean` | 该步骤是否成功（`kind` 为 `tool` 时；非工具步骤通常不填） |
+| `durationMs` | `number` | 耗时（毫秒） |
+| `errorKind` | `string` | 失败分类，仅 `ok === false` 时有意义。取值：`policy-denied`（被命令策略拒绝）、`tool-disabled`（`allowedTools` 未包含）、`approval-denied`（用户拒绝审批/补丁/计划）、`timeout`、`exec-failed`、`internal` |
+| `tokens` | `{ prompt?, completion?, total?, estimated? }` | 模型调用的 token 用量；`estimated: true` 表示**本地估算**而非网关返回的真实用量 |
+
+- **向后兼容是硬要求**：`.dsh/trajectory/*.jsonl` 是已落盘的审计数据，新增字段不得使历史记录不可解析
+  （旧记录没有这些字段，消费方按"未知/不适用"处理即可）。
+- **脱敏覆盖所有字符串字段**（不只 `detail`）：新增字段不会成为凭据写入审计日志的旁路。
+- 典型聚合：按 `tool + ok` 统计"哪类工具最容易失败"；按 `errorKind` 区分"策略拦下"与"用户拒绝"（二者都是
+  非错误，却常被笼统记成"失败"）；对 `tokens.total`（`estimated`）求和得到**单会话成本量级**。
+  注意估算值与账单无关，不得用于计费核对。
+
+### 审批风险分级（P2-9）
+
+`approval.request.risk`（`low | medium | high`）由 **daemon 按命令内容分级**，不再是常量：
+
+- `high`：删除 / 破坏性 / 系统级（`rm -rf`、`del /f /s /q`、`format`、`dd`、`mkfs`、`shutdown`、
+  `git reset --hard`、`git clean -fdx`、`git push --force`、`kill` 等）
+- `medium`：写文件 / 访问网络 / 改变版本库状态（`mv`、`cp`、`sed -i`、`chmod`、重定向写文件、
+  `npm install`、`pip install`、`curl` / `wget`、`git commit|push` 等），以及**未知命令**的保守兜底
+- `low`：只读（`ls`、`cat`、`grep`、`git status|log|diff`、`node --version` 等）
+
+规则：复合命令（`&&` / `||` / `;` / `|`）**取各片段中的最高等级**；`reason` 文案随等级变化。
+
+> **`low` 不等于免审批。** 风险等级只影响 UI 的呈现强度（配色 / 文案 / 二次确认），
+> 是否发起审批由命令策略与信任白名单决定。客户端不得据 `risk` 跳过人工确认。
 
 VSCode 侧将轨迹渲染为「执行迹线」面板（顶栏图标按钮按需打开，不常驻占位），并可据此实现审计、回放与失败定位；
 真实 daemon 的持久化轨迹会追加写 `.dsh/trajectory/<sessionId>.jsonl`（命中大小上限自动归档）。

@@ -1143,6 +1143,7 @@ button.icon-btn.has-badge {
 }
 .traj-line {
   display: flex;
+  flex-wrap: wrap; /* 徽标放不下时整块折到次行，而不是把正文挤成一字一行 */
   gap: var(--dsh-sp-2);
   padding: 2px 0;
   border-bottom: 1px solid var(--dsh-line-soft);
@@ -1158,6 +1159,30 @@ button.icon-btn.has-badge {
   color: var(--dsh-warn);
   min-width: 66px;
   flex: 0 0 auto;
+}
+/*
+ * 正文必须能收缩（min-width:0）且可任意断行：长 detail（命令原文、正则、长路径）若按
+ * min-content 撑开行宽，会把行尾徽标**挤出行外**——实测在 340px 窄栏里就是被裁掉。
+ * `flex: 0 1 auto`（不 grow）是刻意的：正文不抢空格，徽标才能靠 `margin-left:auto` 贴到行尾。
+ */
+.traj-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* P2-8 结构化轨迹徽标（失败标记 / 耗时 / token 估算），推到行尾与正文分开 */
+.traj-meta {
+  flex: 0 0 auto;
+  align-self: flex-start; /* 正文折行时徽标留在首行，不被拉到垂直居中 */
+  margin-left: auto;
+  padding-left: var(--dsh-sp-2);
+  color: var(--dsh-fg-dim);
+  font-family: var(--dsh-mono);
+  font-size: var(--dsh-fs-sm);
+  white-space: nowrap;
+}
+.traj-meta.is-fail {
+  color: var(--dsh-err);
 }
 
 /* =======================================================================

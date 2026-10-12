@@ -345,6 +345,8 @@ async function main() {
   const approval = await rpc.waitFor((m) => m.method === 'approval.request', 'approval.request');
   assert(approval.params.tool === 'bash_execute', '审批对象为 bash_execute');
   assert(approval.params.risk === 'high', '风险级别 high');
+  // P2-9：等级必须与文案自洽 —— 只改 risk 字段而不改 reason，用户看到的仍是旧话术
+  assert(approval.params.reason.includes('高危'), 'P2-9：高危命令的审批说明写明"高危"');
   // 挂起项超时由 daemon 统一盖戳（TTL 可经 initialize.capabilities.approvalTtlMs 配置）
   const ttl = approval.params.expiresAt - Date.now();
   assert(ttl > 0 && ttl <= 61_000, `approval.request 应带 expiresAt（缺省 60s，实际 ${ttl}ms）`);
@@ -577,6 +579,13 @@ async function main() {
   });
   const rbashApproval = await rconn.rpc.waitFor((m) => m.method === 'approval.request', '真实 bash_execute 审批');
   assert(rbashApproval.params.tool === 'bash_execute', '真实 bash_execute 发起审批');
+  // P2-9：这里跑的是 `echo ... && pwd|cd` —— 纯只读，必须判 low。
+  // 与上面 mock 段的 high 一起，证明分级**真的在按命令内容变化**，不是换个常量名硬编码。
+  assert(
+    rbashApproval.params.risk === 'low',
+    `P2-9：只读命令判 low（实际 ${rbashApproval.params.risk}）`
+  );
+  assert(rbashApproval.params.reason.includes('只读'), 'P2-9：只读命令的审批说明写明"只读"');
   await rconn.rpc.request('approval.respond', {
     sessionId: rsessionId,
     approvalId: rbashApproval.params.approvalId,
@@ -862,6 +871,21 @@ async function main() {
   assert(
     trajList.records.some((r) => r.kind === 'tool'),
     'trajectory.list 含 tool 步骤（脱敏轨迹）'
+  );
+  // P2-8：结构化字段必须经得起落盘 + 回读（否则"可聚合"只是内存里的假象）
+  assert(
+    trajList.records.some(
+      (r) => r.kind === 'tool' && r.tool === 'read_file' && typeof r.durationMs === 'number' && r.ok === true
+    ),
+    'P2-8：tool 轨迹带回结构化字段（tool / ok / durationMs）'
+  );
+  assert(
+    trajList.records.some((r) => r.tokens && r.tokens.estimated === true && typeof r.tokens.total === 'number'),
+    'P2-8：轨迹含 token 估算记录（estimated=true，不当账单用）'
+  );
+  assert(
+    trajList.records.some((r) => r.errorKind === 'approval-denied'),
+    'P2-8：审批被拒（回滚/拒绝路径）按 approval-denied 分类'
   );
 
   // C2：daemon 日志落盘（tee stdout/stderr 到 .dsh/logs/daemon.log）

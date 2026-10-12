@@ -332,6 +332,23 @@ export function createMessages(ctx) {
   // -------------------------------------------------------------------------
 
   /**
+   * P2-8：把轨迹的**结构化字段**压成行尾一段紧凑徽标。
+   *
+   * 为什么不把它们拼进 `detail`：`detail` 是给人读的原始记录（含命令原文），
+   * 而徽标要能被扫读、能对齐、能按等级着色。两者混在一段文本里就都做不到了。
+   * 无结构化字段时返回空串，调用方不追加节点 —— 旧记录（无这些字段）渲染结果与之前一致。
+   */
+  function trajMetaText(t) {
+    const bits = [];
+    if (t.ok === false) bits.push('⚠ 失败' + (t.errorKind ? '（' + t.errorKind + '）' : ''));
+    if (typeof t.durationMs === 'number' && t.durationMs > 0) bits.push(fmtDuration(t.durationMs));
+    if (t.tokens && typeof t.tokens.total === 'number') {
+      bits.push((t.tokens.estimated ? '≈' : '') + t.tokens.total + ' tok');
+    }
+    return bits.join(' · ');
+  }
+
+  /**
    * 迹线是审计信息、不是对话内容，所以不主动弹面板打断阅读：
    * 只在顶栏按钮上亮出计数，用户想看时自己点开。
    */
@@ -343,7 +360,11 @@ export function createMessages(ctx) {
     const line = el('div', 'traj-line');
     line.appendChild(el('span', 'traj-step', '#' + t.step));
     line.appendChild(el('span', 'traj-kind', t.kind));
-    line.appendChild(el('span', '', t.detail));
+    line.appendChild(el('span', 'traj-detail', t.detail));
+    const meta = trajMetaText(t);
+    if (meta) {
+      line.appendChild(el('span', 'traj-meta' + (t.ok === false ? ' is-fail' : ''), meta));
+    }
     trajectoryEl.appendChild(line);
   }
 

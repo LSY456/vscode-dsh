@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   checkPatchConflict,
+  classifyCommandRisk,
   createWalkState,
   DEFAULT_WALK_LIMITS,
   evaluateCommandPolicy,
@@ -15,6 +16,7 @@ import {
   readFileRange,
   readTextFile,
   resolveTarget,
+  riskReason,
   sliceLines,
   tryReadFile,
   walkFiles,
@@ -488,5 +490,117 @@ describe('walkFiles 预算与去重（P1-2：别让一次搜索卡死事件循�
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * P2-9 审批风险分级。
+ *
+ * 分级的用途是**让 UI 差异化呈现**，不是放宽审批 —— 因此这里除了分级本身，
+ * 还要钉住"低危不等于免审批"这条边界在文案里被说出来。
+ */
+describe('classifyCommandRisk（P2-9 风险分级）', () => {
+  it('删除类 -> high（本分级独立于策略拒绝，rm -rf 即便被策略拦下也仍是 high）', () => {
+    for (const cmd of [
+      'rm -rf build/',
+      'rm -fr build/',
+      'rm -f a.txt',
+      'rm --recursive dir',
+      'del /f /s /q dist',
+      'rd /s /q dist',
+      'git reset --hard HEAD~1',
+      'git clean -fdx',
+      'git push origin main --force',
+      'taskkill /f /im node.exe',
+      'dd if=/dev/zero of=x',
+      'shutdown /r',
+    ]) {
+      expect(classifyCommandRisk(cmd), cmd).toBe('high');
+    }
+  });
+
+  it('写文件 / 网络 / 版本库状态变更 -> medium', () => {
+    for (const cmd of [
+      'mv a.txt b.txt',
+      'cp -r src dst',
+      'mkdir -p out',
+      'sed -i "s/a/b/" f.ts',
+      'chmod 755 run.sh',
+      'git commit -m "x"',
+      'npm install lodash',
+      'pip install requests',
+      'curl -s https://example.com',
+      'wget https://example.com/a.zip',
+      'echo hi > out.txt',
+      'echo hi >> out.txt',
+    ]) {
+      expect(classifyCommandRisk(cmd), cmd).toBe('medium');
+    }
+  });
+
+  it('只读命令 -> low', () => {
+    for (const cmd of [
+      'ls -la',
+      'cat package.json',
+      'grep -rn TODO src',
+      'git status',
+      'git log --oneline -5',
+      'node --version',
+      'pwd',
+      'wc -l README.md',
+      'find . -name "*.ts"',
+    ]) {
+      expect(classifyCommandRisk(cmd), cmd).toBe('low');
+    }
+  });
+
+  it('未知命令按保守值 medium（把未知当 low 会让没见过的写法获得更弱提示）', () => {
+    expect(classifyCommandRisk('frobnicate --all')).toBe('medium');
+    expect(classifyCommandRisk('npm run build')).toBe('medium'); // 跑构建脚本可能写盘
+    expect(classifyCommandRisk('python train.py')).toBe('medium'); // 执行任意代码
+  });
+
+  it('复合命令取最高等级（不能只看首片段）', () => {
+    expect(classifyCommandRisk('ls && rm -rf x')).toBe('high');
+    expect(classifyCommandRisk('cat a.txt | tee b.txt')).toBe('medium');
+    expect(classifyCommandRisk('npm run build && git push origin main')).toBe('medium');
+    expect(classifyCommandRisk('git status; rm -f x')).toBe('high');
+    // 演示场景里的那条命令：首片段 rm -rf 必须把整体拉到 high
+    expect(classifyCommandRisk('rm -rf build/ && npm run build')).toBe('high');
+  });
+
+  it('只读命令 + 破坏性重定向 -> medium（不能因首词是 cat/ls 就判 low）', () => {
+    expect(classifyCommandRisk('cat src.txt > dest.txt')).toBe('medium');
+    expect(classifyCommandRisk('ls -la > listing.txt')).toBe('medium');
+  });
+
+  it('空命令 -> medium（无从判断，按保守值）', () => {
+    expect(classifyCommandRisk('')).toBe('medium');
+    expect(classifyCommandRisk('   ')).toBe('medium');
+    expect(classifyCommandRisk(undefined as unknown as string)).toBe('medium');
+  });
+
+  it('大小写不敏感', () => {
+    expect(classifyCommandRisk('RM -RF X')).toBe('high');
+    expect(classifyCommandRisk('Git Reset --hard')).toBe('high');
+  });
+
+  it('riskReason：三个等级文案互不相同，且都点明"仍需审批"的事实', () => {
+    const high = riskReason('high', 'rm -rf x');
+    const medium = riskReason('medium', 'mv a b');
+    const low = riskReason('low', 'ls');
+    expect(new Set([high, medium, low]).size).toBe(3);
+    expect(high).toContain('高危');
+    expect(medium).toContain('人工批准');
+    expect(low).toContain('仍需人工批准'); // 低危不等于免审批
+    // 命令原文要出现（截断后），用户才能核对是哪条
+    expect(high).toContain('rm -rf x');
+  });
+
+  it('riskReason：超长命令截断到 200 字符以内，不把整条命令灌进审批卡', () => {
+    const long = 'a'.repeat(1000);
+    const reason = riskReason('medium', long);
+    expect(reason.length).toBeLessThanOrEqual(300);
+    expect(reason).not.toContain('a'.repeat(201));
   });
 });

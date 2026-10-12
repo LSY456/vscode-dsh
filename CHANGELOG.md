@@ -7,6 +7,27 @@
 
 ### 新增
 
+- **审批风险分级（P2-9）**：审批卡原先一律显示"高危"（`risk: 'high'` 写死在两处），于是"`ls` 一下"和
+  "`rm -rf`"看起来一样重，用户没法据此分配注意力。现按**命令内容**分三档：删除 / 破坏（`rm -rf`、
+  `del /f`、`format`、`dd if=`、`git reset --hard`、`git push -f`、`kill`…）→ `high`；写文件 / 网络 /
+  版本库改动 / 构建 / 未知命令 → `medium`；只读（`ls` / `cat` / `grep` / `git status` / `--version`…）→ `low`。
+  几处**判定顺序本身就是语义**：`high` 必须先判，否则 `rm -rf build/` 会因同时命中"常见命令"被洗白；
+  `medium` 早于 `low`，`cat x > y` 才归 medium（`cat` 只读，但 `>` 会截断目标文件）；**未知命令一律
+  medium** —— 把未知当成 `low`，等于让没见过的写法自动获得更弱的提示，而这个方向恰好是危险的那一侧。
+  复合命令（`&&` / `||` / `;` / `|`）取各片段**最高级**：取首片段是最危险的误判（`ls && rm -rf x`
+  会判成 low）。**`low` 不等于免审批**：等级只影响 UI 呈现强度（文案与徽标），免审批仍然**只**由信任
+  白名单（`.dsh/trust.json`）决定 —— 两者混同会让"更了解风险"顺手变成"降低门槛"。
+- **结构化轨迹（P2-8）**：轨迹记录（`trajectory.record`）在文本 `detail` 之外增加**可选**结构化字段 ——
+  `tool` / `ok` / `durationMs` / `errorKind`（`policy-denied` / `tool-disabled` / `approval-denied` /
+  `timeout` / `exec-failed` / `internal`）/ `tokens`，为"哪类工具最容易失败""单会话 token 成本"这类
+  统计铺路。① **向后兼容是硬要求**：`.dsh/trajectory/*.jsonl` 是已落盘的审计数据，新增字段一律可选、
+  旧记录照常解析（有用例锁住）。② **脱敏改为遍历所有字符串字段**：此前只脱敏 `detail`，于是新加的
+  字段本身就是一条新的明文旁路（`tool` 里就足以塞进 `sk-…`），测试里故意把密钥塞进 `tool` 字段验证。
+  ③ **token 是本地估算，不是账单**：daemon 手里没有 tokenizer，`estimateTokens()` 是 CJK 启发式，
+  故 `estimated: true` 恒为真、界面以 `≈` 前缀区分"量级参考"（拿它对账是错的，这点写进了协议文档）。
+  ④ 面板在迹线行尾渲染紧凑徽标（失败分类 / 耗时 / `≈N tok`），**旧记录不产生多余节点**。
+  ⑤ 顺带修掉 mock agent 的迹线步号在多会话并发下互相穿插 —— 原先只认模块级计数器，现与 real agent
+  同源走会话内计数。
 - **图片输入（P2-4）**：粘贴截图（Ctrl+V）/ 把图片拖进输入框 / 点输入框左侧的图片按钮，都能把图片随消息发给模型
   （此前只能先把报错截图存成文件、再让 Agent 去读它，而"看这个报错"的图往往根本没落盘）。要点：
   ① **图片走独立内容块，不折进文本**：OpenAI 兼容发 `image_url` 的 data URL，Anthropic 发 `source.base64` 块；
@@ -95,6 +116,25 @@
 
 ### 变更
 
+- **daemon 安全边界抽为纯函数并补单测（P1-17，部分）**：`server.ts` 的握手鉴权、浏览器 Origin 拒绝、
+  能力收敛、路径护栏、挂起项错误码映射原先全部内联在 `startDaemonServer()` 里，端到端冒烟能证明"这条路径通"，
+  却证不了"穷尽"。现抽到 `src/daemon/serverGuards.ts` 并补 27 个单测。抽法是把**判定**与副作用切开：
+  `verifyHandshake({ authorization, origin }, token)` 只吃两个头字段与 token、不碰 socket，
+  `normalizeDeclaration()` / `resolvePathWithin()` / `pendingRespondError()` 同理；发错误、改连接状态
+  这些副作用全部留在 `server.ts`。边界因此是可验收的：新模块只引类型与纯函数（`ERROR_CODES` /
+  `assertPathInside` / `clampApprovalTtlMs`），**不 import `ws`、不碰 `vscode`、不持有连接状态**。
+  抽完的收益是能**穷举** —— 用例里包含 `' '` 这种"看着像空"的 Origin、`bearer` 小写、尾随 / 双空格、
+  多一个少一个字符、空 token 等，都是冒烟只能挑一两条写的盲区。两条语义被**显式**锁住：
+  ① token 比对坚持 `auth === 'Bearer ' + token`（不 trim、不忽略大小写、不收别的 scheme）——
+  **任何"宽容解析"都把鉴权从精确匹配放大成可探测面**（"差一点点"的反馈就够二分出 token）；
+  ② `approvalTtlMs` 未声明返回 `null` 表示"调用方保持现状"，而不是回落缺省值 —— 否则
+  "没声明"与"声明成缺省"会被压成一件事，而后者是客户端**主动要求**改成缺省。
+  另：路径护栏失败返回 `{ error }` 而**不抛异常** —— 抛出去会被外层 catch 统一降成 `InternalError`，
+  于是"越界"这个精确原因在 UI 上就消失了。
+  > 说清边界：**`server.ts` 并非此前完全无单测**（`server.test.ts` 早覆盖了连接级隔离与
+  > `resolveAgentDecision()`），本次补的是唯一没有单测的**安全边界**这一段。P1-17 涉及的其余 6 个文件
+  > （`daemonManager` / `wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger`）仍未动，
+  > 本行**未整行关闭**。
 - **Webview 巨型单文件拆分（P1-12）**：`media/webview.js` 从 **2244 行**（两个功能批次各堆了数百行，
   已从 1155 翻近一倍）拆成**薄入口 + 共享壳 + 6 个特性模块**。入口只剩三件事（建壳 / 组装 / 接线 + 启动），
   业务逻辑落在 `src/webview/`：`panelCore`（DOM 引用 + 可变 state + 原语）、`statusBar`、`messages`、

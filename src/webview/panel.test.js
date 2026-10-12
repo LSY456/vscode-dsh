@@ -1569,3 +1569,108 @@ describe('图片输入（批次 6）', () => {
     expect(staging().hidden).toBe(true);
   });
 });
+
+/**
+ * P2-8 结构化轨迹的呈现契约。
+ *
+ * 关键约束是**向后兼容**：旧记录（只有 step/kind/detail）必须渲染得和以前一模一样，
+ * 不能凭空多出一个空徽标节点 —— `.trajectory` 里每个多余节点都会影响窄栏排版。
+ */
+describe('结构化轨迹（P2-8）', () => {
+  const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+  const trajLines = () => Array.from(document.querySelectorAll('#trajectory .traj-line'));
+  const lastLine = () => trajLines()[trajLines().length - 1];
+
+  it('失败记录：行尾出现错误分类徽标，并标记为警示色', () => {
+    emitEvent('trajectory.record', {
+      step: 901,
+      kind: 'tool',
+      detail: 'bash_execute 策略拒绝：命令命中拒绝规则',
+      tool: 'bash_execute',
+      ok: false,
+      durationMs: 12,
+      errorKind: 'policy-denied',
+    });
+    const meta = lastLine().querySelector('.traj-meta');
+    expect(meta).not.toBeNull();
+    expect(meta.classList.contains('is-fail')).toBe(true);
+    expect(meta.textContent).toContain('失败');
+    expect(meta.textContent).toContain('policy-denied');
+    expect(meta.textContent).toContain('12ms');
+  });
+
+  it('成功记录：只给耗时，不打失败标记', () => {
+    emitEvent('trajectory.record', {
+      step: 902,
+      kind: 'tool',
+      detail: 'read_file 完成',
+      tool: 'read_file',
+      ok: true,
+      durationMs: 1500,
+    });
+    const meta = lastLine().querySelector('.traj-meta');
+    expect(meta).not.toBeNull();
+    expect(meta.classList.contains('is-fail')).toBe(false);
+    expect(meta.textContent).toBe('1.5s');
+  });
+
+  it('token 记录：估算值带 ≈ 前缀（不被当账单读）', () => {
+    emitEvent('trajectory.record', {
+      step: 903,
+      kind: 'system',
+      detail: 'model 调用（约 150 token）',
+      tokens: { prompt: 100, completion: 50, total: 150, estimated: true },
+    });
+    const meta = lastLine().querySelector('.traj-meta');
+    expect(meta.textContent).toContain('≈150 tok');
+  });
+
+  it('无结构化字段的旧记录：不产生徽标节点（渲染与拆分前一致）', () => {
+    emitEvent('trajectory.record', { step: 904, kind: 'reasoning', detail: '思考中' });
+    const line = lastLine();
+    expect(line.querySelector('.traj-meta')).toBeNull();
+    // 三个 span：步号 / 类型 / 正文
+    expect(line.children).toHaveLength(3);
+    expect(line.textContent).toContain('思考中');
+  });
+
+  it('durationMs 为 0：不显示耗时（0ms 是噪音，不是信息）', () => {
+    emitEvent('trajectory.record', {
+      step: 905,
+      kind: 'tool',
+      detail: 'bash_execute 完成',
+      tool: 'bash_execute',
+      ok: true,
+      durationMs: 0,
+    });
+    expect(lastLine().querySelector('.traj-meta')).toBeNull();
+  });
+
+  it('DOM ↔ CSS 契约：徽标规则与警示色规则都在样式表里', () => {
+    // 徽标要能推到行尾并与正文分离，否则长 detail 会把耗时挤到看不见
+    expect(css).toMatch(/\.traj-meta[ \t]*\{[^}]*margin-left:[ \t]*auto/);
+    expect(css).toMatch(/\.traj-meta[ \t]*\{[^}]*white-space:[ \t]*nowrap/);
+    expect(css).toMatch(/\.traj-meta\.is-fail[ \t]*\{[^}]*color:[ \t]*var\(--dsh-err\)/);
+    // 正文必须可收缩 + 可任意断行：缺这两条时，长命令原文会把行尾徽标挤出 340px 窄栏
+    // （实测截图确认过，不是理论担忧）。行本身要允许换行，否则徽标只能靠挤压正文来容身。
+    expect(css).toMatch(/\.traj-detail[ \t]*\{[^}]*flex:[ \t]*0[ \t]+1[ \t]+auto/);
+    expect(css).toMatch(/\.traj-detail[ \t]*\{[^}]*min-width:[ \t]*0/);
+    expect(css).toMatch(/\.traj-detail[ \t]*\{[^}]*overflow-wrap:[ \t]*anywhere/);
+    expect(css).toMatch(/\.traj-line[ \t]*\{[^}]*flex-wrap:[ \t]*wrap/);
+  });
+
+  it('正文节点带 traj-detail 类（否则上面的收缩规则落不到实处）', () => {
+    emitEvent('trajectory.record', {
+      step: 906,
+      kind: 'tool',
+      detail: 'bash_execute 策略拒绝：/\\brm\\s+(-rf|-fr)\\b/i',
+      tool: 'bash_execute',
+      ok: false,
+      durationMs: 3,
+      errorKind: 'policy-denied',
+    });
+    const line = lastLine();
+    expect(line.querySelector('.traj-detail')).not.toBeNull();
+    expect(line.querySelector('.traj-detail').textContent).toContain('策略拒绝');
+  });
+});

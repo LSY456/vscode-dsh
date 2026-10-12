@@ -515,6 +515,132 @@ export interface CommandRunResult {
   durationMs: number;
 }
 
+// ---------------------------------------------------------------------------
+// 审批风险分级（P2-9）
+// ---------------------------------------------------------------------------
+
+/** 审批风险等级。UI 据此差异化呈现（文案 / 配色 / 二次确认强度）。 */
+export type RiskLevel = 'low' | 'medium' | 'high';
+
+/**
+ * 高危：**删除 / 破坏性 / 系统级**动作，后果不可逆或影响本机全局。
+ *
+ * 注意这里包含若干已被 `DEFAULT_DENY_PATTERNS` 拦下的形态（如 `rm -rf`）。那不是冗余：
+ * 策略拒绝只作用于走 `evaluateCommandPolicy` 的**真实** agent 路径，而风险分级还被假模型
+ * （演示场景直接构造审批）与将来可能的其他审批来源使用。分级必须独立成立，不能假设
+ * "策略已经挡过了"。
+ */
+const HIGH_RISK_PATTERNS: RegExp[] = [
+  /\brm\s+-[a-z]*r/i, // rm -r / -rf / -Rf
+  /\brm\s+-[a-z]*f/i, // rm -f（强制删除，不提示）
+  /\brm\s+--(recursive|force)\b/i,
+  /\brd\s+\/s\b/i, // Windows 递归删目录
+  /\brmdir\s+\/s\b/i,
+  /\bdel\s+\/[fs]\b/i, // Windows 强制/递归删除
+  /\bformat\s+[a-z]:/i,
+  /\bmkfs(\.\w+)?\b/i,
+  /\bdd\s+if=/i,
+  />\s*\/dev\/(sd|hd|nvme|xvd|disk)/i,
+  /\b(shutdown|reboot|halt|poweroff)\b/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\bgit\s+clean\s+-[a-z]*[fdx]/i,
+  /\bgit\s+push\b[^\n]*\s(-f|--force)\b/i,
+  /\bgit\s+branch\s+-D\b/i,
+  /\bnpm\s+publish\b/i,
+  /\bchmod\s+-R\b/i,
+  /\bchown\s+-R\b/i,
+  /\b(kill|taskkill|pkill)\b/i,
+  /\btruncate\s+-s\b/i,
+  /\b(drop|truncate)\s+table\b/i,
+];
+
+/**
+ * 中危：**写文件 / 访问网络 / 改变版本库状态**。影响面限于工作区或外部服务，
+ * 但都不是"看一眼"级别的动作。
+ */
+const MEDIUM_RISK_PATTERNS: RegExp[] = [
+  /\b(mv|cp|mkdir|touch|ln|tee|rmdir)\b/i,
+  /\b(sed|perl)\b[^\n]*\s-i\b/i, // 就地修改
+  /\b(chmod|chown|attrib|icacls)\b/i,
+  /\b(git\s+(add|commit|push|checkout|switch|merge|rebase|stash|tag|remote))\b/i,
+  /\b(npm|pnpm|yarn|bun)\s+(install|i|ci|add|remove|uninstall|update|upgrade)\b/i,
+  /\b(pip|pip3|conda|poetry)\s+(install|uninstall|add|remove)\b/i,
+  /\b(curl|wget|Invoke-WebRequest|iwr|scp|rsync|ssh|sftp|gh|docker|kubectl|terraform)\b/i,
+  /\b(make|cmake|msbuild|gradle|mvn|cargo\s+build|go\s+build)\b/i,
+  // 重定向写文件（`>` 覆盖 / `>>` 追加）。排除 `>&`（句柄重定向，如 2>&1）与 `>` 后再接 `>`：
+  // 只要求"`>` 之后出现非空白、非 `&|>` 的字符"，这样 `2>&1` 不算写文件、`>> f` 算。
+  />\s*[^\s&|>]/,
+];
+
+/**
+ * 低危：**只读** —— 读取本机现状，不改变文件、不访问网络。
+ *
+ * 低危**不等于免审批**：它只影响 UI 的呈现强度。审批要不要发生由策略与信任白名单决定，
+ * 这条边界不能因为"看起来无害"而被绕开。
+ */
+const LOW_RISK_PATTERNS: RegExp[] = [
+  /^\s*(ls|dir|pwd|cd|echo|which|where|whoami|id|date|env|printenv|uname|hostname)\b/i,
+  /^\s*(cat|type|head|tail|less|more|nl|wc|stat|file|tree)\b/i,
+  /^\s*(grep|rg|find|findstr|locate|awk|cut|sort|uniq|diff|comm)\b/i,
+  /^\s*git\s+(status|diff|log|show|branch|list|remote\s+-v|rev-parse|describe|blame|shortlog)\b/i,
+  /^\s*(npm|pnpm|yarn)\s+(ls|list|view|info|outdated)\b/i,
+  /^\s*(node|python|python3|java|go|rustc|gcc|clang|tsc|npx\s+--version)\s+(--version|-v|-V)\b/i,
+  /^\s*(test|\[)\b/i, // shell 内置测试，纯判定
+];
+
+const RISK_ORDER: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2 };
+
+/**
+ * 判定单条命令片段的危险等级。
+ *
+ * 判定顺序是 **high -> medium -> low -> 缺省 medium**，这个顺序有意义：
+ *  - high 先判，保证 `rm -rf` 不会被后面更宽松的规则"洗白"；
+ *  - medium 早于 low，使 `cat x > y` 这类"只读命令 + 破坏性重定向"归到 medium
+ *    （只看首个词会误判为 low）；
+ *  - 兜底 medium 而非 low：**未知命令按中危处理**。把未知当低危等于让"没见过的写法"
+ *    自动获得更弱的提示，方向反了。
+ */
+function classifySegment(segment: string): RiskLevel {
+  if (HIGH_RISK_PATTERNS.some((re) => re.test(segment))) return 'high';
+  if (MEDIUM_RISK_PATTERNS.some((re) => re.test(segment))) return 'medium';
+  if (LOW_RISK_PATTERNS.some((re) => re.test(segment))) return 'low';
+  return 'medium';
+}
+
+/**
+ * 按命令内容判定审批风险等级（P2-9）。
+ *
+ * 复合命令（`&&` / `||` / `;` / `|`）**取各片段中的最高等级**：`ls && rm -rf x` 的危险程度
+ * 由 `rm -rf x` 决定，取首片段会得到 low —— 那是最危险的一类误判。
+ */
+export function classifyCommandRisk(command: string): RiskLevel {
+  const text = (command ?? '').trim();
+  if (!text) return 'medium'; // 空命令无从判断，按保守值
+  const segments = text
+    .split(/&&|\|\||;|\|/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let level: RiskLevel = 'low';
+  for (const seg of segments) {
+    const segLevel = classifySegment(seg);
+    if (RISK_ORDER[segLevel] > RISK_ORDER[level]) level = segLevel;
+  }
+  return level;
+}
+
+/** 审批卡片上展示的风险说明（把等级翻译成用户能判断的一句话）。 */
+export function riskReason(level: RiskLevel, command: string): string {
+  const head = (command ?? '').trim().slice(0, 200);
+  switch (level) {
+    case 'high':
+      return `高危命令：涉及删除或不可逆改动，执行前请确认目标正确。命令：${head}`;
+    case 'low':
+      return `只读命令（不修改文件、不访问网络），按当前策略仍需人工批准。命令：${head}`;
+    default:
+      return `该命令会写入文件或访问网络，需要人工批准。命令：${head}`;
+  }
+}
+
 export type CommandRunner = (
   spec: SandboxedCommand,
   timeoutMs: number
