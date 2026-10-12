@@ -11,11 +11,14 @@ beforeAll(() => {
 });
 afterAll(() => {
   try {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    // `maxRetries`：Windows 上刚写过的文件常被杀软 / 索引器短暂占用，rmSync 会重试而不是立刻放弃。
+    // 显式给 hook 30s：默认 10s 曾在机器负载高时把整个文件判成 fail —— 4 个用例全过也没用，
+    // 失败点是清理钩子（2026-10-12 实测遇到一次）。清理慢不该让"测试是否通过"变成随机数。
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } catch {
     /* ignore */
   }
-});
+}, 30_000);
 
 describe('daemon 日志落盘（C2）', () => {
   it('createFileLog.write 落盘字符串与中文（UTF-8）', () => {
