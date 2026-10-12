@@ -184,11 +184,11 @@
       <div class="sheet-body">
         <form id="settings-form" autocomplete="off">
           <label class="settings-field">
-            <span>API Key <em class="muted">（SecretStorage 安全存储，不在 settings.json 落明文）</em></span>
+            <span>API Key</span>
             <input id="inp-apikey" type="password" placeholder="留空则不修改" spellcheck="false" />
           </label>
           <label class="settings-field">
-            <span>模型名 <em class="muted">（从下拉选择，避免手写错名字）</em></span>
+            <span>模型名</span>
             <select id="inp-model"></select>
             <span id="model-catalog-hint" class="muted"></span>
           </label>
@@ -206,23 +206,18 @@
           </label>
           <label class="settings-field">
             <span>Agent 预设</span>
-            <input id="inp-preset" placeholder="default" spellcheck="false" />
+            <select id="inp-preset">
+              <option value="default">default（缺省）</option>
+            </select>
+            <span id="preset-hint" class="muted">Agent 预设是握手时传给 daemon 的档位名（不是模型名）。目前只有 default 一档，且该值只被记录、不影响行为，保持不动即可。</span>
           </label>
           <label class="settings-field">
             <span>工具调用轮次上限 <em class="muted">（1–50；用尽后 Agent 收束成结论，不再调工具）</em></span>
             <input id="inp-max-rounds" type="number" min="1" max="50" step="1" />
           </label>
           <label class="settings-field">
-            <span>上下文预算（token） <em class="muted">（4000–1000000；超出按整轮丢弃最旧的工具轮）</em></span>
-            <input id="inp-max-context" type="number" min="4000" max="1000000" step="1000" />
-          </label>
-          <label class="settings-field">
-            <span>采样温度 <em class="muted">（0–2；留空 = 用内置缺省 0.2，越高越发散）</em></span>
+            <span>采样温度 <em class="muted">（0–2；数字越小，回答越稳定保守；数字越大，回答越随机、越有发挥空间。不确定就留空，用缺省 0.2）</em></span>
             <input id="inp-temperature" type="number" min="0" max="2" step="0.1" />
-          </label>
-          <label class="settings-field">
-            <span>输出上限 max_tokens <em class="muted">（留空 = 用服务端默认；Anthropic 必填故回落 4096）</em></span>
-            <input id="inp-max-tokens" type="number" min="1" max="131072" step="256" />
           </label>
           <div class="settings-actions">
             <button type="submit" class="btn primary">保存</button>

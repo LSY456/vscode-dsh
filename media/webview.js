@@ -64,9 +64,7 @@ import { createEvents } from '../src/webview/events.js';
     inpProvider,
     inpPreset,
     inpMaxRounds,
-    inpMaxContext,
     inpTemperature,
-    inpMaxTokens,
     settingsMsg,
     btnTrustClear,
     btnPlanMode,
@@ -168,9 +166,9 @@ import { createEvents } from '../src/webview/events.js';
       return Number.isFinite(n) ? n : undefined;
     };
     const maxToolRounds = numOrUndefined(inpMaxRounds.value);
-    const maxContextTokens = numOrUndefined(inpMaxContext.value);
     const temperature = numOrUndefined(inpTemperature.value);
-    const maxTokens = numOrUndefined(inpMaxTokens.value);
+    // 上下文预算 / 输出上限不再从面板提交（两个字段已撤下）。"不提交"正好等于原先的
+    // "留空 = 不修改"，所以已存在的配置值与 daemon 的缺省行为都不受影响。
     // apiKey 留空表示不修改（不上报空串，避免误删已存凭据）；
     // 模型名同理：下拉还没填充/异常为空时，宁可什么都不提交，也不要把已配好的模型名清空。
     vscode.postMessage({
@@ -182,9 +180,7 @@ import { createEvents } from '../src/webview/events.js';
         provider,
         preset,
         ...(maxToolRounds !== undefined ? { maxToolRounds } : {}),
-        ...(maxContextTokens !== undefined ? { maxContextTokens } : {}),
         ...(temperature !== undefined ? { temperature } : {}),
-        ...(maxTokens !== undefined ? { maxTokens } : {}),
       },
     });
     settingsMsg.textContent = '保存中…';

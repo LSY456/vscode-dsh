@@ -58,9 +58,9 @@ export function createPanel() {
     inpProvider: $('inp-provider'),
     inpPreset: $('inp-preset'),
     inpMaxRounds: $('inp-max-rounds'),
-    inpMaxContext: $('inp-max-context'),
+    // 上下文预算 / 输出上限已从设置面板撤下：它们是实现细节，用户没有判断依据
+    // （实机测试反馈：不知道该填多少）。配置项本身保留，仍可在 VS Code 设置里改。
     inpTemperature: $('inp-temperature'),
-    inpMaxTokens: $('inp-max-tokens'),
     btnSettingsRestart: $('btn-settings-restart'),
     btnSettingsClose: $('btn-settings-close'),
     settingsMsg: $('settings-msg'),

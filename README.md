@@ -159,7 +159,7 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.daemon.port` | `0` | `external` 模式端口 |
 | `dsh.daemon.token` | `""` | `external` 模式握手令牌 |
 | `dsh.apiKey`（已弃用） | `""` | 旧版明文 API Key；首次读取自动回迁到 SecretStorage 并清除，推荐改用「面板 → 设置」 |
-| `dsh.preset` | `default` | 握手时传给 daemon 的 Agent 预设 |
+| `dsh.preset` | `default` | 握手时传给 daemon 的 Agent 预设（行为档位名，不是模型名）；当前只有 `default` 一档，且该值只被记录、不影响行为 |
 | `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
 | `dsh.model.model` | `deepseek-flash` | 模型名。建议在侧边栏「模型设置」里从下拉选择（列表自动跟随 DeepSeek 官方更新） |
 | `dsh.model.idleTimeoutSeconds` | `60` | 模型请求空闲超时秒数（0–1800，0 = 关闭）；距上一个流式增量超时即中断，防会话永久挂起 |

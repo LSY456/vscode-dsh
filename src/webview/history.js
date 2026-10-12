@@ -22,9 +22,7 @@ export function createHistory(ctx) {
     inpProvider,
     inpPreset,
     inpMaxRounds,
-    inpMaxContext,
     inpTemperature,
-    inpMaxTokens,
     trustListEl,
   } = dom;
 
@@ -128,6 +126,23 @@ export function createHistory(ctx) {
     modelHintEl.textContent = (params && params.modelsHint) || '';
   }
 
+  /**
+   * 下拉里没有该值就先补一个选项。
+   *
+   * 预设这类字段在面板里是固定单选，但配置文件里可能存着历史值；若不补选项，
+   * `<select>.value = 'x'` 会落成空串，提交时把用户存过的值**悄悄改写成缺省**。
+   */
+  function ensureOption(sel, value) {
+    if (!sel || !value) return;
+    for (const opt of sel.options) {
+      if (opt.value === value) return;
+    }
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = value;
+    sel.appendChild(opt);
+  }
+
   function fillSettings(params) {
     const cfg = (params && params.config) || {};
     inpApiKey.placeholder = params && params.hasApiKey ? '已设置（留空不修改）' : '未设置';
@@ -139,14 +154,15 @@ export function createHistory(ctx) {
     });
     inpBaseURL.value = cfg.baseURL || '';
     inpProvider.value = cfg.provider || 'auto';
-    inpPreset.value = cfg.preset || '';
+    // 预设是下拉（固定单选）—— 先把配置值保成选项，再设值，避免落成空串后反手改写配置
+    const preset = cfg.preset || 'default';
+    ensureOption(inpPreset, preset);
+    inpPreset.value = preset;
     // 数值字段：缺失时留空，**不要写 0** —— 输入框显示 "0" 会让用户以为上限就是 0。
     inpMaxRounds.value = cfg.maxToolRounds == null ? '' : String(cfg.maxToolRounds);
-    inpMaxContext.value = cfg.maxContextTokens == null ? '' : String(cfg.maxContextTokens);
-    // 采样参数：null / undefined = 用户从没配过 → 留空。不要写 0.2 或 0：温度 0 是**合法值**，
-    // maxTokens 0 表示"用服务端默认"，显示成具体数字会让"没配"和"配成了这个数"混为一谈。
+    // 采样温度：null / undefined = 用户从没配过 → 留空。不要写 0.2 或 0：温度 0 是**合法值**，
+    // 显示成具体数字会让"没配"和"配成了这个数"混为一谈。
     inpTemperature.value = cfg.temperature == null ? '' : String(cfg.temperature);
-    inpMaxTokens.value = cfg.maxTokens == null ? '' : String(cfg.maxTokens);
   }
 
   // ---- B1 信任记忆：设置面板中的免审批白名单管理
