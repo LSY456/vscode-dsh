@@ -549,7 +549,10 @@ const HIGH_RISK_PATTERNS: RegExp[] = [
   /\bnpm\s+publish\b/i,
   /\bchmod\s+-R\b/i,
   /\bchown\s+-R\b/i,
-  /\b(kill|taskkill|pkill)\b/i,
+  // 杀进程只在**命令位置**算高危：要求 `kill` 之后紧跟空白或行尾。
+  // 不加这条约束的话，`--kill-after=5s`（timeout 的参数）与 `./kill.sh` 都会被判成高危 ——
+  // 误报一旦多起来，用户会开始无视整个等级，那比等级不够准更糟。
+  /\b(kill|killall|taskkill|pkill)(\s|$)/i,
   /\btruncate\s+-s\b/i,
   /\b(drop|truncate)\s+table\b/i,
 ];
@@ -562,7 +565,12 @@ const MEDIUM_RISK_PATTERNS: RegExp[] = [
   /\b(mv|cp|mkdir|touch|ln|tee|rmdir)\b/i,
   /\b(sed|perl)\b[^\n]*\s-i\b/i, // 就地修改
   /\b(chmod|chown|attrib|icacls)\b/i,
-  /\b(git\s+(add|commit|push|checkout|switch|merge|rebase|stash|tag|remote))\b/i,
+  // git：**只列会改变状态的子命令**。只读形态（status / diff / log / show / branch /
+  // `remote -v` / `tag -l` / rev-parse …）显式留给 LOW —— 否则纯读取的 `git remote -v`
+  // 也会报中危，等级就失去了分辨率（原先 LOW 里那条 `remote\s+-v` 因此是**不可达的死规则**）。
+  /\bgit\s+(add|commit|push|pull|fetch|checkout|switch|restore|merge|rebase|cherry-pick|reset|stash|init|clean|config|worktree|submodule)\b/i,
+  /\bgit\s+tag\s+(?!-l\b|--list\b)\S/i,
+  /\bgit\s+remote\s+(add|remove|rm|set-url|rename|prune|update)\b/i,
   /\b(npm|pnpm|yarn|bun)\s+(install|i|ci|add|remove|uninstall|update|upgrade)\b/i,
   /\b(pip|pip3|conda|poetry)\s+(install|uninstall|add|remove)\b/i,
   /\b(curl|wget|Invoke-WebRequest|iwr|scp|rsync|ssh|sftp|gh|docker|kubectl|terraform)\b/i,
@@ -582,7 +590,9 @@ const LOW_RISK_PATTERNS: RegExp[] = [
   /^\s*(ls|dir|pwd|cd|echo|which|where|whoami|id|date|env|printenv|uname|hostname)\b/i,
   /^\s*(cat|type|head|tail|less|more|nl|wc|stat|file|tree)\b/i,
   /^\s*(grep|rg|find|findstr|locate|awk|cut|sort|uniq|diff|comm)\b/i,
-  /^\s*git\s+(status|diff|log|show|branch|list|remote\s+-v|rev-parse|describe|blame|shortlog)\b/i,
+  // git 只读：与 MEDIUM 里那条互补 —— 凡这里列出的形态，都不能同时被 MEDIUM 命中，
+  // 否则本行就是"看起来生效、实际永远轮不到"的死规则（`remote -v` / `tag -l` 曾如此）。
+  /^\s*git\s+(status|diff|log|show|branch|tag\s+(-l|--list)|remote\s+(-v|--verbose)|rev-parse|describe|blame|shortlog)\b/i,
   /^\s*(npm|pnpm|yarn)\s+(ls|list|view|info|outdated)\b/i,
   /^\s*(node|python|python3|java|go|rustc|gcc|clang|tsc|npx\s+--version)\s+(--version|-v|-V)\b/i,
   /^\s*(test|\[)\b/i, // shell 内置测试，纯判定

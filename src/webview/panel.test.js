@@ -1054,13 +1054,16 @@ describe('静默失败防线：渲染抛错 / 未知事件都要留下线索', (
 });
 
 /**
- * Agent 预算（工具轮次上限 / 上下文预算）。
+ * Agent 预算（工具轮次上限）。
  *
- * 这两个值此前只有 daemon 侧读得到、扩展从不下发 —— 用户在设置里根本改不到（"死配置"）。
+ * 这个值此前只有 daemon 侧读得到、扩展从不下发 —— 用户在设置里根本改不到（"死配置"）。
  * 关键取舍：**留空 = 不修改**，绝不用 `Number('') = 0` 提交空字段，那会把"没填"变成
  * "把上限设成 0"；加载时缺失也要留空而不是显示 0。
+ *
+ * 上下文预算（`maxContextTokens`）原先也在这组里，后按实机测试反馈**从面板撤下** ——
+ * 它是实现细节，用户没有判断依据（不知道该填多少）。配置项本身仍在，只是不再由面板暴露。
  */
-describe('设置面板：Agent 预算不再"改不到"', () => {
+describe('设置面板：工具轮次上限不再"改不到"', () => {
   const loadSettings = (config) => {
     document.getElementById('btn-settings').click();
     emitEvent('settings.loaded', {
@@ -1083,59 +1086,61 @@ describe('设置面板：Agent 预算不再"改不到"', () => {
     return lastMessageOfKind('settings.apply').settings;
   };
 
-  it('两个字段都在表单里，且是带区间的数字输入', () => {
+  it('字段在表单里，且是带区间的数字输入', () => {
     const rounds = document.getElementById('inp-max-rounds');
-    const ctx = document.getElementById('inp-max-context');
     expect(rounds).not.toBeNull();
-    expect(ctx).not.toBeNull();
     expect(rounds.type).toBe('number');
     expect(rounds.min).toBe('1');
     expect(rounds.max).toBe('50');
-    expect(ctx.type).toBe('number');
-    expect(ctx.min).toBe('4000');
-    expect(ctx.max).toBe('1000000');
+  });
+
+  it('上下文预算与输出上限已从面板撤下：DOM 里没有，提交里也没有', () => {
+    // "撤字段"是做减法，最容易只删 HTML 忘了删 JS 引用（那样会在运行时对 null 取 .value 而炸）。
+    // 所以两头都钉：DOM 里没有这两个 id，提交的消息里也不出现这两个键。
+    expect(document.getElementById('inp-max-context')).toBeNull();
+    expect(document.getElementById('inp-max-tokens')).toBeNull();
+    const sent = submit();
+    expect(sent.maxContextTokens).toBeUndefined();
+    expect(sent.maxTokens).toBeUndefined();
   });
 
   it('settings.loaded 把当前值填进输入框', () => {
     loadSettings({ maxToolRounds: 12, maxContextTokens: 128000 });
     expect(document.getElementById('inp-max-rounds').value).toBe('12');
-    expect(document.getElementById('inp-max-context').value).toBe('128000');
   });
 
   it('缺失时输入框留空，不显示 0（0 会被误读成"上限就是 0"）', () => {
     loadSettings({});
     expect(document.getElementById('inp-max-rounds').value).toBe('');
-    expect(document.getElementById('inp-max-context').value).toBe('');
   });
 
   it('填写后随 settings.apply 提交为数字', () => {
     loadSettings({});
     document.getElementById('inp-max-rounds').value = '16';
-    document.getElementById('inp-max-context').value = '65536';
     const sent = submit();
     expect(sent.maxToolRounds).toBe(16);
-    expect(sent.maxContextTokens).toBe(65536);
   });
 
   it('留空 = 不提交该字段（绝不用 Number(\'\') = 0 把上限设成 0）', () => {
     loadSettings({});
     document.getElementById('inp-max-rounds').value = '';
-    document.getElementById('inp-max-context').value = '';
     const sent = submit();
     expect(sent.maxToolRounds).toBeUndefined();
-    expect(sent.maxContextTokens).toBeUndefined();
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 });
 
 /**
- * 采样参数（温度 / 输出上限）。
+ * 采样温度。
  *
  * 与上一组的关键差别：这里 `null` 是**有语义**的 —— 它表示"用户从没配过"，面板必须留空、
- * 提交时也不下发，好让 daemon 侧继续用模型层缺省（温度 0.2、上限不发送）。若在扩展侧
- * 回落成一个具体数字，就是把"没配"悄悄变成"配成 0.2"，凭空改变请求体。
+ * 提交时也不下发，好让 daemon 侧继续用模型层缺省（温度 0.2）。若在面板侧回落成一个具体
+ * 数字，就是把"没配"悄悄变成"配成 0.2"，凭空改变请求体。
+ *
+ * 输出上限（`maxTokens`）原先与温度同组，后按实机测试反馈**从面板撤下**（同为实现细节）；
+ * "撤下"与"留空不提交"在行为上恰好等价，故 daemon 侧不变。
  */
-describe('设置面板：采样参数可配（批次 2）', () => {
+describe('设置面板：采样温度可配（批次 2）', () => {
   const loadSettings = (config) => {
     document.getElementById('btn-settings').click();
     emitEvent('settings.loaded', {
@@ -1158,53 +1163,89 @@ describe('设置面板：采样参数可配（批次 2）', () => {
     return lastMessageOfKind('settings.apply').settings;
   };
 
-  it('两个字段都在表单里，且是带区间的数字输入', () => {
+  it('字段在表单里，且是带区间的数字输入', () => {
     const temp = document.getElementById('inp-temperature');
-    const max = document.getElementById('inp-max-tokens');
     expect(temp).not.toBeNull();
-    expect(max).not.toBeNull();
     expect(temp.type).toBe('number');
     expect(temp.min).toBe('0');
     expect(temp.max).toBe('2');
-    expect(max.type).toBe('number');
-    expect(max.min).toBe('1');
-    expect(max.max).toBe('131072');
   });
 
   it('settings.loaded 把当前值填进输入框', () => {
-    loadSettings({ temperature: 0.7, maxTokens: 8192 });
+    loadSettings({ temperature: 0.7 });
     expect(document.getElementById('inp-temperature').value).toBe('0.7');
-    expect(document.getElementById('inp-max-tokens').value).toBe('8192');
   });
 
   it('null（用户没配过）时留空 —— 显示 0.2 会把"没配"变成"配成 0.2"', () => {
-    loadSettings({ temperature: null, maxTokens: null });
+    loadSettings({ temperature: null });
     expect(document.getElementById('inp-temperature').value).toBe('');
-    expect(document.getElementById('inp-max-tokens').value).toBe('');
   });
 
   it('填写后随 settings.apply 提交为数字', () => {
     loadSettings({});
     document.getElementById('inp-temperature').value = '1.2';
-    document.getElementById('inp-max-tokens').value = '4096';
-    const sent = submit();
-    expect(sent.temperature).toBe(1.2);
-    expect(sent.maxTokens).toBe(4096);
+    expect(submit().temperature).toBe(1.2);
   });
 
   it('留空的判据是"空串"而不是"假值"：显式填 0 必须原样提交', () => {
     loadSettings({});
     document.getElementById('inp-temperature').value = '';
-    document.getElementById('inp-max-tokens').value = '';
-    const sent = submit();
-    expect(sent.temperature).toBeUndefined();
-    expect(sent.maxTokens).toBeUndefined();
+    expect(submit().temperature).toBeUndefined();
 
     // 温度 0 = 最确定，是**合法值**；用 `if (x)` 判断真假会把它当成"没填"而丢掉
     document.getElementById('inp-temperature').value = '0';
     expect(submit().temperature).toBe(0);
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+});
+
+/**
+ * Agent 预设（本批次由自由文本改为下拉）。
+ *
+ * 此前是个文本输入框：用户既不知道"预设"指什么，也不知道能填什么。现改为下拉 + 下方说明。
+ * 关键取舍：配置里若存着不在选项里的历史值，**补一个选项**而不是让它落空 ——
+ * `<select>.value = 'x'` 落空成空串后，提交时会把用户存过的值悄悄改写成缺省。
+ */
+describe('设置面板：Agent 预设是下拉', () => {
+  const loadSettings = (config) => {
+    document.getElementById('btn-settings').click();
+    emitEvent('settings.loaded', {
+      config: {
+        model: 'deepseek-flash',
+        baseURL: 'https://api.deepseek.com/v1',
+        provider: 'auto',
+        ...config,
+      },
+      hasApiKey: true,
+      models: [{ id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' }],
+      modelsHint: '',
+    });
+  };
+
+  const submit = () => {
+    document
+      .getElementById('settings-form')
+      .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    return lastMessageOfKind('settings.apply').settings;
+  };
+
+  it('渲染成 <select>，只有 default 一项，且下方给出含义说明', () => {
+    loadSettings({ preset: 'default' });
+    const sel = document.getElementById('inp-preset');
+    expect(sel.tagName).toBe('SELECT');
+    expect([...sel.options].map((o) => o.value)).toEqual(['default']);
+    expect(sel.value).toBe('default');
+    const hint = document.getElementById('preset-hint');
+    expect(hint).not.toBeNull();
+    expect(hint.textContent).toContain('预设');
+  });
+
+  it('配置里的历史值不在选项里时补成选项，绝不悄悄改写成缺省', () => {
+    loadSettings({ preset: 'coder' });
+    const sel = document.getElementById('inp-preset');
+    expect(sel.value).toBe('coder');
+    expect(submit().preset).toBe('coder');
   });
 });
 

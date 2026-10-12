@@ -104,7 +104,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test                    # 单元测试（vitest，746 用例）
+npm test                    # 单元测试（vitest，752 用例）
 npm run smoke               # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemon 跑通同一份协议
                             #（缺 Python 3 时优雅跳过；`npm run smoke:protocol -- --require` 则判失败）
@@ -159,7 +159,7 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.daemon.port` | `0` | `external` 模式端口 |
 | `dsh.daemon.token` | `""` | `external` 模式握手令牌 |
 | `dsh.apiKey`（已弃用） | `""` | 旧版明文 API Key；首次读取自动回迁到 SecretStorage 并清除，推荐改用「面板 → 设置」 |
-| `dsh.preset` | `default` | 握手时传给 daemon 的 Agent 预设 |
+| `dsh.preset` | `default` | 握手时传给 daemon 的 Agent 预设（行为档位名，不是模型名）；当前只有 `default` 一档，且该值只被记录、不影响行为 |
 | `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
 | `dsh.model.model` | `deepseek-flash` | 模型名。建议在侧边栏「模型设置」里从下拉选择（列表自动跟随 DeepSeek 官方更新） |
 | `dsh.model.idleTimeoutSeconds` | `60` | 模型请求空闲超时秒数（0–1800，0 = 关闭）；距上一个流式增量超时即中断，防会话永久挂起 |
@@ -271,7 +271,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，746 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，752 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   **daemon 安全边界纯函数**（握手鉴权 / 浏览器 Origin 拒绝 / 能力收敛 / 挂起项错误码映射 / `allowedDirs` 再收窄）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）与**命令风险分级**（档位判定顺序、复合命令取最高级）、

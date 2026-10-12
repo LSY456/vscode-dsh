@@ -9,7 +9,7 @@
  * 不碰 socket。因此可以在单测里离线穷举边界（空 token、大小写、前缀伪造、带 Origin……），
  * 不必起真服务器。抽出的函数必须是纯的，含副作用的一律留在 `server.ts`。
  */
-import { AgentCapabilities } from './agent';
+import type { AgentCapabilities } from './agent';
 import { ERROR_CODES } from '../../shared/protocol';
 import { assertPathInside } from './paths';
 import { clampApprovalTtlMs } from './sessionManager';

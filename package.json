@@ -2,7 +2,7 @@
   "name": "vscode-dsh",
   "displayName": "dsh · DeepSeek Harness Agent for VSCode",
   "description": "VSCode 与 dsh Agent Daemon 的联动：上下文捕获、流式推理、工具审批与原生 Diff 审查。",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "publisher": "LSY456",
   "license": "MIT",
   "repository": {
@@ -274,8 +274,14 @@
         },
         "dsh.preset": {
           "type": "string",
+          "enum": [
+            "default"
+          ],
+          "enumDescriptions": [
+            "缺省档位：不做额外行为调整（当前唯一可选值）"
+          ],
           "default": "default",
-          "description": "daemon 端使用的 Agent 预设名。"
+          "description": "Agent 预设：握手时交给 daemon 的行为档位名（不是模型名）。当前 daemon 只提供 default 一档，保持缺省即可。"
         },
         "dsh.model.baseURL": {
           "type": "string",
@@ -308,7 +314,7 @@
           "type": "number",
           "minimum": 0,
           "maximum": 2,
-          "description": "采样温度（0–2）：越低越确定、越高越发散。留空 = 使用内置缺省 0.2。注意 Anthropic 的合法区间是 0–1，超出部分会被钳制到 1。"
+          "description": "采样温度（0–2）：数字越小，回答越稳定、越保守；数字越大，回答越随机、越有发挥空间。不确定就留空，使用内置缺省 0.2。注意 Anthropic 的合法区间是 0–1，超出部分会被钳制到 1。"
         },
         "dsh.model.maxTokens": {
           "type": "number",
