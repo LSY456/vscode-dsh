@@ -139,8 +139,8 @@
   另：路径护栏失败返回 `{ error }` 而**不抛异常** —— 抛出去会被外层 catch 统一降成 `InternalError`，
   于是"越界"这个精确原因在 UI 上就消失了。
   > 说清边界：**`server.ts` 并非此前完全无单测**（`server.test.ts` 早覆盖了连接级隔离与
-  > `resolveAgentDecision()`），本次补的是唯一没有单测的**安全边界**这一段。P1-17 涉及的其余 6 个文件
-  > （`daemonManager` / `wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger`）仍未动，
+  > `resolveAgentDecision()`），本次补的是唯一没有单测的**安全边界**这一段。P1-17 涉及的其余 5 个文件
+  > （`wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger`）仍未动，
   > 本行**未整行关闭**。
 - **Webview 巨型单文件拆分（P1-12）**：`media/webview.js` 从 **2244 行**（两个功能批次各堆了数百行，
   已从 1155 翻近一倍）拆成**薄入口 + 共享壳 + 6 个特性模块**。入口只剩三件事（建壳 / 组装 / 接线 + 启动），
