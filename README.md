@@ -1,4 +1,4 @@
-# vscode-dsh — 开箱可用的 VSCode 本地 Agent（自带内核，协议可插拔）
+# vscode-dsh — 开箱可用的 VSCode 本地 Agent
 
 **vscode-dsh** 是一个**自带 Agent 内核、装上就能用**的 VSCode 编程助手。模型路由、工具沙箱、
 会话状态全部跑在一个独立的本地 **daemon 进程**里，编辑器侧只负责"上下文捕获 + 交互面板"，
@@ -269,42 +269,6 @@ vscode-dsh/
 - **补丁落盘护栏**：Agent 修改文件必须经过 Diff 审查；拒绝即不写盘（参考 daemon 在收到
   `file.patch.respond(accept)` 后才写）。
 
-## 工程质量（P0）
-
-- **单元测试**：`npm test`（vitest，759 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
-  **daemon 安全边界纯函数**（握手鉴权 / 浏览器 Origin 拒绝 / 能力收敛 / 挂起项错误码映射 / `allowedDirs` 再收窄）、
-  会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
-  工具沙箱（护栏/策略/默认拒绝/命令沙箱）与**命令风险分级**（档位判定顺序、复合命令取最高级）、
-  轨迹持久化（脱敏/缓冲/轮转/**结构化字段**/旧记录向后兼容）、真实 Agent 循环、
-  会话级回滚（快照/写入指纹/幂等与防覆盖）、计划模式（只读工具集/挂起/批准与拒绝分支）、
-  Webview Markdown 渲染与净化（XSS 安全）、以及面板 DOM 契约（jsdom 载入真实 `media/webview.html`）。
-- **端到端冒烟**：`npm run smoke` 覆盖安全握手、能力禁用、补丁、审批、多会话并发、断线续跑、
-  `file.read` 越界拒绝、真实 Agent 流水线（`--agent real --fake-model`：读/写工具 + 轨迹落盘）、
-  计划模式全流程（出方案 → 反复挂起被拒 → 拒绝不改盘 → 批准后落盘）、
-  结构化轨迹回读（工具 / 成功标志 / 耗时 / token 估算）与审批风险等级（只读命令判为低危、文案随等级变化），
-  以及真实 `bash_execute`（审批 → spawn 执行 → cwd 约束校验）。
-- **集成测试**：`npm run test:integration` 用 `@vscode/test-electron` 启动真实 VSCode Extension Host，
-  覆盖扩展宿主层 ↔ daemon 的完整闭环（T1 激活连接 / T2 补丁 / T3 审批 / T4 路径护栏 / T5 编辑后应用）。
-- **协议第二实现冒烟**：`npm run smoke:protocol` 拉起 `examples/python-daemon`（Python 3 + 仅标准库、
-  手写 WebSocket）并按协议走完 `initialize → session.create → session.send（含 read_file 工具）→ shutdown`，
-  同时断言错 token / 带 `Origin` 的握手被拒、路径护栏生效、错误码正确。它是"后端可换"的**可执行证据**，
-  也是任何第三方实现照着跑通即算兼容的**规格样本**（CI 用 `--require` 跑，缺 Python 判失败）。
-- **真实连通冒烟**：`npm run smoke:real`（可选，需真实 apiKey，不参与 CI）用真实 endpoint 的 SSE 流
-  验证 OpenAI 兼容与 Anthropic 两条适配链解析出非空正文且流式增量触发；缺 key 诚实跳过（退出 0）。
-- **CI**：`.github/workflows/ci.yml` 在 push/PR 自动执行 security（npm audit + osv-scanner）、
-  typecheck → build → unit → smoke → 协议第二实现（win/ubuntu，显式 setup-python）、
-  integration（vscode extension host，ubuntu）；main 分支额外产出 VSIX 构件。
-  流水线自身也按最小权限与固定版本搭建：所有 action **pin 到 commit SHA**（tag 可被移动）、
-  顶层 `permissions: contents: read` + job 级提权、逐 job `timeout-minutes`、
-  缓存 `@vscode/test-electron` 下载的 VSCode；并有**工作流守卫** `npm run check:workflows`
-  把这些约束变成可执行断言，防止 `@v4` 这类浮动引用悄悄溜回来。
-- **前端结构**：面板脚本 `media/webview.js` 是**薄入口**（建壳 / 组装 / 接线 / 启动），业务逻辑在
-  `src/webview/`：`panelCore`（DOM 引用 + 可变 state + 原语）+ `statusBar` / `messages` / `cards` /
-  `history` / `composer` / `events` 六个特性模块。esbuild 以入口打包成**单个 bundle、外链为零**（符合
-  webview CSP），模块内联不改变这一点；测试与静态预览仍直接 `import` 入口跑**真实代码**（不是 mock）。
-  可变状态集中在一个 `state` 对象里 —— 闭包里的 `let` 无法跨模块共享，各模块各自 `let` 一份会静默分叉。
-- **日志**：扩展 OutputChannel 分级日志（`dsh.log.level`），daemon stderr 转发。
-- **打包**：`npm run package` 产出约 300KB 的 VSIX（`dist/`，35 文件）。
 
 ## 迹线（Trajectory）数据映射
 
@@ -334,88 +298,7 @@ daemon 内部轨迹以 **`trajectory.record` 事件流**投影到 VSCode，每�
 协议细节以 `shared/protocol.ts`（两端共享的类型与守卫）与 [PROTOCOL.md](PROTOCOL.md) 为准。
 第二实现能跑通，说明契约里没有夹带 Node 侧的实现细节。
 
-## 路线图
 
-### 已完成
-- [x] 协议契约 + 参考 daemon（安全握手/流式/审批/补丁/迹线/取消）
-- [x] Extension Host（进程管理/上下文捕获/Diff 提供器/Webview 桥）
-- [x] Webview UI（推理流/打字机/工具卡/审批卡/补丁卡/迹线面板）
-- [x] **D1-D3 面板重设计**：跟随当前主题的 VSCode 原生观感（`--vscode-*` 变量，浅/深/高对比自适应）、
-      工具调用折叠为「过程」时间线、挂起项（审批/补丁）常驻待办条 + 60s 倒计时、滚动锁定与
-      Esc/Enter 键盘操作、历史与设置改为覆盖式面板、回答一键复制
-- [x] **E1-E4 可用性补齐（P0）**：活动栏常驻视图入口、新建 / 切回历史会话（daemon 重放续聊）、
-      补丁 Diff 标题栏的应用 / 编辑后应用 / 拒绝按钮、挂起项超时可配（`dsh.approval.ttlSeconds`）
-- [x] **P0 一致性加固**：脏文档一致性（未保存缓冲区优先读取 + 补丁改走编辑器，避免覆盖用户编辑）、
-      补丁乐观并发校验（防静默覆盖并发修改）、取消可中断在途模型请求 + 模型请求空闲超时、
-      能力/运行时配置与脏文档覆盖层下沉到**连接**作用域（多窗口复用 daemon 互不污染）
-- [x] **P0 工程质量**：vitest 单元测试（覆盖协议守卫 / 路径护栏 / 状态机 / Agent / 模型 / 工具 / 轨迹 / 面板契约）、
-      GitHub Actions CI、OutputChannel 分级日志、VSIX 打包
-- [x] **P1 协议加固**：审批/补丁强校验 + 过期同步（`-32010`）、会话状态机 + 事件缓冲 + `session.resume`
-      断线续跑、路径护栏（`-32012`）、能力分级（allowedTools/allowedDirs/maxConcurrency）、
-      多会话并发（会话级而非连接级）、大文件 `file.read` 按需读取、心跳
-- [x] **P3 真实 daemon**：模型适配层（OpenAI 兼容流式 + 思维链分离）、真实 Agent 循环（同一 AgentContext
-      契约 + 原生 function calling）、真实工具沙箱（只读搜索 read_file/list_dir/grep/glob、写入 Diff 审查、高危命令策略+审批）、轨迹持久化（JSONL 轮转）、
-      按 `dsh.apiKey` 自动切换 mock/real
-- [x] **A1 Webview 渲染**：Markdown 渲染（marked + GFM）+ 代码高亮（highlight.js，常用语言）+ DOMPurify
-      统一净化（配合 CSP 双层防御 XSS），流式期间纯文本、结束时一次性安全渲染
-- [x] **A2 流式渲染批处理**：token 级 delta 按帧节流写 DOM（rAF，无 rAF 退避），消息结束前冲刷兜底，
-      长回答不再高频 reflow/抖动
-- [x] **A3 会话历史**：extension 侧 workspaceState 持久化（面板重开不丢 + 按工作区隔离）、
-      历史会话列表与一键回放、异常中断最后一段回答兜底落库
-- [x] **A4 配置面板 + 凭据安全化**：apiKey 迁移 VSCode SecretStorage（旧明文自动回迁并清除）、
-      面板化模型配置（API Key / 模型 / BaseURL / 预设），保存后一键重启 daemon 生效
-- [x] **P2 信任记忆 + 补丁编辑**：免审批白名单（审批卡「接受并记住」脱敏生成规则、高危程序仅精确匹配、
-      工具白名单优先于信任放行、规则落 `.dsh/trust.json` 可审阅清空）、Diff 编辑后应用（补丁左侧自由
-      编辑后采纳，`file.patch.respond` 携带编辑后内容写盘）
-- [x] **C 系列工程化**：CI 安全扫描（`npm audit --omit=dev` 生产依赖高危阻断 + OSV-Scanner 全量扫描）、
-      daemon 日志落盘（tee stdout/stderr 到 `.dsh/logs/daemon.log`，带轮转与 0600 权限）、
-      `trajectory.list` 协议化（以协议回放脱敏轨迹，替代直接读 JSONL 文件）
-- [x] **集成测试**：`@vscode/test-electron` 启动真实 VSCode Extension Host，自动化 T1-T5
-      （激活连接 / 补丁 / 审批 / 路径护栏 / 编辑后应用）
-- [x] **P3.5+ 生产化**：命令执行沙箱（可插拔后端：Linux 检测到 bubblewrap 即启用命名空间隔离，
-      其余平台应用层兜底 cwd 约束 + 环境最小化 + 超时进程树终止，降级原因显式告警）、模型多点位
-      （OpenAI 兼容全家桶 + Anthropic Messages 适配，经 `dsh.model.provider` 选择）
-- [x] **B+ 定位收敛**：README 改为「三层定位」（自带内核开箱可用 / 开放协议 + 参考实现 / mock 仅测试夹具）；
-      消除未配 Key 时的**静默降级**（daemon 回报 `agentReason`，面板显示「演示模式」横幅 + 模式 chip + 一键配置）；
-      新增协议**第二实现** `examples/python-daemon`（Python 3 + 仅标准库）与 `npm run smoke:protocol`，
-      把"后端可换"从文档承诺变成可执行断言；mock 关键字教学移出主路径（见 [docs/mock-agent.md](docs/mock-agent.md)）
-- [x] **UI 缺陷修复**：`[hidden]` 属性被 `.sheet` / `.pending-bar` 自带的 `display: flex` 覆盖
-      （作者样式优先级高于 UA 样式表），导致覆盖式面板与待办条可能常显；补全局 `[hidden]` 兜底规则
-- [x] **健壮性加固（P1）**：目录遍历加预算（条目/深度/墙钟三道上限 + realpath 去重断环）——
-      此前大仓库上 grep 一次就会占满事件循环，心跳发不出去，用户看到的是"连接断开"而非"搜索太慢"，
-      且 symlink 环会让递归永不终止；超限时结果带 `walkExhausted`，把"没搜完"与"确实无匹配"分开；
-      `recycleStaleDaemon` **kill 前先核对进程身份**（pid 取自本机任意进程可写的 `.dsh/daemon.json`，
-      无条件 kill 会误杀无关进程，现读不到命令行即放弃 kill）；外部 daemon 启动命令改引号感知解析
-      （反斜杠不当转义符，Windows 路径不再被吃掉一层目录）；daemon 的 HTTP 端点对非升级请求返回 404 空体
-      （不再回带 `Upgrade` 的 426 变相指路）；空闲会话按 TTL/LRU 回收（`running`/`pending_*` 永不回收）、
-      过期挂起项在下次登记时清扫；迹线步号改为**会话内**递增；webview 遇未知协议事件或渲染抛错上报诊断
-      （不再静默成"界面没反应"），新一轮开始前强制收尾上一轮（缺 `message.done` 时回答不再续写进旧气泡）
-
-- [x] **P2-6 会话级事务回滚**：每个文件**第一次被改动之前**留影子快照（`.dsh/snapshots/<会话>/`，首写优先、
-      只增不改），`session.rollback` 一键还原到本次会话开始前（新建的文件被删除）。与 Diff 审批互补
-      （审批事前拦截 / 回滚事后兜底）；运行中的会话拒绝回滚（避免与写入并发）；目标此刻在编辑器里有未保存
-      改动时**跳过而不覆盖**；结果分列回报（还原 / 删除 / 脏跳过 / 不可还原 / 失败 / 未记录），
-      并**重做 canonical 路径校验**——索引文件是本机可写的，被篡改也不能让 daemon 写到工作区外
-
-- [x] **P2-4 图片输入**：粘贴截图 / 拖进输入框 / 选择文件三条路径汇到**同一处暂存**（一处限额、一处降采样、
-  一处移除），图片作为独立内容块参与请求（OpenAI 兼容 `image_url` 的 data URL / Anthropic `source.base64` 块），
-  文本侧只留 `[图片 N：名字]` 位置标记；**纯文本请求体与改造前逐字节一致**。限额（mime 白名单 / 4 张 /
-  单张 5 MB / 合计 12 MB）在**扩展与 daemon 各校验一次**（daemon 才是安全边界），不合规**整条拒绝**并说明原因、
-  不发 `session.started`；`capabilities.image` 供第三方客户端判断。缩略图留面板本地（回显只带 `clientId`），
-  发送后等回显才清暂存（被拒时那张图还在，可重发）
-
-- [x] **安全边界单测 + 审批风险分级 + 结构化轨迹（P1-17 部分 / P2-9 / P2-8）**：`server.ts` 的握手鉴权、
-      Origin 拒绝、能力收敛、路径护栏、挂起项错误码映射抽为纯函数（`src/daemon/serverGuards.ts`）并补 27 例
-      单测 —— 此前这段是**安全边界**却只靠冒烟间接覆盖，能证明"通"、证不了"穷尽"；审批风险不再一律"高危"，
-      按命令内容分高 / 中 / 低三档（复合命令取最高级、未识别按中兜底、**低危不等于免审批**）；
-      轨迹记录增加结构化字段（工具 / 成功标志 / 耗时 / 错误分类 / token 估算），脱敏覆盖所有字符串字段，
-      旧记录向后兼容（`.dsh/trajectory/*.jsonl` 是已落盘的审计数据）
-
-### 待办
-- [ ] P1-17（余下）：`wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger` 五个文件仍无单测
-      （本批只补了 `server.ts` 里**安全边界**那一段；`server.ts` 与 `daemonManager.ts` 此前已有单测）
-- [ ] P4a：Remote-SSH / WSL / Containers 场景实测（核心链路已由 CI Linux 拓扑覆盖，待真实环境确认 drvfs 路径 / remote server 环境 / 容器网络等边界）
-- [ ] P4b：跨主机 TLS + 鉴权升级（仅当 daemon 需监听非 127.0.0.1 供跨机访问时；标准 Remote 场景 extension 与 daemon 同在 remote 走 localhost，不需要）
 
 ## 已知局限
 
