@@ -44,6 +44,17 @@ export interface ChatMessage {
   toolCalls?: ToolCall[];
   /** tool 消息对应的原生调用 id（OpenAI tool_call_id / Anthropic tool_use_id） */
   toolCallId?: string;
+  /**
+   * daemon 内部标记：**上下文裁剪必须跳过它**（批次 11-1）。
+   *
+   * 只用于"用户已批准的计划 + 批准时的补充意见"这两条 —— 它们是用户的授权事实，
+   * 一旦被裁剪掉，模型会在几轮后忘记自己是被批准做什么的（计划模式的调研本身就很吃预算）。
+   * 宁可少带历史，也不能丢用户批准过的意图。
+   *
+   * 不进协议、不影响假模型；两家 provider 的序列化都是**显式构造新对象**（没有 `...m` 展开），
+   * 所以这个字段不会出现在任何请求体里。
+   */
+  pinned?: true;
 }
 
 /**

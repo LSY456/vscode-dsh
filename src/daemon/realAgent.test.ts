@@ -5,7 +5,7 @@ import * as path from 'path';
 import { EVENTS, ERROR_CODES } from '../../shared/protocol';
 import { AgentCapabilities, AgentContext } from './agent';
 import { ChatCompletionResult, ChatContentPart, ChatMessage, ChatModel, ChatStreamOptions, contentToText, FakeChatModel, FakeTurn, formatToolCallContent } from './model';
-import { applyTokenBudget, estimateTokens, generateTitle, RealAgentConfig, runRealAgent, TITLE_SYSTEM_PROMPT } from './realAgent';
+import { applyTokenBudget, CONTEXT_TRIM_NOTICE_PREFIX, estimateTokens, generateTitle, RealAgentConfig, runRealAgent, TITLE_SYSTEM_PROMPT } from './realAgent';
 import { PLAN_MODE_MARKER } from './planMode';
 
 let root = '';
@@ -600,7 +600,8 @@ describe('上下文 token 预算', () => {
       { role: 'assistant', content: 'B'.repeat(50) },
       { role: 'tool', content: 'U'.repeat(50), toolCallId: 'c2' },
     ];
-    const r = applyTokenBudget(msgs, 60);
+    // 预算 85 留出了裁剪明示（约 44 token）的空间；给太紧会连最近一轮也一起收走（见下一条）
+    const r = applyTokenBudget(msgs, 85);
     expect(r.length).toBe(4);
     expect(r[0].role).toBe('system');
     expect(r[1].role).toBe('user');
@@ -608,6 +609,22 @@ describe('上下文 token 预算', () => {
     expect(r[2].content).toBe('B'.repeat(50));
     expect(r[3].role).toBe('tool');
     expect(r[3].toolCallId).toBe('c2');
+  });
+
+  it('applyTokenBudget：裁剪明示自身占预算 —— 预算卡得紧时会为它多收一轮（批次 11-1）', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'system', content: 'S' },
+      { role: 'user', content: 'U' },
+      { role: 'assistant', content: 'A'.repeat(100), toolCalls: [{ id: 'c1', tool: 'read_file', input: { path: '/x' } }] },
+      { role: 'tool', content: 'T'.repeat(100), toolCallId: 'c1' },
+      { role: 'assistant', content: 'B'.repeat(50) },
+      { role: 'tool', content: 'U'.repeat(50), toolCallId: 'c2' },
+    ];
+    // 同一份消息、预算 60：丢掉最旧一轮后本已回到约 28 token，但明示一挂上又超了，
+    // 于是最近一轮也被收走 —— 这才是"明示计入预算"的可观测后果（否则会越裁越长）。
+    const r = applyTokenBudget(msgs, 60);
+    expect(r.length).toBe(2);
+    expect(contentToText(r[0].content)).toContain(CONTEXT_TRIM_NOTICE_PREFIX);
   });
 
   it('applyTokenBudget：计入原生 toolCalls JSON；极紧预算至少保留 system+user', () => {
@@ -630,6 +647,65 @@ describe('上下文 token 预算', () => {
       { role: 'tool', content: 'T', toolCallId: 'c1' },
     ];
     expect(applyTokenBudget(msgs, 2)).toBe(msgs);
+  });
+
+  it('applyTokenBudget：pinned（已批准的计划 + 补充意见）永不被裁（批次 11-1）', () => {
+    const plan = `【已批准的计划】\n${'p'.repeat(100)}`;
+    const note = '补充意见：别动 b.ts';
+    const msgs: ChatMessage[] = [
+      { role: 'system', content: 'S' },
+      { role: 'user', content: 'U' },
+      { role: 'assistant', content: 'A'.repeat(400), toolCalls: [{ id: 'c1', tool: 'read_file', input: { path: '/x' } }] },
+      { role: 'tool', content: 'T'.repeat(400), toolCallId: 'c1' },
+      { role: 'assistant', content: plan, pinned: true },
+      { role: 'user', content: note, pinned: true },
+      { role: 'assistant', content: 'B'.repeat(400), toolCalls: [{ id: 'c2', tool: 'read_file', input: { path: '/y' } }] },
+      { role: 'tool', content: 'W'.repeat(400), toolCallId: 'c2' },
+    ];
+    const r = applyTokenBudget(msgs, 200);
+    const texts = r.map((m) => contentToText(m.content));
+    expect(texts).toContain(plan);
+    expect(texts).toContain(note);
+    // pinned 不是"绕过预算"的挡箭牌：其余轮次该裁还得裁
+    expect(texts.filter((t) => t.includes('A'.repeat(400)))).toHaveLength(0);
+    expect(texts.filter((t) => t.includes('B'.repeat(400)))).toHaveLength(0);
+  });
+
+  it('applyTokenBudget：裁剪明示折进 system，整场只有一条（幂等，不随轮次累积）', () => {
+    const round = (tag: string): ChatMessage[] => [
+      {
+        role: 'assistant',
+        content: `${tag}${'x'.repeat(600)}`,
+        toolCalls: [{ id: `c_${tag}`, tool: 'read_file', input: { path: `/${tag}` } }],
+      },
+      { role: 'tool', content: 'y'.repeat(600), toolCallId: `c_${tag}` },
+    ];
+    const noticeCount = (arr: ChatMessage[]) =>
+      contentToText(arr[0].content).split(CONTEXT_TRIM_NOTICE_PREFIX).length - 1;
+
+    const first = applyTokenBudget(
+      [{ role: 'system', content: 'S' }, { role: 'user', content: 'U' }, ...round('a'), ...round('b')],
+      200
+    );
+    expect(noticeCount(first)).toBe(1);
+    // 明示折进 messages[0]，不新增 system 消息（新增会打破 [2]=assistant 的结构不变量）
+    expect(first[0].role).toBe('system');
+    expect(first.filter((m) => m.role === 'system')).toHaveLength(1);
+
+    // 再裁一轮：写入前先剥掉旧明示 → 仍然只有一条
+    const second = applyTokenBudget([...first, ...round('c')], 200);
+    expect(noticeCount(second)).toBe(1);
+  });
+
+  it('applyTokenBudget：可裁单元全被 pinned 时不死循环（最坏情况是不裁）', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'system', content: 'S' },
+      { role: 'user', content: 'U' },
+      { role: 'assistant', content: `【已批准的计划】\n${'p'.repeat(200)}`, pinned: true },
+      { role: 'user', content: '补充意见', pinned: true },
+    ];
+    // 预算远小于实际占用、却一个可裁单元都没有 → 原样返回（同一引用），不空转
+    expect(applyTokenBudget(msgs, 1)).toBe(msgs);
   });
 });
 
@@ -660,6 +736,47 @@ describe('realAgent：上下文预算裁剪', () => {
     expect(seen[2][1].role).toBe('user');
     // 裁剪轨迹被记录
     expect(ctx.events.some((e) => e.method === EVENTS.Trajectory && e.params.detail.includes('上下文裁剪'))).toBe(true);
+  });
+
+  it('计划批准后裁剪不得丢掉【已批准的计划】与补充意见（批次 11-1）', async () => {
+    fs.writeFileSync(file, 'TODO\nline2\n', 'utf8'); // 用例间共用同一临时文件，先复位
+    const big = path.join(root, 'plan-big.txt');
+    fs.writeFileSync(big, 'x'.repeat(4000), 'utf8');
+    const ctx = makeCtx();
+    ctx.getPlanNote = () => '第 2 步不要动 b.ts';
+    const rec = recording(
+      scripted([
+        { toolcall: { tool: 'read_file', input: { path: big } } }, // 调研：一轮就把预算吃满
+        { content: '## 计划\n1. 改 a.txt' },
+        { toolcall: { tool: 'write_file', input: { path: file, content: 'NEW' } } },
+        { content: '已完成' },
+      ])
+    );
+    const run = runRealAgent(
+      ctx,
+      { ...baseParams, planMode: true },
+      { model: rec.model, maxContextTokens: 120, maxToolRounds: 4 }
+    );
+
+    await waitEvent(ctx, EVENTS.PlanRequest);
+    ctx.waiters.find((w) => w.kind === 'plan')!.resolve(true);
+    await waitEvent(ctx, EVENTS.FilePatchPending);
+    ctx.waiters.find((w) => w.kind === 'patch')!.resolve(true);
+    await run;
+
+    // 计划阶段的裁剪此前没有迹线，11-1 补上（否则用户看不到调研上下文被丢过）
+    expect(
+      ctx.events.some(
+        (e) => e.method === EVENTS.Trajectory && String(e.params.detail).includes('上下文裁剪（计划阶段）')
+      )
+    ).toBe(true);
+
+    const execCall = rec.calls.find((c) => c.tools?.includes('write_file'))!;
+    const texts = execCall.messages.map((m) => contentToText(m.content));
+    expect(texts.some((t) => t.startsWith('【已批准的计划】'))).toBe(true);
+    expect(texts.some((t) => t.includes('第 2 步不要动 b.ts'))).toBe(true);
+    // 计划阶段的裁剪明示要跟着 system 走到执行阶段，否则"上下文被裁过"会静默消失
+    expect(contentToText(execCall.messages[0].content)).toContain(CONTEXT_TRIM_NOTICE_PREFIX);
   });
 });
 

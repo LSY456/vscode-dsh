@@ -20,7 +20,7 @@ import {
 import { sanitizeImageAttachments } from '../../shared/imageAttachment';
 import * as path from 'path';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatContentPart, ChatMessage, ChatModel, StreamChunk, ToolDefinition } from './model';
+import { ChatContentPart, ChatMessage, ChatModel, contentToText, StreamChunk, ToolDefinition } from './model';
 import { TrajectoryMeta } from '../../shared/protocol';
 import { createToolCallFenceFilter, parseToolCalls, ToolCall, ToolCallFenceFilter } from './toolcall';
 import {
@@ -416,6 +416,11 @@ export async function runRealAgent(
         try {
           const trimmed = applyTokenBudget(messages, maxContextTokens);
           if (trimmed.length < messages.length) {
+            // 与主循环同一条迹线纪律：裁掉了什么要留痕（计划阶段原本缺这一条，批次 11-1 补上）
+            trajectory(
+              'system',
+              `上下文裁剪（计划阶段）：${messages.length} → ${trimmed.length} 条消息（预算 ${maxContextTokens} token）`
+            );
             messages.length = 0;
             messages.push(...trimmed);
           }
@@ -500,8 +505,10 @@ export async function runRealAgent(
         }
       }
     } finally {
-      // 换回完整系统提示词：执行阶段仍受全部规则约束（调研结果**保留**在上下文里）
-      if (originalSystem) messages[0] = originalSystem;
+      // 换回完整系统提示词：执行阶段仍受全部规则约束（调研结果**保留**在上下文里）。
+      // 裁剪明示要一并带走：调研期间若裁过，这里直接覆盖 originalSystem 会让「上下文已被裁过」
+      // 静默消失 —— 而被裁掉的内容并不会因此回来，执行阶段的模型会以为自己看到的是全部。
+      if (originalSystem) messages[0] = carryTrimNotice(originalSystem, messages[0]);
     }
 
     if (failure) return failure;
@@ -559,9 +566,11 @@ export async function runRealAgent(
       return;
     }
 
-    // 批准：计划与补充意见一起回灌，主循环据此执行（工具集恢复为完整清单）
-    messages.push({ role: 'assistant', content: `【已批准的计划】\n${outcome.plan}` });
-    messages.push({ role: 'user', content: planApprovedInstruction(ctx.getPlanNote?.()) });
+    // 批准：计划与补充意见一起回灌，主循环据此执行（工具集恢复为完整清单）。
+    // pinned：这两条是**用户的授权事实**，上下文裁剪必须跳过（批次 11-1）—— 计划模式的调研
+    // 本身就占满预算，执行几轮后它们会漂到数组头部成为最先被丢的东西，模型随即"忘记"批准内容。
+    messages.push({ role: 'assistant', content: `【已批准的计划】\n${outcome.plan}`, pinned: true });
+    messages.push({ role: 'user', content: planApprovedInstruction(ctx.getPlanNote?.()), pinned: true });
     trajectory('system', '计划已获批准，进入执行阶段');
   }
 
@@ -1090,18 +1099,84 @@ function estimateMessageTokens(messages: ChatMessage[]): number {
 }
 
 /**
+ * 裁剪明示（批次 11-1）：裁剪一旦真的发生，就把它**折进 `messages[0]` 的 system 内容**。
+ *
+ * 为什么不另插一条 system 消息：
+ *  - `toAnthropicMessages`（`model.ts`）会把数组里**所有** system 消息上提到顶层 `system`
+ *    字段并跳过 —— 插在中间等于丢掉位置信息；
+ *  - 更要紧的是插在索引 2 会打破下面 `applyTokenBudget` 自己的结构不变量
+ *    （`[0]=system,[1]=user,[2]=assistant`），下一次调用会直接静默不裁剪。
+ *  追加一行则索引一个都不动，两家 provider 都天然生效。
+ *
+ * 前缀同时是**幂等标记**：写入前先按它剥掉上一次的明示，于是整场会话永远只有一条，
+ * 不会随轮次越积越多。文案刻意不给条数 —— 累计值得额外状态，而"本轮条数"会被读成总量；
+ * 精确数字仍走执行迹线。
+ */
+export const CONTEXT_TRIM_NOTICE_PREFIX = '【上下文裁剪】';
+
+const CONTEXT_TRIM_NOTICE =
+  `${CONTEXT_TRIM_NOTICE_PREFIX}更早的对话已按上下文预算移除；如需早前细节，请重新读取文件或让用户补充。`;
+
+function hasTrimNotice(msg: ChatMessage): boolean {
+  return contentToText(msg.content)
+    .split('\n')
+    .some((line) => line.startsWith(CONTEXT_TRIM_NOTICE_PREFIX));
+}
+
+/** 把裁剪明示挂到 system 消息上（返回**新对象**，不污染调用方持有的那条）。 */
+function withTrimNotice(system: ChatMessage): ChatMessage {
+  const kept = contentToText(system.content)
+    .split('\n')
+    .filter((line) => !line.startsWith(CONTEXT_TRIM_NOTICE_PREFIX));
+  return { ...system, content: [...kept, CONTEXT_TRIM_NOTICE].join('\n') };
+}
+
+/**
+ * 把 `from` 上的裁剪明示搬到 `base` 上 —— 计划阶段结束时会把 `messages[0]` 换回完整提示词，
+ * 若调研期间裁过，明示必须跟着走，否则"上下文被裁过"这件事会在执行阶段静默消失。
+ * `from` 没有明示就原样返回 `base`（同一引用，零开销）。
+ */
+function carryTrimNotice(base: ChatMessage, from: ChatMessage): ChatMessage {
+  return hasTrimNotice(from) ? withTrimNotice(base) : base;
+}
+
+/**
+ * 丢最旧的**可裁单元**（assistant + 紧随的 tool 结果）直到回到预算内；`pinned` 的一律跳过。
+ *
+ * 返回值是**停机收口**：一个可裁单元都没有时（例如剩下的全是 pinned）返回 false，
+ * 调用方据此知道"超预算但裁不动"，不会空转 —— 写成 `while + splice` 而漏了这个出口就是死循环。
+ * tool 结果必须跟着它的 assistant 一起走，否则原生 toolCalls/toolCallId 配对会被拆散。
+ */
+function dropOldestUnits(s: ChatMessage[], maxTokens: number): boolean {
+  let dropped = false;
+  while (s.length > 2 && estimateMessageTokens(s) > maxTokens) {
+    let start = 2;
+    while (start < s.length && s[start].pinned) start++;
+    if (start >= s.length) break; // 剩下的全是不可裁单元：停
+    let end = start + 1;
+    while (end < s.length && s[end].role === 'tool') end++;
+    s.splice(start, end - start);
+    dropped = true;
+  }
+  return dropped;
+}
+
+/**
  * 上下文预算裁剪：超出 maxTokens 时从最旧的工具轮次（assistant + 紧随的 tool 结果）
  * 整轮向前丢弃，保留 system + 初始 user + 最近轮次；整轮裁剪不拆散原生 toolCalls/toolCallId 配对。
+ *
+ * 批次 11-1 追加两条纪律：
+ *  - `pinned` 单元（用户已批准的计划与批准时的补充意见）**永不裁剪**；
+ *  - 真裁了东西才挂裁剪明示，并**再收一轮**（明示自己也占 token，否则会"越裁越长"）；
+ *    没裁动就原样返回，保住"未变即同一引用"的既有语义。
  */
 export function applyTokenBudget(messages: ChatMessage[], maxTokens: number): ChatMessage[] {
   if (estimateMessageTokens(messages) <= maxTokens || messages.length <= 2) return messages;
   // 不变量：[0]=system，[1]=user(初始)，[2]=assistant（首轮，其后为 tool* 轮次序列）；非此结构不裁剪（防御外部误用）
   if (messages[0].role !== 'system' || messages[1].role !== 'user' || messages[2]?.role !== 'assistant') return messages;
   const copy = messages.slice();
-  while (copy.length > 2 && estimateMessageTokens(copy) > maxTokens) {
-    let end = 3;
-    while (end < copy.length && copy[end].role === 'tool') end++;
-    copy.splice(2, end - 2);
-  }
+  if (!dropOldestUnits(copy, maxTokens)) return messages;
+  copy[0] = withTrimNotice(copy[0]);
+  dropOldestUnits(copy, maxTokens);
   return copy;
 }

@@ -7,6 +7,7 @@ import {
   FakeChatModel,
   OpenAICompatibleModel,
 } from './model';
+import type { ChatMessage } from './model';
 
 function sseChunks(lines: string[]): AsyncIterable<Uint8Array> {
   return {
@@ -151,6 +152,37 @@ describe('AnthropicModel', () => {
       { role: 'user', content: 'hello' },
       { role: 'user', content: '[工具结果]\ntool=read_file\n结果内容' },
     ]);
+  });
+});
+
+describe('pinned 是 daemon 内部标记，绝不能进请求体（批次 11-1）', () => {
+  const pinnedMessages: ChatMessage[] = [
+    { role: 'system', content: 'SYS' },
+    { role: 'user', content: 'U' },
+    { role: 'assistant', content: '【已批准的计划】\n1. 改 a.txt', pinned: true },
+    { role: 'user', content: '计划已获批准，请按上面的计划开始执行。', pinned: true },
+  ];
+
+  it('OpenAI 兼容端点：正文照发，pinned 字段不出现在负载里', async () => {
+    let raw = '';
+    vi.stubGlobal('fetch', async (_u: string, init: { body: string }) => {
+      raw = init.body;
+      return { ok: true, body: sseChunks(['data: [DONE]']), text: async () => '' };
+    });
+    await new OpenAICompatibleModel({ apiKey: 'k' }).chat(pinnedMessages);
+    expect(raw).toContain('【已批准的计划】');
+    expect(raw).not.toContain('pinned');
+  });
+
+  it('Anthropic 端点：正文照发，pinned 字段不出现在负载里', async () => {
+    let raw = '';
+    vi.stubGlobal('fetch', async (_u: string, init: { body: string }) => {
+      raw = init.body;
+      return { ok: true, body: sseChunks(['data: {"type":"message_stop"}']), text: async () => '' };
+    });
+    await new AnthropicModel({ apiKey: 'k' }).chat(pinnedMessages);
+    expect(raw).toContain('【已批准的计划】');
+    expect(raw).not.toContain('pinned');
   });
 });
 

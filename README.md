@@ -104,7 +104,7 @@ npm install
 npm run build          # 或 npm run watch 增量
 
 # 3. 验证协议闭环（不依赖 VSCode）
-npm test                    # 单元测试（vitest，752 用例）
+npm test                    # 单元测试（vitest，759 用例）
 npm run smoke               # 端到端冒烟：安全握手/补丁/审批/取消/并发/续跑/真实 Agent 流水线
 npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemon 跑通同一份协议
                             #（缺 Python 3 时优雅跳过；`npm run smoke:protocol -- --require` 则判失败）
@@ -271,7 +271,7 @@ vscode-dsh/
 
 ## 工程质量（P0）
 
-- **单元测试**：`npm test`（vitest，752 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
+- **单元测试**：`npm test`（vitest，759 用例）覆盖协议守卫、路径护栏（含 canonical 防符号链接逃逸）、
   **daemon 安全边界纯函数**（握手鉴权 / 浏览器 Origin 拒绝 / 能力收敛 / 挂起项错误码映射 / `allowedDirs` 再收窄）、
   会话状态机（并发/过期/续跑）、Agent 全分支、模型适配（SSE 流式解析，OpenAI 兼容 + Anthropic）、
   工具沙箱（护栏/策略/默认拒绝/命令沙箱）与**命令风险分级**（档位判定顺序、复合命令取最高级）、
