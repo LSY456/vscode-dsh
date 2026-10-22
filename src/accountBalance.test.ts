@@ -18,6 +18,7 @@ import {
   fetchBalance,
   formatBalanceText,
   insufficientBalance,
+  isBalanceApplicable,
   parseBalance,
 } from './accountBalance';
 
@@ -85,6 +86,25 @@ describe('端点推导', () => {
 
   it('自定义网关不猜它的站点根', () => {
     expect(balanceEndpointCandidates('https://gw.local')).toEqual(['https://gw.local/user/balance']);
+  });
+});
+
+describe('余额是否适用（P1-3 同源）', () => {
+  it('官方端点 + 非 anthropic → 适用', () => {
+    expect(isBalanceApplicable('auto', '')).toBe(true);
+    expect(isBalanceApplicable('openai', 'https://api.deepseek.com/v1')).toBe(true);
+    expect(isBalanceApplicable(undefined, undefined)).toBe(true);
+  });
+
+  it('anthropic 通道一律不适用 —— 即便 baseURL 还停在 DeepSeek 出厂缺省', () => {
+    // 这正是切 provider 后的真实状态：baseURL 没改，仍是 api.deepseek.com/v1。
+    // 只看端点会放行，于是拿 Claude 的 Key 去查 DeepSeek 账户余额 → 必然 401。
+    expect(isBalanceApplicable('anthropic', 'https://api.deepseek.com/v1')).toBe(false);
+    expect(isBalanceApplicable('anthropic', 'https://api.anthropic.com')).toBe(false);
+  });
+
+  it('自定义网关（非官方端点）→ 不适用（不把 Key 送给第三方）', () => {
+    expect(isBalanceApplicable('openai', 'https://gw.local/v1')).toBe(false);
   });
 });
 

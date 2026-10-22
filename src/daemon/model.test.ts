@@ -6,6 +6,7 @@ import {
   describeHttpError,
   FakeChatModel,
   OpenAICompatibleModel,
+  resolveProviderBaseURL,
 } from './model';
 import type { ChatMessage } from './model';
 
@@ -192,6 +193,66 @@ describe('createModel 工厂', () => {
     expect(createModel({ provider: 'openai', apiKey: 'k' })).toBeInstanceOf(OpenAICompatibleModel);
     expect(createModel({ apiKey: 'k' })).toBeInstanceOf(OpenAICompatibleModel);
     expect(createModel({ provider: 'auto', apiKey: 'k' })).toBeInstanceOf(OpenAICompatibleModel);
+  });
+});
+
+describe('provider 与 baseURL 解耦（P1-3）', () => {
+  const stubFetch = (sink: { url: string }) => {
+    vi.stubGlobal('fetch', async (u: string) => {
+      sink.url = u;
+      return { ok: true, body: sseChunks(['data: {"type":"message_stop"}']), text: async () => '' };
+    });
+  };
+
+  it('anthropic + 出厂缺省 base（DeepSeek）→ 换成 Anthropic 官方端点', () => {
+    expect(resolveProviderBaseURL('anthropic', 'https://api.deepseek.com/v1')).toBe('https://api.anthropic.com');
+    // 尾部斜杠、前后空白都不该影响判定
+    expect(resolveProviderBaseURL('anthropic', '  https://api.deepseek.com/v1/  ')).toBe(
+      'https://api.anthropic.com'
+    );
+  });
+
+  it('anthropic + 未填 base → Anthropic 官方端点', () => {
+    expect(resolveProviderBaseURL('anthropic', '')).toBe('https://api.anthropic.com');
+    expect(resolveProviderBaseURL('anthropic', '   ')).toBe('https://api.anthropic.com');
+    expect(resolveProviderBaseURL('anthropic', undefined)).toBe('https://api.anthropic.com');
+  });
+
+  it('用户显式填了别的地址 → 一律照用（含 DeepSeek 的 anthropic 兼容入口）', () => {
+    // 判据是"等不等于出厂缺省值"，不是"域名像不像" —— 否则这条会被误替换
+    expect(resolveProviderBaseURL('anthropic', 'https://api.deepseek.com/anthropic')).toBe(
+      'https://api.deepseek.com/anthropic'
+    );
+    expect(resolveProviderBaseURL('anthropic', 'https://my.gateway.local/v1')).toBe('https://my.gateway.local/v1');
+  });
+
+  it('openai / auto 不动 base（未填时交回模型层回落 DeepSeek）', () => {
+    expect(resolveProviderBaseURL('openai', 'https://api.deepseek.com/v1')).toBe('https://api.deepseek.com/v1');
+    expect(resolveProviderBaseURL('auto', 'https://x/v1')).toBe('https://x/v1');
+    expect(resolveProviderBaseURL('auto', '')).toBeUndefined();
+    expect(resolveProviderBaseURL(undefined, undefined)).toBeUndefined();
+  });
+
+  it('真实请求 URL：切了 provider 不改 base，也不会拼出 /v1/v1/messages', async () => {
+    const sink = { url: '' };
+    stubFetch(sink);
+    await createModel({
+      provider: 'anthropic',
+      baseURL: 'https://api.deepseek.com/v1',
+      apiKey: 'k',
+      model: 'claude-x',
+    }).chat([{ role: 'user', content: 'hi' }]);
+    expect(sink.url).toBe('https://api.anthropic.com/v1/messages');
+    expect(sink.url).not.toContain('/v1/v1/');
+  });
+
+  it('Anthropic base 已带 /v1（照文档粘完整前缀）时不再重复拼接', async () => {
+    const sink = { url: '' };
+    stubFetch(sink);
+    await new AnthropicModel({ baseURL: 'https://api.anthropic.com/v1', apiKey: 'k' }).chat([
+      { role: 'user', content: 'hi' },
+    ]);
+    expect(sink.url).toBe('https://api.anthropic.com/v1/messages');
   });
 });
 

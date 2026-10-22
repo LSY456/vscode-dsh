@@ -20,6 +20,20 @@
 
 ---
 
+## 界面
+
+侧边栏对话：结论、自检表、**工具审批卡**（`bash_execute` 待确认，带倒计时），底部状态行显示连接状态与当前模型。
+
+![侧边栏完整对话：结论 + 自检表 + 工具审批卡](docs/images/ui-sidebar.png)
+
+| ![计划模式：方案待批准](docs/images/ui-plan.png) | ![图片附件：粘贴报错截图](docs/images/ui-image.png) |
+| --- | --- |
+| **计划模式**：调研只读，产出「目标 / 步骤 / 涉及文件 / 风险与待确认」，**批准后才动手** | **图片附件**：报错截图直接粘贴，缩略图与「待发送」暂存区分开显示 |
+
+> 截图为 `node scripts/uiPreview.mjs` 用**真实的** `media/webview.html` + `media/webview.js` 渲染后导出
+> （DOM 结构与线上一致，数据为示例）。没摆拍、也没后期拼接 —— 想看你自己机器上的样子，
+> 装上后按 `Ctrl+Alt+D` 即可。
+
 ## 它能带来什么
 
 | 能力 | 说明 |
@@ -160,7 +174,7 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.daemon.token` | `""` | `external` 模式握手令牌 |
 | `dsh.apiKey`（已弃用） | `""` | 旧版明文 API Key；首次读取自动回迁到 SecretStorage 并清除，推荐改用「面板 → 设置」 |
 | `dsh.preset` | `default` | 握手时传给 daemon 的 Agent 预设（行为档位名，不是模型名）；当前只有 `default` 一档，且该值只被记录、不影响行为 |
-| `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容） |
+| `dsh.model.baseURL` | `https://api.deepseek.com/v1` | 模型 API 端点 base（OpenAI 兼容）。**留空或保持缺省时**，`provider=anthropic` 会自动改用 Anthropic 官方端点；填了别的地址则一律以填的为准（自定义网关、`https://api.deepseek.com/anthropic` 这类兼容入口都照用） |
 | `dsh.model.model` | `deepseek-flash` | 模型名。建议在侧边栏「模型设置」里从下拉选择（列表自动跟随 DeepSeek 官方更新） |
 | `dsh.model.idleTimeoutSeconds` | `60` | 模型请求空闲超时秒数（0–1800，0 = 关闭）；距上一个流式增量超时即中断，防会话永久挂起 |
 | `dsh.model.temperature` | *（空）* | 采样温度 0–2；**留空 = 内置缺省 `0.2`**（留空时 daemon 根本不下发该值，行为与引入本项之前逐字节一致）。Anthropic 合法区间是 0–1，超出会被钳制 |

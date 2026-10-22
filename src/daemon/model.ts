@@ -417,7 +417,13 @@ export class AnthropicModel implements ChatModel {
   private readonly model: string;
 
   constructor(opts: AnthropicModelOptions) {
-    this.baseURL = (opts.baseURL || DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, '');
+    // 补全路径固定是 `${base}/v1/messages`，而用户常常直接把文档里的
+    // `https://api.anthropic.com/v1`（甚至 `…/v1/messages` 的父路径）粘进 base —— 那样会拼成
+    // `/v1/v1/messages`，请求必然 404。去掉尾部 `/v1` 是幂等且安全的：Anthropic 及其兼容端点
+    // 的 API 根都以 `/v1` 结尾，`https://proxy/anthropic` 这类前缀不受影响。
+    this.baseURL = (opts.baseURL || DEFAULT_ANTHROPIC_BASE_URL)
+      .replace(/\/+$/, '')
+      .replace(/\/v1$/i, '');
     this.apiKey = opts.apiKey;
     this.model = opts.model || DEFAULT_ANTHROPIC_MODEL;
   }
@@ -612,13 +618,36 @@ export interface ProviderModelOptions {
   model?: string;
 }
 
+/**
+ * 依据 provider 解析实际使用的 base（P1-3）。
+ *
+ * `dsh.model.baseURL` 的出厂缺省是 DeepSeek 的 **OpenAI 兼容**端点，而它与 `dsh.model.provider`
+ * 是两个互不相关的配置项。用户把 provider 切成 `anthropic` 却不改 baseURL —— 这是最自然的操作
+ * （"切了 provider 不就够了吗"）—— 原样下发就会拼成 `https://api.deepseek.com/v1/v1/messages`：
+ * 请求必然 404，而报错正文里只有那个 URL，看不出根源在缺省值。
+ *
+ * 故只做一件事：**anthropic + 「空 / 仍是出厂缺省」→ 换成 Anthropic 官方端点**。
+ * 用户显式填了别的地址（自建代理、`https://api.deepseek.com/anthropic` 这类兼容入口）则一律照用 ——
+ * 判据是"等不等于出厂缺省值"，不是"域名像不像"，所以带 `/anthropic` 路径的配置不会被误替换。
+ */
+export function resolveProviderBaseURL(
+  provider: ProviderModelOptions['provider'],
+  baseURL: string | undefined
+): string | undefined {
+  const trimmed = (baseURL ?? '').trim().replace(/\/+$/, '');
+  if ((provider ?? 'auto') !== 'anthropic') return trimmed || undefined;
+  if (!trimmed || trimmed.toLowerCase() === DEFAULT_BASE_URL.toLowerCase()) return DEFAULT_ANTHROPIC_BASE_URL;
+  return trimmed;
+}
+
 /** 依据 provider 选择模型适配器；缺省/auto 走 OpenAI 兼容（覆盖国产模型与本地推理服务）。 */
 export function createModel(opts: ProviderModelOptions): ChatModel {
   const provider = opts.provider ?? 'auto';
+  const baseURL = resolveProviderBaseURL(provider, opts.baseURL);
   if (provider === 'anthropic') {
-    return new AnthropicModel({ baseURL: opts.baseURL, apiKey: opts.apiKey, model: opts.model });
+    return new AnthropicModel({ baseURL, apiKey: opts.apiKey, model: opts.model });
   }
-  return new OpenAICompatibleModel({ baseURL: opts.baseURL, apiKey: opts.apiKey, model: opts.model });
+  return new OpenAICompatibleModel({ baseURL, apiKey: opts.apiKey, model: opts.model });
 }
 
 /** 构建 OpenAI 兼容 chat/completions 请求体（含原生 tools）。 */

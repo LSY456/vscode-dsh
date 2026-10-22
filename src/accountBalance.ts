@@ -79,6 +79,19 @@ export function balanceEndpointCandidates(baseURL?: string): string[] {
 }
 
 /**
+ * 余额展示是否适用（P1-3 的同源问题）。
+ *
+ * `/user/balance` 是 **DeepSeek 账户级**接口，所以只看端点是不够的：切到 `provider=anthropic`
+ * 后 `dsh.model.baseURL` 往往还停在出厂缺省（仍是 `api.deepseek.com/v1`），于是这条判定会
+ * 继续放行 —— 拿 Claude 的 Key 去查 DeepSeek 的账户余额，必然 401，日志里只剩一条莫名其妙的
+ * "余额获取失败"。故 provider 也纳入判定：Anthropic 通道上没有这个接口。
+ */
+export function isBalanceApplicable(provider: string | undefined, baseURL?: string): boolean {
+  if ((provider ?? 'auto') === 'anthropic') return false;
+  return isOfficialDeepSeekEndpoint(baseURL);
+}
+
+/**
  * 解析 `/user/balance` 响应。
  * 条目不合法（缺 total_balance）时返回 undefined —— 由调用方按"拿不到"处理，
  * 而不是显示一个凭空的 0（0 余额是个很重的结论，不能靠默认值给出）。
