@@ -3,9 +3,28 @@
 本项目版本变化遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.8.2] - 2026-10-22
+
+### 新增
+
+- **上架物料**：补 `icon`（`resources/dsh-icon.png`，128×128 PNG —— 商店只收位图，仓库里原来只有
+  activity bar 用的 SVG）与 `galleryBanner`；README 增加「界面」一节，三张截图由
+  `scripts/uiPreview.mjs` 用真实的 `media/webview.html` + `media/webview.js` 渲染后导出
+  （DOM 与线上一致、数据为示例），覆盖完整对话与工具审批卡 / 计划模式 / 图片附件。
 
 ### 修复
+
+- **切 `provider=anthropic` 不再把请求打到 DeepSeek 的地址（P1-3）**：`dsh.model.baseURL` 的出厂缺省是
+  `https://api.deepseek.com/v1`，而它与 `dsh.model.provider` 是两个互不相关的配置项 —— 切了 provider 却
+  不改 baseURL（最自然的操作）时，请求会拼成 `https://api.deepseek.com/v1/v1/messages`：必然 404，
+  而报错正文里只有那个 URL，看不出根源在缺省值。
+  ① 新增 `resolveProviderBaseURL()` 单点裁决：**anthropic + 「空 / 仍是出厂缺省」→ Anthropic 官方端点**；
+  用户显式填了别的地址一律照用 —— 判据是"等不等于缺省值"而非"域名像不像"，故
+  `https://api.deepseek.com/anthropic` 这类兼容入口不会被误替换。
+  ② `AnthropicModel` 去掉 base 末尾多余的 `/v1`：照文档粘完整前缀 `https://api.anthropic.com/v1` 的人
+  不再拼出 `/v1/v1/messages`。
+  ③ 余额 chip 的适用性判定（`isBalanceApplicable`）纳入 provider：否则切到 Anthropic 后仍会拿 Claude 的
+  Key 去查 DeepSeek 的账户余额，必然 401，日志里只剩一条莫名其妙的"余额获取失败"。
 
 - **上下文裁剪不再丢掉用户批准的计划（批次 11-1）**：`applyTokenBudget` 原先从索引 2 起**无条件**整轮向前丢弃，
   而计划批准时「已批准的计划」与用户补充意见是**追加到数组末尾**的 —— 执行轮次一轮轮追加后，它们会漂到最前面，

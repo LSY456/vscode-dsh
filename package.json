@@ -2,8 +2,13 @@
   "name": "vscode-dsh",
   "displayName": "dsh · DeepSeek Harness Agent for VSCode",
   "description": "VSCode 与 dsh Agent Daemon 的联动：上下文捕获、流式推理、工具审批与原生 Diff 审查。",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "publisher": "LSY456",
+  "icon": "resources/dsh-icon.png",
+  "galleryBanner": {
+    "color": "#16307A",
+    "theme": "dark"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -286,7 +291,7 @@
         "dsh.model.baseURL": {
           "type": "string",
           "default": "https://api.deepseek.com/v1",
-          "description": "模型 API 端点 base（OpenAI 兼容协议）。"
+          "description": "模型 API 端点 base（OpenAI 兼容协议）。留空或保持此缺省值时，若 dsh.model.provider 为 anthropic 会自动改用 Anthropic 官方端点（不会把 DeepSeek 地址发给 Claude 通道）；一旦填了别的地址，则一律以填的为准。"
         },
         "dsh.model.model": {
           "type": "string",

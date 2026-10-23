@@ -57,6 +57,7 @@ import {
   buildBalancePayload,
   describeBalanceEndpoint,
   fetchBalance,
+  isBalanceApplicable,
 } from './accountBalance';
 import { DaemonManager } from './daemonManager';
 import { renderWebviewHtml } from './webviewHtml';
@@ -497,11 +498,13 @@ export class WebviewPanelHost {
 
   private async runBalanceRefresh(): Promise<void> {
     const epoch = this.balanceEpoch;
-    const baseURL = normalizeModelBaseUrl(this.configAccessor.getPanelConfig().baseURL);
+    const panelConfig = this.configAccessor.getPanelConfig();
+    const baseURL = normalizeModelBaseUrl(panelConfig.baseURL);
 
     // `/user/balance` 是 DeepSeek 的**账户级**接口：非官方端点直接视为"不适用"。
     // 既不会产生必然的 404，也不必为"锦上添花的展示"把 API Key 送到用户自配的第三方网关去。
-    if (!isOfficialDeepSeekEndpoint(baseURL)) {
+    // 切到 anthropic 后 baseURL 常常仍是出厂缺省（deepseek），故 provider 也必须参与判定。
+    if (!isBalanceApplicable(panelConfig.provider, baseURL)) {
       this.clearBalance(epoch);
       return;
     }
