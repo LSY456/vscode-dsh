@@ -1548,4 +1548,33 @@ describe('realAgent：结构化轨迹（P2-8）', () => {
     ctx.waiters[0].resolve(true);
     await run;
   });
+
+  it('审批请求带上「记住」粒度，且与真落盘的规则同源（批次 11-4）', async () => {
+    // 每条都断言 trustKind 来自 buildRuleForCommand（TrustStore.add 用的同一个函数），
+    // 而不是任何本地推断。第三条是本项的核心回归点：
+    //   chmod 的**风险等级是 medium**（MEDIUM_RISK_PATTERNS），**信任粒度却是 exact**
+    //   （trust.ts 的 HIGH_RISK_PROGRAMS）。两张表不同源 —— 用 risk 猜必然写错文案。
+    const cases: Array<{ command: string; kind: 'exact' | 'prefix'; risk: 'low' | 'medium' | 'high' }> = [
+      { command: 'npm run build', kind: 'prefix', risk: 'medium' },
+      { command: 'rm build.txt', kind: 'exact', risk: 'medium' },
+      { command: 'chmod +x a.sh', kind: 'exact', risk: 'medium' },
+    ];
+    for (const c of cases) {
+      const ctx = makeCtx();
+      const model = scripted([
+        { toolcall: { tool: 'bash_execute', input: { command: c.command } } },
+        { content: '完成' },
+      ]);
+      const run = runRealAgent(ctx, baseParams, {
+        model,
+        commandRunner: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      });
+      const ev = await waitEvent(ctx, EVENTS.ApprovalRequest);
+      expect(ev.params.trustKind).toBe(c.kind);
+      // 一并锁住"两张表不同源"这个事实：同一份请求里 risk 与 trustKind 可以指向不同语义
+      expect(ev.params.risk).toBe(c.risk);
+      ctx.waiters[0].resolve(false); // 拒绝，不真跑命令
+      await run;
+    }
+  });
 });

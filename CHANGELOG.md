@@ -3,6 +3,23 @@
 本项目版本变化遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 变更
+
+- **审批卡「记住」按钮写清真实粒度（批次 11-4）**：原先一律显示「接受并记住」，用户会默认理解成
+  "这类命令以后都不问了"，而实际落盘的规则由 `trust.ts#buildRuleForCommand` 决定 —— 高危程序
+  （`rm` / `del` / `chmod` / `mount` …）只允许 **exact**（整条精确匹配），普通程序才是 **prefix**
+  （程序 + 首个参数）。按"同类不再问"的预期点下去结果下次还得再问，反过来误以为"只记这一条"时
+  实际却放开了整类 —— 两种错法都是在骗授权。
+  ① 协议 `EventApprovalRequest` 加可选 `trustKind`，由 daemon 用**生成落盘规则的那个函数**
+  （`buildRuleForCommand(cmd).kind`）下发，所以文案与行为不可能对不上；
+  ② 审批卡显示「仅记住这一条命令」/「接受并记住（同类命令不再问）」，窄待办条用短版
+  「仅记此条」/「记住同类」（实测长文案在 340px 侧栏会顶出卡片右边界）；
+  ③ 旧 daemon 不下发时回落原文案。
+  ⚠️ 粒度**不能**由 `risk` 反推：`chmod` / `chown` / `rmdir` 的风险是 medium、信任粒度却是 exact，
+  两张表不同源。测试用 `chmod +x a.sh` 锁住这个回归点。
+
 ## [0.8.2] - 2026-10-22
 
 ### 新增

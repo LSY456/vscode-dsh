@@ -584,6 +584,18 @@ export interface EventApprovalRequest {
   input: Record<string, unknown>;
   risk: 'low' | 'medium' | 'high';
   reason: string;
+  /**
+   * 「接受并记住」将来会落成什么粒度的信任规则（批次 11-4）。
+   *
+   * 由 daemon 用 `buildRuleForCommand(cmd).kind` 下发 —— 与用户真的点下之后**落盘的规则同一个函数**，
+   * 所以按钮文案与实际行为不可能对不上。
+   *
+   * ⚠️ 不要用 `risk` 反推粒度：两张表不是一张。`chmod` / `chown` / `rmdir` 在风险分级里是 medium，
+   * 在信任表里是 exact —— 拿 risk 猜会把"仅记住这一条"写成"同类不再问"，等于骗用户授权。
+   *
+   * 可选：旧 daemon 不下发时 UI 回落原文案。
+   */
+  trustKind?: 'exact' | 'prefix';
   /** 过期时间（epoch ms），过期后按拒绝处理 */
   expiresAt?: number;
 }
