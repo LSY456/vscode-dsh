@@ -129,7 +129,8 @@ export function createEvents(ctx) {
         api.setTrustGate(params);
         break;
       case 'notice':
-        api.addSystem(params.text);
+        // 可选 action：会话结束时的「回滚本次改动」入口（批次 11-3）
+        api.addSystem(params.text, params.action);
         break;
       case 'settings.loaded':
         api.fillSettings(params);

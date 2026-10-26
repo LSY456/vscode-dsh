@@ -719,6 +719,16 @@ export interface EventSessionEnded {
   sessionId: string;
   reason?: 'completed' | 'canceled' | 'error';
   error?: string;
+  /**
+   * 本次会话记录到的**改动文件条数**（批次 11-3），由 daemon 在 `notify` 拦截点补上。
+   *
+   * 取的是影子快照的条目数（`SessionSnapshotStore.count()`）—— 与 `session.rollback`
+   * **实际会还原的集合同源**。面板侧自己数 `file.patch.result` 做不到这一点：
+   * 「已应用到编辑器缓冲区、尚未落盘」那条通路它看不到。
+   *
+   * 可选：旧 daemon 不下发时面板不显示任何提示（宁可不说，也不给出一个错的数）。
+   */
+  changedFiles?: number;
 }
 
 export interface EventError {

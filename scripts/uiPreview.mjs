@@ -279,6 +279,15 @@ const conversationDom = await renderScenario(({ emit, emitRaw }) => {
 
   emit('error', { message: '示例：一次工具调用被沙箱拒绝（仅为展示错误态样式）' });
   emit('session.ended', { reason: 'completed' });
+  // 批次 11-3：会话结束提示里的「回滚本次改动」入口。这一条要目视两件事 ——
+  // ① 按钮独占一行、不被读成正文末行的后半截（`.message.system` 是 pre-line 纯文本块）；
+  // ② 两行文案 + 按钮在 340px 侧栏里不顶出卡片右边界。
+  emit('notice', {
+    text:
+      '本次会话改动了 3 个文件，可一键回滚到会话开始前。\n' +
+      '回滚前会先弹确认；编辑器里有未保存改动的文件会被跳过，不会覆盖你正在编辑的内容。',
+    action: { label: '回滚本次改动', kind: 'rollback.session', sessionId: 'sess_preview' },
+  });
 });
 
 // ---- 场景二：空态 + 演示模式横幅（未配置 Key 的显式提示）----

@@ -19,8 +19,25 @@ export function createMessages(ctx) {
   // 消息渲染
   // -------------------------------------------------------------------------
 
-  function addSystem(text) {
-    addMessage(el('div', 'message system', text));
+  /**
+   * 系统消息（notice）。可带一个动作按钮 —— 批次 11-3 的「回滚本次改动」就挂在这里。
+   *
+   * 按钮点一次就**退休**（disabled，但不移除）：这条提示本身是审计记录，事后回看要能知道
+   * "当时系统确实提示过可以回滚"；而同一个按钮还能连点第二次，就等于把回滚重复执行一遍。
+   */
+  function addSystem(text, action) {
+    const node = el('div', 'message system', text);
+    if (action && action.label && action.kind) {
+      const btn = el('button', 'ok-btn notice-action', action.label);
+      btn.type = 'button';
+      btn.addEventListener('click', () => {
+        btn.disabled = true;
+        // 带上 sessionId：扩展侧据此校验「这条提示说的是不是当前会话」（见 webviewPanel）
+        ctx.vscode.postMessage({ kind: action.kind, sessionId: action.sessionId });
+      });
+      node.appendChild(btn);
+    }
+    addMessage(node);
   }
 
   function addError(text) {
