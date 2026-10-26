@@ -19,6 +19,7 @@ import { isStaleDaemon, readBuildId } from '../shared/buildId';
 import {
   DEFAULT_MAX_CONTEXT_TOKENS,
   DEFAULT_MAX_TOOL_ROUNDS,
+  DEFAULT_MAX_WRITE_FAILURES,
   ERROR_CODES,
   InitializeResult,
   METHODS,
@@ -353,6 +354,9 @@ export class DaemonManager {
           // 于是"最多 8 轮工具 / 48K 上下文"用户永远改不动，而 CHANGELOG 却写着"可配"。
           maxToolRounds: cfg.get<number>('agent.maxToolRounds', DEFAULT_MAX_TOOL_ROUNDS),
           maxContextTokens: cfg.get<number>('agent.maxContextTokens', DEFAULT_MAX_CONTEXT_TOKENS),
+          // 批次 11-2：写入类连续失败阈值。**不进面板** —— 沿用批次 10 撤下「上下文预算 /
+          // 输出上限」两个数字项的同一理由：用户不知道这个数该填多少。只在原生设置里可配。
+          maxWriteFailures: cfg.get<number>('agent.maxWriteFailures', DEFAULT_MAX_WRITE_FAILURES),
         },
         capabilities: {
           allowedTools: cfg.get<string[]>('capabilities.allowedTools', []),

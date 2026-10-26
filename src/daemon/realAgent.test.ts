@@ -1578,3 +1578,145 @@ describe('realAgent：结构化轨迹（P2-8）', () => {
     }
   });
 });
+
+describe('realAgent：写入类连续失败收敛（批次 11-2）', () => {
+  /**
+   * 计数模型：只数**真实**的对话请求（标题生成不算），用来断言"停机后不再向模型发请求"。
+   * 断言模型调用次数而不是文案，是因为文案会随措辞调整而漂移，调用次数是行为本身。
+   */
+  function counting(turns: FakeTurn[], counter: { n: number }): ChatModel {
+    const base = scripted(turns);
+    return {
+      chat: (messages, opts) => {
+        if (!isTitleRequest(messages)) counter.n++;
+        return base.chat(messages, opts);
+      },
+    };
+  }
+
+  /**
+   * 一次**可计数**的写入失败：路径越界 → `resolveTarget` 抛错 → catch 出口 → `write-failed`。
+   * 刻意不选"乐观锁冲突"，那种要构造并发改动，脆且难读。
+   */
+  const outsideWrite: FakeTurn = {
+    toolcall: { tool: 'write_file', input: { path: '../outside.txt', content: 'x' } },
+  };
+
+  it('连续 3 次写入失败即停：不再请求模型，且如实报「未完成」', async () => {
+    const ctx = makeCtx();
+    const calls = { n: 0 };
+    const model = counting([outsideWrite, outsideWrite, outsideWrite, { content: '不该被请求到' }], calls);
+    await runRealAgent(ctx, baseParams, { model });
+
+    // 恰好 3 次：第 4 个脚本回合从未被消费，它就是"没有继续问"的证据。
+    // 也不能有 requestFinalAnswer —— 那一步同样是一次模型请求。
+    expect(calls.n).toBe(3);
+
+    // 修正 A：写入类工具现在与只读分支对等，started / executed / 迹线三样都有
+    expect(ctx.events.filter((e) => e.method === EVENTS.ToolStarted && e.params.tool === 'write_file').length).toBe(3);
+    expect(ctx.events.filter((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'write_file').length).toBe(3);
+    const failedSteps = ctx.events.filter(
+      (e) => e.method === EVENTS.Trajectory && e.params.tool === 'write_file' && e.params.ok === false
+    );
+    expect(failedSteps.length).toBe(3);
+    expect(failedSteps.every((e) => e.params.errorKind === 'write-failed')).toBe(true);
+
+    // 收尾：error 而非 completed（会话确实没完成），文案说清连续 / 阈值 / 未继续尝试
+    expect(ctx.events.find((e) => e.method === EVENTS.SessionEnded)!.params.reason).toBe('error');
+    const text = ctx.events.filter((e) => e.method === EVENTS.MessageDelta).map((e) => e.params.delta).join('');
+    expect(text).toContain('连续失败 3 次');
+    expect(text).toContain('已停止继续尝试');
+    expect(text).not.toContain('已完成');
+  });
+
+  it('写入失败 2 次后一次成功即清零（连续口径，不是累计）', async () => {
+    const ctx = makeCtx();
+    ctx.waitForUser = () => Promise.resolve(true); // 补丁自动获准，本用例只关心计数
+    const calls = { n: 0 };
+    const model = counting(
+      [
+        outsideWrite,
+        outsideWrite,
+        { toolcall: { tool: 'write_file', input: { path: path.join(root, 'written.txt'), content: 'hello' } } },
+        outsideWrite,
+        outsideWrite,
+        { content: '收尾' },
+      ],
+      calls
+    );
+    await runRealAgent(ctx, baseParams, { model });
+
+    // 6 次请求全部发生。若按**累计**口径，第 5 次工具失败时累计 4 >= 3 就会在第 5 轮停机，
+    // 这里会变成 5 —— 这条断言就是两种口径的分界线。
+    expect(calls.n).toBe(6);
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
+    expect(fs.readFileSync(path.join(root, 'written.txt'), 'utf8')).toBe('hello');
+  });
+
+  it('只读工具连续失败不触发：幂等无副作用的失败只是噪声', async () => {
+    const ctx = makeCtx();
+    const outside = path.join(root, '..', 'secret.txt');
+    const readOutside: FakeTurn = { toolcall: { tool: 'read_file', input: { path: outside } } };
+    const calls = { n: 0 };
+    const model = counting([readOutside, readOutside, readOutside, readOutside, { content: '收尾' }], calls);
+    await runRealAgent(ctx, baseParams, { model });
+
+    expect(calls.n).toBe(5);
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
+  });
+
+  it('bash 非零退出不触发：grep 无匹配、tsc 报错都是正常信息', async () => {
+    const ctx = makeCtx();
+    ctx.isTrusted = () => true; // 免审批，直接跑到命令执行
+    const grep: FakeTurn = { toolcall: { tool: 'bash_execute', input: { command: 'grep zzz a.txt' } } };
+    const calls = { n: 0 };
+    // 连续 4 次非零退出。若把 bash 计入熔断，第 3 次就会停机
+    const model = counting([grep, grep, grep, grep, { content: '收尾' }], calls);
+    await runRealAgent(ctx, baseParams, {
+      model,
+      commandRunner: async () => ({ exitCode: 1, stdout: '', stderr: '' }),
+    });
+
+    expect(calls.n).toBe(5);
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
+  });
+
+  it('用户连续拒绝不触发：那是人的决定，不是系统故障', async () => {
+    const ctx = makeCtx();
+    ctx.waitForUser = () => Promise.resolve(false);
+    const rejectedWrite: FakeTurn = {
+      toolcall: { tool: 'write_file', input: { path: path.join(root, 'rejected.txt'), content: 'x' } },
+    };
+    const calls = { n: 0 };
+    const model = counting([rejectedWrite, rejectedWrite, rejectedWrite, { content: '收尾' }], calls);
+    await runRealAgent(ctx, baseParams, { model });
+
+    expect(calls.n).toBe(4);
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
+    // 但拒绝本身仍然可见：迹线里分类为 approval-denied（可见 ≠ 计入熔断）
+    const denied = ctx.events.filter(
+      (e) => e.method === EVENTS.Trajectory && e.params.errorKind === 'approval-denied'
+    );
+    expect(denied.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('阈值可配：配 1 时首次失败即停，配 10 时 3 次失败照常继续', async () => {
+    const c1 = makeCtx();
+    const n1 = { n: 0 };
+    await runRealAgent(c1, baseParams, {
+      model: counting([outsideWrite, { content: '不该被请求到' }], n1),
+      maxWriteFailures: 1,
+    });
+    expect(n1.n).toBe(1);
+    expect(c1.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'error')).toBe(true);
+
+    const c2 = makeCtx();
+    const n2 = { n: 0 };
+    await runRealAgent(c2, baseParams, {
+      model: counting([outsideWrite, outsideWrite, outsideWrite, { content: '收尾' }], n2),
+      maxWriteFailures: 10,
+    });
+    expect(n2.n).toBe(4);
+    expect(c2.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
+  });
+});
