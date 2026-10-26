@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createConnectionRuntime, resolveAgentDecision, resolveAgentMode, RuntimeConfig } from './server';
+import { createConnectionRuntime, resolveAgentDecision, resolveAgentMode, RuntimeConfig, withChangedFiles } from './server';
 import { DEFAULT_APPROVAL_TTL_MS } from './sessionManager';
 
 /**
@@ -152,5 +152,50 @@ describe('resolveAgentDecision（模式 + 成因）', () => {
     for (const c of cases) {
       expect(resolveAgentMode(mk(c))).toBe(resolveAgentDecision(mk(c)).mode);
     }
+  });
+});
+
+/**
+ * 批次 11-3：会话结束时给 `SessionEnded` 补 `changedFiles`。
+ *
+ * 这个数是面板「本次会话改动了 N 个文件，可一键回滚」的唯一来源。两个分支最要紧：
+ * 0 是**有效事实**（面板据此不提示），而读不出来时**不能**补 0 ——
+ * "0 个文件"会让用户以为没什么可回滚，正好与事实相反。
+ */
+describe('withChangedFiles（批次 11-3 回滚可发现性）', () => {
+  it('为空时补上快照条目数', () => {
+    const p: { sessionId: string; changedFiles?: number } = { sessionId: 's1' };
+    withChangedFiles(p, () => 3);
+    expect(p.changedFiles).toBe(3);
+  });
+
+  it('0 也如实写入：会话结束但确实没改动，是有效事实', () => {
+    const p: { sessionId: string; changedFiles?: number } = { sessionId: 's1' };
+    withChangedFiles(p, () => 0);
+    expect(p.changedFiles).toBe(0);
+  });
+
+  it('发射方自己算过就不覆盖（幂等，以发射方为准）', () => {
+    const p = { sessionId: 's1', changedFiles: 7 };
+    withChangedFiles(p, () => 3);
+    expect(p.changedFiles).toBe(7);
+  });
+
+  it('读不出索引时**不补**，绝不用 0 冒充', () => {
+    const p: { sessionId: string; changedFiles?: number } = { sessionId: 's1' };
+    withChangedFiles(p, () => {
+      throw new Error('EACCES');
+    });
+    expect('changedFiles' in p).toBe(false);
+  });
+
+  it('非有限值（NaN / 负数）不写入：宁可没有这个字段，也不给错的数', () => {
+    const a: { sessionId: string; changedFiles?: number } = { sessionId: 's1' };
+    withChangedFiles(a, () => Number.NaN);
+    expect('changedFiles' in a).toBe(false);
+
+    const b: { sessionId: string; changedFiles?: number } = { sessionId: 's1' };
+    withChangedFiles(b, () => -1);
+    expect('changedFiles' in b).toBe(false);
   });
 });
