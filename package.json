@@ -410,7 +410,7 @@
     "check": "npm run check:workflows && npm run typecheck && npm run build && npm test && npm run smoke && npm run check:package",
     "check:package": "node scripts/checkPackage.js",
     "check:workflows": "node scripts/checkWorkflows.js",
-    "package": "vsce package --out dist",
+    "package": "node scripts/packageVsix.js",
     "vscode:prepublish": "npm run build"
   },
   "dependencies": {

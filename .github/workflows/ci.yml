@@ -182,8 +182,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # 输出路径与 mkdir 都由 scripts/packageVsix.js 负责，工作流不再自己拼 `--out`。
+      # 此前写 `npx vsce package --out dist`：`--out` 认的是**文件路径**，于是产出一个名叫
+      # `dist` 的无扩展名文件，下面 `dist/*.vsix` 一个都匹配不到 —— 步骤显示成功，artifact 却为空。
       - name: Package VSIX
-        run: npx vsce package --out dist
+        run: npm run package
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
