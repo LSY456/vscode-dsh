@@ -108,6 +108,18 @@ export const DEFAULT_MAX_TOOL_ROUNDS = 8;
 export const DEFAULT_MAX_CONTEXT_TOKENS = 48 * 1024;
 
 /**
+ * 写入类工具「连续失败」的停机阈值（批次 11-2）。
+ *
+ * 为什么只针对写入类：`bash_execute` 的非零退出**是正常信息**，不是系统故障 ——
+ * `grep foo x` 无匹配返 1、`tsc --noEmit` 有类型错误返 2、`git diff --exit-code` 有差异返 1、
+ * `test -f x` 文件不存在返 1。把这些算进熔断，等于"正常的提问方式用三次就停机"。
+ * 所以只数 `write_file` / `apply_patch` 的系统侧失败（路径越界、`search` 未命中、乐观锁冲突、IO）。
+ *
+ * 3 取自通行区间，本产品**无实测数据** —— 这正是它必须可配（`dsh.agent.maxWriteFailures`）的原因。
+ */
+export const DEFAULT_MAX_WRITE_FAILURES = 3;
+
+/**
  * 采样温度缺省值。取自 daemon 模型层原先的硬编码值（0.2）——
  * 这是"把既有行为暴露成可配项"，**不是**调整缺省行为的地方。
  */
@@ -142,6 +154,11 @@ export interface ModelConfig {
    * 缺省 `DEFAULT_MAX_TOOL_ROUNDS`；跑满后 Agent 会收束成一次不带工具定义的最终回答。
    */
   maxToolRounds?: number;
+  /**
+   * 写入类工具**连续**失败达到该次数就停止继续尝试（批次 11-2）。
+   * 缺省 `DEFAULT_MAX_WRITE_FAILURES`；只数 `write_file` / `apply_patch` 的系统侧失败。
+   */
+  maxWriteFailures?: number;
   /**
    * 上下文 token 预算：发送前按此估算并裁剪历史（超预算时整轮丢弃最旧的工具轮）。
    * 缺省 `DEFAULT_MAX_CONTEXT_TOKENS`。
@@ -637,6 +654,7 @@ export type TrajectoryErrorKind =
   | 'approval-denied' // 用户拒绝了审批
   | 'timeout' // 超时
   | 'exec-failed' // 执行本身失败（非策略原因）
+  | 'write-failed' // 写入类工具的**系统侧**失败（路径越界 / search 未命中 / 乐观锁冲突 / IO）；批次 11-2
   | 'internal'; // 其他内部错误
 
 /** 模型调用的 token 用量（P2-8）。 */

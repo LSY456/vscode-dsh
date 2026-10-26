@@ -9,6 +9,7 @@ import {
   Attachment,
   DEFAULT_MAX_CONTEXT_TOKENS,
   DEFAULT_MAX_TOOL_ROUNDS,
+  DEFAULT_MAX_WRITE_FAILURES,
   DEFAULT_PLAN_MAX_ROUNDS,
   EVENTS,
   ERROR_CODES,
@@ -16,6 +17,7 @@ import {
   EventFilePatchPending,
   EventPlanRequest,
   SessionSendParams,
+  TrajectoryErrorKind,
 } from '../../shared/protocol';
 import { sanitizeImageAttachments } from '../../shared/imageAttachment';
 import * as path from 'path';
@@ -60,6 +62,11 @@ export interface RealAgentConfig {
   commandRunner?: CommandRunner;
   /** 工具调用轮数上限，防止死循环 */
   maxToolRounds?: number;
+  /**
+   * 写入类工具的**连续**失败阈值（批次 11-2）。undefined = 用协议缺省。
+   * 只数 `write_file` / `apply_patch` 的系统侧失败，见 `isCountableWriteFailure`。
+   */
+  maxWriteFailures?: number;
   /** 工具读取单文件上限（字节） */
   maxReadBytes?: number;
   /** 上下文 token 预算（发送前裁剪历史，防止超出模型上下文窗口） */
@@ -287,6 +294,9 @@ export async function runRealAgent(
 
   const messages: ChatMessage[] = buildMessages(prompt, safeAttachments);
   const maxContextTokens = config.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS;
+  // 批次 11-2：写入类工具连续失败阈值。钳到 >=1 —— 配成 0 或负数等于"第一次失败前就停"，
+  // 那不是用户想要的语义（想要"一次都不许失败"应该配 1）。
+  const maxWriteFailures = Math.max(1, config.maxWriteFailures ?? DEFAULT_MAX_WRITE_FAILURES);
 
   /**
    * 展示层围栏过滤器（见下方 streamChunk 的说明）。
@@ -341,6 +351,18 @@ export async function runRealAgent(
     `\n\n> ⚠️ 工具调用已达上限（${maxRounds} 轮），未能生成完整结论。` +
     '上方「过程」里保留了已完成的步骤；你可以直接再发一条消息让我继续，' +
     '或把问题收窄一些（例如指定具体文件）以便更快作答。\n\n';
+
+  /**
+   * 写入类工具连续失败达阈值时的收尾文案（批次 11-2）。
+   *
+   * 纪律与既有失败文案一致：**不报"已完成"、不猜原因**。只说三件事 ——
+   * 哪一类失败、已达阈值、没有继续尝试；再给两条具体出路。
+   * 「连续」二字必须出现：阈值是连续口径，写成"失败 N 次"会让用户以为在数总数。
+   */
+  const writeFailureNotice = (streak: number) =>
+    `\n\n> ⚠️ 写入类工具连续失败 ${streak} 次（阈值 ${maxWriteFailures}），已停止继续尝试修改文件。\n` +
+    '> 每次失败的具体原因见上方对应的工具行。\n' +
+    '> 你可以确认文件路径与原文后再发一条消息，或在设置里调整 `dsh.agent.maxWriteFailures`。\n\n';
 
   /**
    * 收束回答：轮次用尽后追加一条"不要再调工具"的指令，并且**不提供工具定义**，
@@ -470,7 +492,8 @@ export async function runRealAgent(
         for (const call of calls) {
           if (ctx.isCanceled()) break;
           const toolOutput = await dispatchTool(ctx, call, caps, config, trajectory);
-          messages.push({ role: 'tool', content: `tool=${call.tool}\n${toolOutput}`, toolCallId: call.id });
+          // 计划阶段只有只读工具，不参与写入失败计数（批次 11-2 只数 write_file / apply_patch）
+          messages.push({ role: 'tool', content: `tool=${call.tool}\n${toolOutput.text}`, toolCallId: call.id });
         }
       }
 
@@ -580,6 +603,18 @@ export async function runRealAgent(
   /** 模型是否自己收的尾（不再调用工具 => 已有最终回答）。false 即轮次被耗尽。 */
   let concludedByModel = false;
 
+  /**
+   * 写入类工具的**连续**失败次数（批次 11-2）。
+   *
+   * 语义是连续而非累计，理由是两种口径对应两种事实：
+   *  · 累计失败说明"这个环境一直不行"，但模型换写法后可能已经找到对的路；
+   *  · 连续失败说明"每一次尝试都在撞同一堵墙"，正是需要停机的那种。
+   * 一次写入成功即清零 —— 环境已证明可用，不该再被历史失败累加惩罚。
+   */
+  let writeFailureStreak = 0;
+  /** 是否因写入类连续失败而停机。停机路径要**跳过** requestFinalAnswer（详见下方 break 处）。 */
+  let haltedByWriteFailures = false;
+
   for (let round = 0; round < maxRounds; round++) {
     if (ctx.isCanceled()) break;
 
@@ -653,8 +688,19 @@ export async function runRealAgent(
     messages.push({ role: 'assistant', content, toolCalls: nativeToolCalls });
     for (const call of calls) {
       if (ctx.isCanceled()) break;
-      const toolOutput = await dispatchTool(ctx, call, caps, config, trajectory);
-      messages.push({ role: 'tool', content: `tool=${call.tool}\n${toolOutput}`, toolCallId: call.id });
+      const outcome = await dispatchTool(ctx, call, caps, config, trajectory);
+      messages.push({ role: 'tool', content: `tool=${call.tool}\n${outcome.text}`, toolCallId: call.id });
+      // 批次 11-2：写入类成功清零，写入类系统侧失败 +1。
+      // 其余（用户拒绝 / 策略拒绝 / 工具禁用 / 只读 / bash）一律不动计数 —— 理由见
+      // `isCountableWriteFailure` 的三道过滤。
+      if (WRITE_TOOLS.has(call.tool) && outcome.ok) writeFailureStreak = 0;
+      else if (isCountableWriteFailure(call.tool, outcome)) writeFailureStreak++;
+    }
+    // 达阈值即停：跳出轮次循环，并且**不走** requestFinalAnswer ——
+    // 那一步同样要发一次模型请求，而这里的语义就是"不再问了"。
+    if (writeFailureStreak >= maxWriteFailures) {
+      haltedByWriteFailures = true;
+      break;
     }
   }
 
@@ -664,6 +710,23 @@ export async function runRealAgent(
     ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '\n\n[已取消]' });
     ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'canceled' });
     trajectory('system', 'session 结束：canceled');
+    return;
+  }
+
+  // 批次 11-2：写入类连续失败达阈值 —— 直接收尾，不再向模型发任何请求。
+  if (haltedByWriteFailures) {
+    unsubscribeCancel?.();
+    ctx.notify(EVENTS.MessageDelta, {
+      sessionId: ctx.sessionId,
+      delta: writeFailureNotice(writeFailureStreak),
+    });
+    // reason=error 而非 canceled：用户没取消，是系统主动放弃继续尝试。
+    // 更不能报 completed —— 那会让"一次没改成的会话"看起来像成功了。
+    ctx.notify(EVENTS.SessionEnded, { sessionId: ctx.sessionId, reason: 'error' });
+    trajectory(
+      'system',
+      `session 结束：error（写入类工具连续失败 ${writeFailureStreak} 次，达阈值 ${maxWriteFailures}）`
+    );
     return;
   }
 
@@ -688,6 +751,39 @@ export async function runRealAgent(
 // 工具分派
 // ---------------------------------------------------------------------------
 
+/**
+ * `dispatchTool` 的结构化结果（批次 11-2）。
+ *
+ * 此前它返回 `Promise<string>`：成功与失败都只是一段文本，调用方想知道"这次到底成没成"
+ * 只能去解析返回文案（`"写入失败："`、`"… 失败："`…）—— 那是脆的，改一句文案就静默失准。
+ * 而这些判定**本来就在**往迹线写（P2-8 的 `{ok, errorKind}`），返回值把同一份事实带出来即可。
+ */
+interface ToolOutcome {
+  /** 回灌给模型的文本（即原返回值） */
+  text: string;
+  ok: boolean;
+  errorKind?: TrajectoryErrorKind;
+}
+
+/** 会改动工作区文件的那两个工具。 */
+const WRITE_TOOLS = new Set(['write_file', 'apply_patch']);
+
+/**
+ * 这一次工具结果是否计入「写入类连续失败」计数（批次 11-2）。
+ *
+ * 三道过滤缺一不可：
+ *  ① **只认写入类**。`bash_execute` 的非零退出是正常信息 —— `grep` 无匹配返 1、
+ *     `tsc --noEmit` 有类型错误返 2、`git diff --exit-code` 有差异返 1。算进来就等于
+ *     "正常的提问方式用三次就停机"。
+ *  ② **只认系统侧失败**（`write-failed`）。`approval-denied` / `policy-denied` /
+ *     `tool-disabled` 是**人的决定或既定策略**，把它们当成"系统坏了"会得出荒谬结论：
+ *     用户连点三次拒绝 → 系统判定自身故障 → 停机。
+ *  ③ 只读工具的失败一律不计：幂等、无副作用，加进计数只是噪声。
+ */
+function isCountableWriteFailure(tool: string, outcome: ToolOutcome): boolean {
+  return WRITE_TOOLS.has(tool) && !outcome.ok && outcome.errorKind === 'write-failed';
+}
+
 function toolAllowed(caps: AgentCapabilities, name: string): boolean {
   const tools = caps.allowedTools;
   return !tools || tools.length === 0 || tools.includes(name);
@@ -699,7 +795,7 @@ async function dispatchTool(
   caps: AgentCapabilities,
   config: RealAgentConfig,
   trajectory: (kind: string, detail: string, meta?: TrajectoryMeta) => void
-): Promise<string> {
+): Promise<ToolOutcome> {
   const { tool, input } = call;
   const sessionId = ctx.sessionId;
   const allowedDirs = caps.allowedDirs ?? [];
@@ -710,7 +806,7 @@ async function dispatchTool(
     if (!toolAllowed(caps, tool)) {
       // P2-8：把"工具被禁用"作为**可分类的失败**记入轨迹，否则统计工具失败率时会漏掉这一类
       trajectory('tool', `${tool} 被禁用`, { tool, ok: false, durationMs: 0, errorKind: 'tool-disabled' });
-      return disabledTool(ctx, sessionId, caps, tool);
+      return { text: disabledTool(ctx, sessionId, caps, tool), ok: false, errorKind: 'tool-disabled' };
     }
     ctx.notify(EVENTS.ToolStarted, { sessionId, tool, input });
     trajectory('tool', `${tool} ${JSON.stringify(input)}`, { tool });
@@ -758,7 +854,7 @@ async function dispatchTool(
       }
       ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: true, output, durationMs: Date.now() - start });
       trajectory('tool', `${tool} 完成`, { tool, ok: true, durationMs: Date.now() - start });
-      return output;
+      return { text: output, ok: true };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       ctx.notify(EVENTS.ToolExecuted, { sessionId, tool, ok: false, output: msg, durationMs: Date.now() - start });
@@ -768,7 +864,8 @@ async function dispatchTool(
         durationMs: Date.now() - start,
         errorKind: 'exec-failed',
       });
-      return `${tool} 失败：${msg}`;
+      // 只读工具的失败**不进**写入失败计数：幂等、无副作用，计入只是噪声（见 isCountableWriteFailure）
+      return { text: `${tool} 失败：${msg}`, ok: false, errorKind: 'exec-failed' };
     }
   }
 
@@ -777,8 +874,14 @@ async function dispatchTool(
     if (!toolAllowed(caps, tool)) {
       // P2-8：把"工具被禁用"作为**可分类的失败**记入轨迹，否则统计工具失败率时会漏掉这一类
       trajectory('tool', `${tool} 被禁用`, { tool, ok: false, durationMs: 0, errorKind: 'tool-disabled' });
-      return disabledTool(ctx, sessionId, caps, tool);
+      return { text: disabledTool(ctx, sessionId, caps, tool), ok: false, errorKind: 'tool-disabled' };
     }
+    // 批次 11-2 修正 A：写入分支此前**既没有** tool.started / tool.executed，**也没有** 带
+    // ok/errorKind 的工具迹线 —— 结果是写入类工具的真失败在面板与迹线里双双不可见，只剩一行
+    // error 事件。这里补到与只读分支对等；否则计数虽能靠返回值算出来，却与迹线对不上，
+    // "迹线里能看到失败类别与计数"这条验收无法成立。
+    ctx.notify(EVENTS.ToolStarted, { sessionId, tool, input });
+    trajectory('tool', `${tool} ${JSON.stringify(input)}`, { tool });
     const target = String(input.path ?? '');
     let newContent: string;
     try {
@@ -828,11 +931,69 @@ async function dispatchTool(
         error: result.error,
         appliedInEditor: result.appliedInEditor || undefined,
       });
-      return accepted ? describePatchOutcome(result, resolved) : `用户拒绝了修改 ${resolved}`;
+
+      if (!accepted) {
+        // 用户拒绝写入：**不算系统故障**（isCountableWriteFailure 的第 ② 条）。
+        // 把它计进"连续失败"会得出荒谬结论：用户连点三次拒绝 → 系统判定自身故障 → 停机。
+        const rejected = `用户拒绝了修改 ${resolved}`;
+        ctx.notify(EVENTS.ToolExecuted, {
+          sessionId,
+          tool,
+          ok: false,
+          output: rejected,
+          durationMs: Date.now() - start,
+        });
+        trajectory('tool', `${tool} 用户拒绝`, {
+          tool,
+          ok: false,
+          durationMs: Date.now() - start,
+          errorKind: 'approval-denied',
+        });
+        return { text: rejected, ok: false, errorKind: 'approval-denied' };
+      }
+
+      // 两条通路都算成功：真落盘（applied）与"已应用到编辑器未保存缓冲区"（appliedInEditor）——
+      // 后者改动确实发生了，只是等用户保存，不该记成失败。
+      const written = result.applied || result.appliedInEditor;
+      const outcomeText = describePatchOutcome(result, resolved);
+      ctx.notify(EVENTS.ToolExecuted, {
+        sessionId,
+        tool,
+        ok: written,
+        output: outcomeText,
+        durationMs: Date.now() - start,
+      });
+      if (written) {
+        trajectory('tool', `${tool} 完成`, { tool, ok: true, durationMs: Date.now() - start });
+        return { text: outcomeText, ok: true };
+      }
+      // 应用失败（乐观锁冲突 / 脏文档保护跳过 / IO）—— 系统侧失败，计入连续失败
+      trajectory('tool', outcomeText, {
+        tool,
+        ok: false,
+        durationMs: Date.now() - start,
+        errorKind: 'write-failed',
+      });
+      return { text: outcomeText, ok: false, errorKind: 'write-failed' };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       ctx.notify(EVENTS.Error, { sessionId, code: (e as { code?: number }).code, message: msg });
-      return `${tool} 失败：${msg}`;
+      // catch 覆盖的是路径越界 / apply_patch 的 search 未命中 / 原文件读不到 ——
+      // 都属系统侧失败（模型可以换个写法修好，但连续撞同一堵墙就该停）。
+      ctx.notify(EVENTS.ToolExecuted, {
+        sessionId,
+        tool,
+        ok: false,
+        output: msg,
+        durationMs: Date.now() - start,
+      });
+      trajectory('tool', `${tool} 失败：${msg}`, {
+        tool,
+        ok: false,
+        durationMs: Date.now() - start,
+        errorKind: 'write-failed',
+      });
+      return { text: `${tool} 失败：${msg}`, ok: false, errorKind: 'write-failed' };
     }
   }
 
@@ -845,7 +1006,7 @@ async function dispatchTool(
         durationMs: 0,
         errorKind: 'tool-disabled',
       });
-      return disabledTool(ctx, sessionId, caps, 'bash_execute');
+      return { text: disabledTool(ctx, sessionId, caps, 'bash_execute'), ok: false, errorKind: 'tool-disabled' };
     }
     const command = String(input.command ?? '');
     ctx.notify(EVENTS.ToolStarted, { sessionId, tool: 'bash_execute', input });
@@ -866,7 +1027,7 @@ async function dispatchTool(
         durationMs: Date.now() - start,
         errorKind: 'policy-denied',
       });
-      return `命令被策略拒绝：${decision.reason}`;
+      return { text: `命令被策略拒绝：${decision.reason}`, ok: false, errorKind: 'policy-denied' };
     }
 
     // P2-9：风险等级按命令内容分级（删除/破坏 = high；写/网络 = medium；只读 = low）。
@@ -903,7 +1064,8 @@ async function dispatchTool(
         durationMs: run.durationMs,
         errorKind: run.ok ? undefined : 'exec-failed',
       });
-      return run.output;
+      // bash 的成败**不进**写入失败计数（非零退出是正常信息，见 isCountableWriteFailure）
+      return { text: run.output, ok: run.ok, errorKind: run.ok ? undefined : 'exec-failed' };
     }
     ctx.notify(EVENTS.ApprovalRequest, approvalParams);
     trajectory('approval', 'approval.request bash_execute', { tool: 'bash_execute' });
@@ -923,7 +1085,7 @@ async function dispatchTool(
         output: '已取消：用户拒绝了该命令。',
         durationMs: Date.now() - start,
       });
-      return '已取消：用户拒绝了该命令。';
+      return { text: '已取消：用户拒绝了该命令。', ok: false, errorKind: 'approval-denied' };
     }
 
     const run = await executeCommand(command, ctx.workspaceRoot, { timeoutMs: 30_000, runner: config.commandRunner, sandbox: config.sandbox });
@@ -934,7 +1096,7 @@ async function dispatchTool(
       durationMs: run.durationMs,
       errorKind: run.ok ? undefined : 'exec-failed',
     });
-    return run.output;
+    return { text: run.output, ok: run.ok, errorKind: run.ok ? undefined : 'exec-failed' };
   }
 
   // 未知工具
@@ -945,7 +1107,7 @@ async function dispatchTool(
     output: `未知工具：${tool}`,
     durationMs: 0,
   });
-  return `未知工具：${tool}`;
+  return { text: `未知工具：${tool}`, ok: false, errorKind: 'internal' };
 }
 
 function formatFileRange(filePath: string, r: FileRangeResult): string {

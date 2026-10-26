@@ -101,6 +101,8 @@ export interface RuntimeConfig {
   /** Agent 循环预算（P2-2）：工具调用轮数上限 / 上下文 token 预算；undefined = 用协议缺省 */
   maxToolRounds?: number;
   maxContextTokens?: number;
+  /** 写入类工具的连续失败阈值（批次 11-2）；undefined = 用协议缺省 `DEFAULT_MAX_WRITE_FAILURES` */
+  maxWriteFailures?: number;
   /** 采样温度（0–2）；undefined = 用模型层缺省（0.2），即不改动既有行为 */
   temperature?: number;
   /** 单次输出上限（max_tokens）；undefined / <= 0 = 不发送该字段，由服务端决定 */
@@ -343,6 +345,11 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           // Agent 循环预算（P2-2）：区间合法性在扩展侧写入配置时就已收敛，这里只做透传
           if (p.model?.maxToolRounds !== undefined) rt.maxToolRounds = p.model.maxToolRounds;
           if (p.model?.maxContextTokens !== undefined) rt.maxContextTokens = p.model.maxContextTokens;
+          // 批次 11-2：写入类连续失败阈值。扩展侧写入时已钳制，这里再钳到 [1,20] ——
+          // daemon 是安全边界，不采信"上游已经校验过"（协议允许任意客户端接入）。
+          if (p.model?.maxWriteFailures !== undefined && Number.isFinite(p.model.maxWriteFailures)) {
+            rt.maxWriteFailures = Math.min(20, Math.max(1, Math.floor(p.model.maxWriteFailures)));
+          }
           // 采样参数（批次 2）：undefined 一律视为"用户没配" —— 温度继续走模型层缺省 0.2，
           // 上限继续不发送；只有显式配置才改变请求体。
           if (p.model?.temperature !== undefined) rt.temperature = p.model.temperature;
@@ -477,6 +484,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               // 未配置时留 undefined，由 realAgent 用协议缺省兜底。
               maxToolRounds: conn.runtime.maxToolRounds,
               maxContextTokens: conn.runtime.maxContextTokens,
+              maxWriteFailures: conn.runtime.maxWriteFailures,
               temperature: conn.runtime.temperature,
               maxTokens: conn.runtime.maxTokens,
             };
