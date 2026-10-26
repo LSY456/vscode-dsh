@@ -12,6 +12,40 @@ export function createCards(ctx) {
   const { pendingBar, pendingLabel, pendingActions } = dom;
 
   // -------------------------------------------------------------------------
+  // 审批卡「记住」的粒度文案（批次 11-4）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 「接受并记住」按钮文案 —— 把**真实粒度**写出来。
+   *
+   * 为什么不能一律写"接受并记住"：那个说法让用户默认理解成"这一类命令以后都不问了"，
+   * 而实际落盘的规则由 `trust.ts#buildRuleForCommand` 决定 —— 高危程序（rm / del / chmod /
+   * mount …）只允许 **exact**（整条精确匹配），普通程序才是 **prefix**（程序 + 首个参数）。
+   * 用户按"同类不再问"的预期点下去，结果下次还得再问一遍；反过来误以为"只记这一条"时，
+   * 实际却放开了整类。两种错法都是在骗用户授权，而授权的前提是他知道自己在授权什么。
+   *
+   * ⚠️ 不要用 `p.risk` 反推粒度：风险分级表与信任粒度表**不是同一张**。
+   * `chmod` / `chown` / `rmdir` / `reg` / `mount` 的 risk 是 medium，信任粒度却是 exact ——
+   * 拿 risk 猜就会把"仅记住这一条"写成"同类不再问"。
+   * 粒度只认 daemon 下发的 `trustKind`（那里与落盘规则用的是同一个函数）。
+   *
+   * 旧 daemon 不下发该字段 → 回落原文案：文案退化得模糊，但绝不给出**错误**结论。
+   *
+   * @param compact 窄待办条用短版（实测长文案在 340px 侧栏会顶出卡片右边界），
+   *                卡片里空间够，用完整表述。两套文案只差详略，语义必须一致。
+   */
+  function trustButtonLabel(trustKind, compact = false) {
+    if (compact) {
+      if (trustKind === 'exact') return '仅记此条';
+      if (trustKind === 'prefix') return '记住同类';
+      return '接受并记住';
+    }
+    if (trustKind === 'exact') return '仅记住这一条命令';
+    if (trustKind === 'prefix') return '接受并记住（同类命令不再问）';
+    return '接受并记住';
+  }
+
+  // -------------------------------------------------------------------------
   // 折叠 / 回收（三类卡共用）
   // -------------------------------------------------------------------------
 
@@ -133,7 +167,7 @@ export function createCards(ctx) {
     const actions = el('div', 'card-actions');
     const btnReject = el('button', 'danger', '拒绝');
     const btnAccept = el('button', 'ok-btn', '接受');
-    const btnTrust = el('button', 'ok-btn', '接受并记住');
+    const btnTrust = el('button', 'ok-btn', trustButtonLabel(p.trustKind));
     btnReject.type = btnAccept.type = btnTrust.type = 'button';
     btnReject.addEventListener('click', () => decideApproval(p.approvalId, false, false));
     btnAccept.addEventListener('click', () => decideApproval(p.approvalId, true, false));
@@ -570,7 +604,7 @@ export function createCards(ctx) {
       pendingActions.append(
         mkButton('拒绝', 'danger', () => decideApproval(id, false, false)),
         mkButton('接受', 'ok-btn', () => decideApproval(id, true, false)),
-        mkButton('接受并记住', 'ok-btn', () => decideApproval(id, true, true))
+        mkButton(trustButtonLabel(d.trustKind, true), 'ok-btn', () => decideApproval(id, true, true))
       );
     } else {
       const entry = openP[0];

@@ -262,6 +262,9 @@ const conversationDom = await renderScenario(({ emit, emitRaw }) => {
     input: { command: 'npm test -- tools' },
     // P2-9：npm test 属"未列出的命令"，分级按保守兜底记 medium（不再是固定 high）
     risk: 'medium',
+    // 批次 11-4：npm 不在高危程序表 → prefix 粒度，按钮应显示「接受并记住（同类命令不再问）」。
+    // 这也是**最长**的一版文案，用它来目视窄待办条会不会被撑破。
+    trustKind: 'prefix',
     reason: '该命令会写入文件或访问网络，需要人工批准。命令：npm test -- tools',
     expiresAt: Date.now() + EXPIRES,
   });
@@ -318,10 +321,13 @@ const decidedDom = await renderScenario(({ emit, emitRaw }) => {
   });
   emit('approval.request', {
     approvalId: 'ap_decided_trust',
-    tool: 'read_file',
-    input: { path: 'src/daemon/tools.ts' },
-    risk: 'low',
-    reason: '读取工作区内的文件',
+    tool: 'bash_execute',
+    input: { command: 'chmod +x scripts/smoke.js' },
+    // ★ 批次 11-4 的回归样本：risk 是 medium，信任粒度却是 exact（chmod 在高危程序表里）。
+    // 截图里这张卡的按钮必须是「仅记住这一条命令」—— 按 risk 推断会写成"同类不再问"。
+    risk: 'medium',
+    trustKind: 'exact',
+    reason: '该命令会写入文件或访问网络，需要人工批准。',
   });
   emit('file.patch.pending', {
     patchId: 'pt_decided',
@@ -339,7 +345,7 @@ const decidedDom = await renderScenario(({ emit, emitRaw }) => {
     b.click();
   };
   click('拒绝'); // ap_decided_reject → 已拒绝
-  click('接受并记住'); // ap_decided_trust → 已接受并记住
+  click('仅记此条'); // ap_decided_trust（chmod → exact）→ 已接受并记住
   click('应用'); // pt_decided → 已提交，等待应用
   emit('file.patch.result', { patchId: 'pt_decided', accepted: true, applied: true });
 });

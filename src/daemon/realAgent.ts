@@ -47,6 +47,9 @@ import {
   planApprovedInstruction,
   READONLY_TOOL_NAMES,
 } from './planMode';
+// 只借「将来会落成什么粒度」这一个纯函数：审批卡文案与落盘规则必须同源（批次 11-4）。
+// trust.ts 只依赖 shared/protocol 与 fs/path，不引入 runtime 依赖，也不会与 server.ts 成环。
+import { buildRuleForCommand } from './trust';
 import { CommandSandbox } from './sandbox';
 
 export interface RealAgentConfig {
@@ -877,6 +880,10 @@ async function dispatchTool(
       input: { command },
       risk: commandRisk,
       reason: riskReason(commandRisk, command),
+      // 批次 11-4：告诉 UI「记住」到底记住什么。取的是**用户真点下去之后会落盘的那条规则**
+      // （server.ts 的 approval.respond 走 TrustStore.add → 同一个 buildRuleForCommand），
+      // 所以按钮文案与实际行为同源，不会出现"写着同类不再问、实际只记住一条"。
+      trustKind: buildRuleForCommand(command, Date.now()).kind,
       // expiresAt 由 daemon 按 approvalTtlMs 统一盖戳（见 server.ts notify）
     };
     // B1 信任记忆：命中白名单 -> 免审批直接执行（不发起 approval.request）

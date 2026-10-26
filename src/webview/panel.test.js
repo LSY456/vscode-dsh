@@ -234,6 +234,64 @@ describe('审批卡与待办条', () => {
     // 裸 querySelector('.badge.err') 会先命中它而误判。
     expect(document.querySelector('.card.approval .badge.err').textContent).toBe('已过期');
   });
+
+  it('trustKind=exact：按钮说明只记这一条，且不按 risk 反推粒度', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_trust_exact', reason: 'new' });
+    emitEvent('approval.request', {
+      approvalId: 'ap4',
+      tool: 'bash_execute',
+      input: { command: 'chmod +x a.sh' },
+      // ★ 关键回归点：risk 是 medium（写文件），信任粒度却是 exact（HIGH_RISK_PROGRAMS 含 chmod）。
+      // 用 risk 反推会把它写成「同类命令不再问」—— 那是在骗用户授权，也是本项最初的设计错处。
+      risk: 'medium',
+      trustKind: 'exact',
+      reason: '该命令会写入文件或访问网络，需要人工批准。',
+    });
+    const card = [...document.querySelectorAll('.card.approval')].pop();
+    const btn = [...card.querySelectorAll('.card-actions button')].find((b) => b.textContent.includes('记住'));
+    // 卡片里空间够 → 完整表述
+    expect(btn.textContent).toBe('仅记住这一条命令');
+    // 待办条是 340px 窄条 → 短版；两处只能差详略，语义必须一致（实测长文案会顶出卡片右边界）
+    expect(pendingButton('仅记此条')).toBeTruthy();
+    expect(pendingButton('接受并记住')).toBeUndefined();
+  });
+
+  it('trustKind=prefix：按钮说明同类命令不再问，点下去仍带 trust', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_trust_prefix', reason: 'new' });
+    emitEvent('approval.request', {
+      approvalId: 'ap5',
+      tool: 'bash_execute',
+      input: { command: 'npm run build' },
+      risk: 'medium',
+      trustKind: 'prefix',
+      reason: '普通命令',
+    });
+    // 待办条短版；卡片侧完整表述由同一函数生成，此处只锁窄条这一处
+    const label = '记住同类';
+    expect(pendingButton(label)).toBeTruthy();
+    pendingButton(label).click();
+    expect(lastMessageOfKind('approval.respond')).toMatchObject({
+      approvalId: 'ap5',
+      approved: true,
+      trust: true,
+    });
+  });
+
+  it('旧 daemon 不下发 trustKind：回落原文案（模糊，但绝不给出错误结论）', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_trust_legacy', reason: 'new' });
+    emitEvent('approval.request', {
+      approvalId: 'ap6',
+      tool: 'bash_execute',
+      input: { command: 'echo hi' },
+      risk: 'low',
+      reason: '只读命令',
+    });
+    expect(pendingButton('接受并记住')).toBeTruthy();
+    // 顺手决策掉：本 describe 后段（补丁卡）依赖待办条上没有遗留的 open approval，
+    // 否则 updatePendingBar 会一直优先展示审批卡，补丁按钮就取不到了。
+    pendingButton('接受并记住').click();
+    expect(lastMessageOfKind('approval.respond')).toMatchObject({ approvalId: 'ap6', trust: true });
+  });
 });
 
 describe('补丁卡与待办条', () => {
