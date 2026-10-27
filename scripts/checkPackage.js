@@ -107,6 +107,11 @@ function matchedRule(entry) {
 
   // 清单看不出压缩后的体积，故实打一次包再量（产物是临时的，量完即删）
   const out = path.join(ROOT, 'dist', 'checkPackage.vsix');
+  // 必须自己建目录：`dist` 在 .gitignore 里，CI 的干净检出**没有这个目录**，
+  // 而 `vsce package --out` 只 open 目标文件、不创建父目录 → ENOENT。
+  // 那个报错只说"打不开 dist/checkPackage.vsix"，看着像打包坏了，实际是目录不存在；
+  // 本地一直是绿的，纯粹因为 dist/ 早被真包占着（本地与 CI 的差异全在这种地方）。
+  fs.mkdirSync(path.dirname(out), { recursive: true });
   const pack = await run([VSCE, 'package', '--out', out]);
   let bytes = 0;
   if (pack.code === 0 && fs.existsSync(out)) {

@@ -303,7 +303,16 @@ describe('recycleStaleDaemon：杀进程前先验身份（失败关闭）', () =
 
   it('readProcessCommandLine 的契约：拿不到就返回 undefined，绝不抛错', () => {
     const pid = 0x7fffffff; // 必然不存在
-    expect(() => readProcessCommandLine(pid)).not.toThrow();
-    expect(readProcessCommandLine(pid)).toBeUndefined();
+    // 只调用一次，两个断言共用同一个结果。
+    // 为什么不能调两次：Windows 分支走 `execFileSync(..., { timeout: 3000 })`
+    // （daemonManager.ts:147），单次调用的硬上限就是 3000ms；两次 → 最坏 6000ms，
+    // 已经超过 vitest 默认的 5000ms 用例上限，在慢的 CI runner 上必判超时
+    // （本机两次实测约 1.6s，windows-latest 上直接撞线）。
+    // 一次调用仍覆盖两条契约：抛错时 `not.toThrow()` 失败；不抛错才拿得到返回值。
+    let cmd: string | undefined;
+    expect(() => {
+      cmd = readProcessCommandLine(pid);
+    }).not.toThrow();
+    expect(cmd).toBeUndefined();
   });
 });

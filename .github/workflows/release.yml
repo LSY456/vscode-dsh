@@ -42,8 +42,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # 同 ci.yml：路径与 mkdir 交给 scripts/packageVsix.js。
+      # 此前写 `npx vsce package --out dist` 产出的是名为 `dist` 的无扩展名文件，
+      # Release 的 `dist/*.vsix` 匹配不到东西 —— 会发出**没有 VSIX 附件**的 Release，且全程无报错。
       - name: Package VSIX
-        run: npx vsce package --out dist
+        run: npm run package
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2

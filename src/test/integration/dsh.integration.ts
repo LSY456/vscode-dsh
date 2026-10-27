@@ -18,7 +18,11 @@ import type { DshDiffManager } from '../../diffProvider';
 import type { WebviewPanelHost } from '../../webviewPanel';
 import type { DshClient } from '../../wsClient';
 
-const EXT_ID = 'deepseek-ai.vscode-dsh';
+// = `package.json` 的 `publisher` + `name`。
+// 这里曾硬编码成 `deepseek-ai.vscode-dsh`（早期 publisher 名）。因为集成测试在 CI 上
+// 长期是 skipped（`needs` 的 test 作业先挂在 checkPackage 的 ENOENT），这个笔误一直没暴露；
+// 上游一修好、集成测试首次真正运行，"before all" 就以「扩展未找到」整族失败（T1–T5 全没跑）。
+const EXT_ID = 'LSY456.vscode-dsh';
 
 interface EventRecord {
   method: string;
