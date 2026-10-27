@@ -395,6 +395,14 @@ body {
      不加这条，行与行会被 HTML 折叠成一行，明细全糊在一起 */
   white-space: pre-line;
 }
+/* 系统消息里的动作按钮（批次 11-3 的「回滚本次改动」入口）。
+   系统消息是 pre-line 的纯文本块，按钮若走 inline 就会跟正文末行挤在一起 ——
+   必须独占一行，否则窄侧栏里会被读成正文的一部分。 */
+.message.system .notice-action {
+  display: block;
+  margin-top: var(--dsh-sp-2);
+  white-space: normal;
+}
 .message.error {
   border-left: 2px solid var(--dsh-err);
   color: var(--dsh-err);

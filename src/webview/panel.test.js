@@ -1341,6 +1341,53 @@ describe('会话回滚结果的多行汇报', () => {
 });
 
 /**
+ * 批次 11-3：会话结束提示里的「回滚本次改动」按钮。
+ *
+ * 回滚能力早就存在，缺的是"用户知道它存在"。这个按钮的价值全在三点上，缺一条就变成
+ * 摆设或者隐患：① 真的能点并把消息发回扩展；② 带上是**哪个**会话（扩展据此拒绝
+ * 跨会话回滚 —— 切到新会话后点旧提示，不校验就会回滚错会话）；③ 点过就退休
+ * （回滚是破坏性操作，连点两次不是用户的意图）。
+ */
+describe('notice 的动作按钮（批次 11-3 回滚入口）', () => {
+  it('带 action 的 notice 渲染按钮，点击发出 rollback.session 并带 sessionId', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_rb', reason: 'new' });
+    emitEvent('notice', {
+      text: '本次会话改动了 2 个文件，可一键回滚到会话开始前。',
+      action: { label: '回滚本次改动', kind: 'rollback.session', sessionId: 'sess_rb' },
+    });
+
+    const node = [...document.querySelectorAll('.message.system')].at(-1);
+    const btn = node.querySelector('button.notice-action');
+    expect(btn.textContent).toBe('回滚本次改动');
+    // 按钮在系统消息**内部**：脱离这条提示的独立按钮会失去"哪次会话"的上下文
+    expect(node.contains(btn)).toBe(true);
+
+    btn.click();
+    expect(lastMessageOfKind('rollback.session')).toMatchObject({ sessionId: 'sess_rb' });
+    expect(btn.disabled).toBe(true);
+
+    // 再点一次不重发。disabled 只是视觉，真正拦住重复回滚的是"不再发消息"
+    const before = posted.length;
+    btn.click();
+    expect(posted.length).toBe(before);
+  });
+
+  it('无 action 的 notice（0 改动 / 旧 daemon）不渲染任何按钮', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_rb2', reason: 'new' });
+    emitEvent('notice', { text: '本次会话没有改动文件' });
+    const node = [...document.querySelectorAll('.message.system')].at(-1);
+    expect(node.querySelector('button')).toBeNull();
+  });
+
+  it('样式表给动作按钮单独一行（否则会被读成正文的一部分）', () => {
+    // DOM↔CSS 契约：`.message.system` 是 pre-line 的纯文本块，按钮若 inline 就会
+    // 跟正文末行挤在一起 —— 窄侧栏里"回滚本次改动"看起来像那句话的后半截
+    const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+    expect(css).toMatch(/\.message\.system\s+\.notice-action\s*\{[^}]*display:\s*block/);
+  });
+});
+
+/**
  * Plan 模式（P2-7）：计划卡是"整轮做不做"的闸门，它的三条设计决策都要钉住 ——
  *  ① 计划正文按 Markdown 渲染（计划里必然有编号步骤与路径，渲成纯文本等于让它不可读）；
  *  ② 挂起时必须展开（与审批卡同一条"挂起项必须展开"的约定），决策后才折叠；

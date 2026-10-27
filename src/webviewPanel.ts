@@ -137,6 +137,8 @@ interface FromWebview {
     | 'trust.clear'
     | 'trust.manage'
     | 'balance.refresh'
+    /** 批次 11-3：会话结束提示里的「回滚本次改动」按钮 */
+    | 'rollback.session'
     | 'ui.diag';
   /** webview 侧诊断（事件渲染抛错 / 未知事件）：只落 OutputChannel，不改变产品行为 */
   diag?: { level: 'warn' | 'debug'; method?: string; message?: string };
@@ -229,8 +231,11 @@ export class WebviewPanelHost {
         // 这一轮把 token 用掉了 → 余额可能变了。TTL 会自动把重连重放等重复触发挡掉
         void this.refreshBalance();
       }
-      this.recordEvent(n.method, n.params);
+      // 先回写历史（闸门在里面，重放期不重复落库），再广播原事件，最后补本地生成的提示 ——
+      // 顺序不能倒：提示是"会话结束之后"的追加信息，出现在结束气泡之前会读成"还没结束"。
+      const extra = this.recordEvent(n.method, n.params);
       this.post({ kind: 'event', method: n.method, params: n.params });
+      for (const m of extra) this.post(m);
     });
 
     // 断线重连：daemon 会重放事件缓冲，先把视图清空，避免同一段回答被叠加渲染
@@ -277,10 +282,20 @@ export class WebviewPanelHost {
    * 从 daemon 事件流构建会话历史（会话开始/回答流/结束）。
    * 重放期间（断线重连 / 切回旧会话）跳过：事件是历史的重播，重复落库会产生重复回答。
    */
-  private recordEvent(method: string, params: unknown): void {
+  /**
+   * 回写会话历史，并产出**只该由扩展本地生成**的附加消息（批次 11-3）。
+   *
+   * 为什么附加消息必须在这里生成，而不是在 for 循环外面顺手 post 一条：
+   *  · 断线重连时 daemon 会重放事件缓冲，而 `notice` 是扩展本地事件、**根本不在** daemon
+   *    的事件流里，重放不会重建它；
+   *  · 紧挨着的那次 `post` 又没有重放闸门 —— 闸门只在本方法开头。
+   * 两条路都不通，所以提示只能在**闸门里面**生成，再交给调用方随同一个 post 送出去。
+   */
+  private recordEvent(method: string, params: unknown): ToWebview[] {
+    const extra: ToWebview[] = [];
     const sid = (params as { sessionId?: string } | null)?.sessionId;
-    if (!sid) return;
-    if (this.replayingSessionId && this.replayingSessionId === sid) return;
+    if (!sid) return extra;
+    if (this.replayingSessionId && this.replayingSessionId === sid) return extra;
     switch (method) {
       case EVENTS.SessionStarted:
         this.history.startSession(sid, (params as EventSessionStarted).title);
@@ -291,12 +306,31 @@ export class WebviewPanelHost {
       case EVENTS.MessageDone:
         this.history.finishAssistant(sid);
         break;
-      case EVENTS.SessionEnded:
+      case EVENTS.SessionEnded: {
         this.history.endSession(sid);
+        const changed = (params as EventSessionEnded).changedFiles;
+        // 只有**确实改过文件**才提示。0 / undefined 一律不提示 —— "本次没有改动"是常识，
+        // 每次会话都弹一条只会训练用户忽略这个提示。
+        if (typeof changed === 'number' && changed > 0) {
+          extra.push({
+            kind: 'event',
+            method: 'notice',
+            params: {
+              // 文案用「改动了」而不是「写入了」：快照条目含「已应用到编辑器缓冲区、尚未落盘」
+              // 那条通路（patchApply 通路 1 也记录），说"写入"会与事实不符。
+              text:
+                `本次会话改动了 ${changed} 个文件，可一键回滚到会话开始前。\n` +
+                '回滚前会先弹确认；编辑器里有未保存改动的文件会被跳过，不会覆盖你正在编辑的内容。',
+              action: { label: '回滚本次改动', kind: 'rollback.session', sessionId: sid },
+            },
+          });
+        }
         break;
+      }
       default:
         break;
     }
+    return extra;
   }
 
   /** 历史文件路径：优先工作区 .dsh/history.json，无工作区时退化为扩展全局存储。 */
@@ -760,6 +794,20 @@ export class WebviewPanelHost {
             /* 忽略：daemon 可能已完成 */
           }
         }
+        return;
+      }
+      case 'rollback.session': {
+        // 批次 11-3 修正 D：提示属于**某个**会话，而 rollbackSession() 取的是「当前会话」。
+        // 不校验的话，用户切到新会话后点旧提示上的按钮，回滚的是**当前**会话 ——
+        // 一个与按钮文字完全无关的破坏性操作。
+        const target = msg.sessionId;
+        if (!target || target !== this.daemon.getSessionId()) {
+          void vscode.window.showWarningMessage('该会话已不是当前会话，无法回滚。请先切回该会话再操作。');
+          return;
+        }
+        // 走**既有**回滚通路：模态确认 / 跳过脏文档 / 写入指纹比对三道保护一律沿用，
+        // 不为这条提示新开一条捷径（捷径迟早会漏掉其中一道）。
+        await this.rollbackSession();
         return;
       }
       case 'approval.respond': {

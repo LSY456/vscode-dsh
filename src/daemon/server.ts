@@ -89,6 +89,28 @@ export interface DaemonServerHandle {
 const MAX_READ_BYTES = 1024 * 1024; // file.read 单文件上限 1MB
 
 /** 模型运行时配置（CLI 缺省 + initialize 覆盖；P0-4 后为连接级）。 */
+/**
+ * 会话结束时补「本次改动了几个文件」（批次 11-3）。
+ *
+ * 抽成独立函数只为一件事：**能单测**。若内联在 `notify` 拦截点里，覆盖它要起完整 server
+ * （WebSocket + 会话 + 快照），成本远高于这段逻辑本身；而"读不出索引就不补"这个分支
+ * 恰恰最容易写错 —— 写成 0 就会让面板得出"没什么可回滚"的误导性结论。
+ *
+ * 幂等：发射方自己算过（`changedFiles` 已有值）就不覆盖，以它为准。
+ */
+export function withChangedFiles<T extends { changedFiles?: number }>(params: T, count: () => number): T {
+  if (!params || typeof params !== 'object') return params;
+  if (params.changedFiles !== undefined) return params;
+  try {
+    const n = count();
+    // 负数 / NaN 一律不写入：宁可没有这个字段（面板不提示），也不给一个错的数
+    if (Number.isFinite(n) && n >= 0) params.changedFiles = n;
+  } catch {
+    // 快照索引读不出来 → 不补。面板据此不显示提示。
+  }
+  return params;
+}
+
 export interface RuntimeConfig {
   apiKey: string;
   preset?: string;
@@ -427,6 +449,15 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
                 if (p && typeof p === 'object' && p.expiresAt === undefined) {
                   p.expiresAt = Date.now() + conn.approvalTtlMs;
                 }
+              }
+              // 批次 11-3：会话结束时补「本次改动了几个文件」，让回滚能力**可见**。
+              //
+              // 只在这一个地方补：12 个 `SessionEnded` 发射点一个都不用改；而且这里拿到的数
+              // 与 `session.rollback` 实际会还原的集合**同源**（同一个 SessionSnapshotStore）。
+              // 面板自己数 file.patch.result 做不到 —— 「已应用到编辑器缓冲区、尚未落盘」
+              // 那条通路它看不到，数出来的会比真能回滚的少。
+              if (method === EVENTS.SessionEnded) {
+                withChangedFiles(params as { changedFiles?: number }, () => snapshots.count(session.id));
               }
               session.emit(method, params);
               // 轨迹持久化（P3.4）：仅 trajectory.record 事件落盘
