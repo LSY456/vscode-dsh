@@ -96,6 +96,24 @@ describe('BwrapSandbox', () => {
     expect(spec.args.slice(-3)).toEqual(['/bin/sh', '-c', 'rm -rf x']);
     expect(spec.env).toEqual({});
   });
+
+  it('tmpfs /tmp 必须排在 bind 工作区之前（否则工作区被盖掉、--chdir 必失败）', () => {
+    // bwrap 按参数顺序挂载、后者覆盖前者。先 bind 工作区再 tmpfs /tmp 的话，
+    // 工作区会被空 tmpfs 整块盖掉；工作区恰在 /tmp 下（CI 的 smoke 临时目录就是
+    // /tmp/dsh-smoke-XXXX）时，bwrap 报 `Can't chdir to /tmp/…: No such file or directory`。
+    const sb = new BwrapSandbox({ workspaceRoot: '/tmp/dsh-smoke-abc123' });
+    const spec = sb.prepare('echo hi', '/tmp/dsh-smoke-abc123');
+
+    const tmpfsAt = spec.args.indexOf('--tmpfs');
+    const bindAt = spec.args.indexOf('--bind');
+    const chdirAt = spec.args.indexOf('--chdir');
+
+    expect(tmpfsAt).toBeGreaterThan(-1);
+    expect(bindAt).toBeGreaterThan(-1);
+    expect(tmpfsAt).toBeLessThan(bindAt);
+    // chdir 指向的目录在 bind 之后才存在，所以必须排在 bind 之后
+    expect(chdirAt).toBeGreaterThan(bindAt);
+  });
 });
 
 describe('detectSandbox', () => {
