@@ -118,17 +118,24 @@ export class BwrapSandbox implements CommandSandbox {
         '--ro-bind',
         '/',
         '/',
+        // 挂载顺序即语义：bwrap 按参数顺序逐个挂载，后者覆盖前者。
+        // `--tmpfs /tmp` 必须排在 `--bind <工作区>` 之前 —— 反过来（先 bind 再 tmpfs）
+        // 会把刚 bind 进来的工作区整块盖成空目录；工作区恰好落在 /tmp 下时 `--chdir`
+        // 就找不到目录，报 `bwrap: Can't chdir to /tmp/…: No such file or directory`。
+        // 真实触发：CI runner 镜像装上 bwrap 后，smoke 的临时工作区（/tmp/dsh-smoke-XXXX）
+        // 让这条路径从"从未被执行"变成"每次必失败"—— 而在此之前一律走的是
+        // ProcessSandbox（runner 上没有 bwrap），所以这个顺序错误潜伏了很久。
+        '--tmpfs',
+        '/tmp',
+        '--dev',
+        '/dev',
+        '--proc',
+        '/proc',
         '--bind',
         this.workspaceRoot,
         this.workspaceRoot,
         '--chdir',
         safeCwd,
-        '--dev',
-        '/dev',
-        '--proc',
-        '/proc',
-        '--tmpfs',
-        '/tmp',
         '/bin/sh',
         '-c',
         command,

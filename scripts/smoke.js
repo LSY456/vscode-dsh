@@ -31,10 +31,15 @@ const DAEMON_SCRIPT = path.join(ROOT, 'out', 'daemon', 'index.js');
 const TOKEN = 'smoke-token-' + Math.random().toString(36).slice(2);
 
 let failures = 0;
-function assert(cond, msg) {
+function assert(cond, msg, actual) {
   if (!cond) {
     failures++;
-    console.error('  FAIL: ' + msg);
+    // 失败时必须能看到「实际是什么」。只打一行 FAIL 会让 CI 红成黑箱：
+    // 定位一条 ubuntu 上的 bash 失败时，日志里除了 FAIL 之外什么线索都没有，
+    // 只能靠猜（chdir 失败？ENOENT？退出码非零？），而三者的修法完全不同。
+    console.error(
+      '  FAIL: ' + msg + (actual === undefined ? '' : `（实际：${String(actual).slice(0, 400)}）`)
+    );
   } else {
     console.log('  ok:   ' + msg);
   }
@@ -595,9 +600,21 @@ async function main() {
     (m) => m.method === 'tool.executed' && m.params.tool === 'bash_execute',
     '真实 bash_execute 完成'
   );
-  assert(rbashDone.params.ok === true, '真实 bash_execute 执行成功');
-  assert(rbashDone.params.output.includes('SMOKE_BASH_OK'), '命令输出含 SMOKE_BASH_OK');
-  assert(rbashDone.params.output.includes(path.basename(tmpDir)), '命令 cwd 被约束到工作区');
+  assert(
+    rbashDone.params.ok === true,
+    '真实 bash_execute 执行成功',
+    `ok=${rbashDone.params.ok}；output=${rbashDone.params.output}`
+  );
+  assert(
+    rbashDone.params.output.includes('SMOKE_BASH_OK'),
+    '命令输出含 SMOKE_BASH_OK',
+    rbashDone.params.output
+  );
+  assert(
+    rbashDone.params.output.includes(path.basename(tmpDir)),
+    '命令 cwd 被约束到工作区',
+    rbashDone.params.output
+  );
   await rconn.rpc.waitFor((m) => m.method === 'session.ended', '真实 bash 会话结束');
 
   // ---- 10b. P2-6 会话级回滚：把本次会话改过的文件还原到会话开始前
