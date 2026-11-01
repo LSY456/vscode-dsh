@@ -181,6 +181,9 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.model.maxTokens` | *（空）* | 单次输出上限；留空 = **不发送该字段**，由服务端决定上限。Anthropic 把 `max_tokens` 列为必填，留空时回落 4096 |
 | `dsh.agent.maxToolRounds` | `8` | 单轮会话最多工具调用轮次（1–50）；跑满后强制收束（`requestFinalAnswer`），不带工具再问一次给出正文 |
 | `dsh.agent.maxContextTokens` | `49152` | 上下文预算 token 数（4000–1000000）；超出后按滑动窗口丢弃最旧的工具轮次（保留系统提示与用户原始消息） |
+| `dsh.agent.maxWriteFailures` | `3` | 写入类工具**连续**失败几次就停止尝试（1–20）；只数 `write_file` / `apply_patch` 的系统侧失败，一次成功即清零 |
+| `dsh.agent.maxToolCallsPerRound` | `8` | 单轮最多执行几个工具调用（1–50）；超出的不执行，但会告诉模型「这一批没执行」，让它下一轮挑重点 |
+| `dsh.agent.maxSessionTokens` | `524288` | 一场会话累计消耗的 token 上限（0 = 不限制）；达到后不再调用工具，只让模型基于已有信息给结论。本地估算，用于止损，不是账单 |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
 | `dsh.context.maxFileBytes` | `200000` | 附件内联内容阈值；超出改为 `contentOmitted` 按需 `file.read` |
 | `dsh.diff.autoOpen` | `true` | 补丁到达时自动打开 Diff 视图 |
