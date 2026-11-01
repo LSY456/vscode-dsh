@@ -24,7 +24,15 @@ import {
 import { sanitizeImageAttachments } from '../../shared/imageAttachment';
 import * as path from 'path';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatCompletionResult, ChatContentPart, ChatMessage, ChatModel, contentToText, StreamChunk, ToolDefinition } from './model';
+import {
+  ChatCompletionResult,
+  ChatContentPart,
+  ChatMessage,
+  ChatModel,
+  contentToText,
+  StreamChunk,
+  ToolDefinition,
+} from './model';
 import { TrajectoryMeta } from '../../shared/protocol';
 import { createToolCallFenceFilter, parseToolCalls, ToolCall, ToolCallFenceFilter } from './toolcall';
 import {
