@@ -186,26 +186,57 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 
 ### P1 —— 健壮性 / 可维护性
 
+> **状态（2026-11-01 追记）**：编号带 **✅** 的条目已实现，证据见本节末尾「P1 状态追记」；不带标记的是仍待办，只剩 **P1-10 / P1-17 / P1-18** 三条。
+
 | 编号 | 现状（证据） | 影响 | 建议 |
 | --- | --- | --- | --- |
-| P1-1 | `SessionManager` 只提供 `delete`，server 从不调用（`sessionManager.ts:285-313`）；每个 `Session` 常驻 ≤2000 条事件缓冲 + `patchContent` | daemon 跨天长跑时内存单调增长 | 加 TTL/LRU 回收 + `session.ended` 后延迟清理（保留一个 resume 窗口，如 10 分钟） |
-| P1-2 | `grep/glob` 的 `walkFiles` 是**同步递归**（`tools.ts:113-134`），无深度/条目/时间上限，且**无 visited 去重** | 大仓库上阻塞 daemon 事件循环 → 心跳 ping 超时（`wsClient.ts:171-196`，3 次失败即强制重连）→ 用户看到"连接断开"；工作区内的 symlink 环可无限递归 | 改异步遍历 + 深度/条目/时间预算上限 + 按 realpath 去重 visited + 并发限流 |
-| P1-3 | `provider=anthropic` 时 baseURL 被 DeepSeek 默认值污染：`package.json:178-182` 默认 `https://api.deepseek.com/v1` → `daemonManager.ts:176-180` 无条件下发 → `model.ts:122-124` 仅在 baseURL 为空时才用官方默认 | 用户只把 provider 切成 anthropic、不改 baseURL → 请求打到 `https://api.deepseek.com/v1/v1/messages`，报 404，且报错信息难定位 | daemon 侧按 provider 决定默认 baseURL；或在 provider 与 baseURL 明显不匹配时给出显式 UI 告警 |
-| P1-4 | `spawnExternal` 用 `cmd.split(/\s+/)` 拆命令，且 `String.replace` 不带 `g` 只替换首次（`daemonManager.ts:386-394`） | `dsh.daemon.command` 里带引号的路径/参数必坏；含多个 `{token}` 占位只替换一个 | 改用 `shell-quote`/`string-argv` 解析，或要求配置为数组；`replaceAll` |
-| P1-5 | `recycleStaleDaemon` 直接 `process.kill(pid)`（`daemonManager.ts:451-478`），pid 来源是可被任意本地进程写入的 `.dsh/daemon.json` | pid 复用 + 文件被篡改 → 可能误杀无关进程 | kill 前校验目标进程命令行含本 daemon 脚本路径（POSIX 读 `/proc/<pid>/cmdline`，Windows 用 CIM/WMI 查 CommandLine） |
-| P1-6 | daemon 的 HTTP 端点无鉴权，任意 GET 都返回 200 + banner（`server.ts:114-117`） | 可被本机任意进程用于端口探测确认 | 非升级请求直接 426/404；或校验 token |
-| P1-7 | 过期挂起项只标记 `expired = true` 保留在 Map 中（`sessionManager.ts:237-246`），依赖 `end()` 才清理 | 长 idle 会话中过期项累积（轻微泄漏） | 过期后延迟 60s 清理（既保留 `respond` 返回 `-32010` 的语义，也回收内存） |
-| P1-8 | `stepCounter` 是模块级全局（`agent.ts:53`、`realAgent.ts:51`） | `PROTOCOL.md:135` 定义 `step` 为"会话内单调递增"，实际是全局递增；多会话并发时 UI 迹线的步骤号跳跃、不连续 | 计数器挂到 `Session` |
-| P1-9 | `docs` 类漂移：`SECURITY.md:7-8` 写支持 `0.3.x/0.2.x`，而 `package.json:5` 是 `0.4.0`；`CONTRIBUTING.md:28` 硬编码"244 用例" | 文档与代码不一致，削弱可信度；用例数会持续漂移 | 版本从 `shared/version.ts` 注入文档；用例数改为脚本生成或直接删除数字 |
+| P1-1 ✅ | `SessionManager` 只提供 `delete`，server 从不调用（`sessionManager.ts:285-313`）；每个 `Session` 常驻 ≤2000 条事件缓冲 + `patchContent` | daemon 跨天长跑时内存单调增长 | 加 TTL/LRU 回收 + `session.ended` 后延迟清理（保留一个 resume 窗口，如 10 分钟） |
+| P1-2 ✅ | `grep/glob` 的 `walkFiles` 是**同步递归**（`tools.ts:113-134`），无深度/条目/时间上限，且**无 visited 去重** | 大仓库上阻塞 daemon 事件循环 → 心跳 ping 超时（`wsClient.ts:171-196`，3 次失败即强制重连）→ 用户看到"连接断开"；工作区内的 symlink 环可无限递归 | 改异步遍历 + 深度/条目/时间预算上限 + 按 realpath 去重 visited + 并发限流 |
+| P1-3 ✅ | `provider=anthropic` 时 baseURL 被 DeepSeek 默认值污染：`package.json:178-182` 默认 `https://api.deepseek.com/v1` → `daemonManager.ts:176-180` 无条件下发 → `model.ts:122-124` 仅在 baseURL 为空时才用官方默认 | 用户只把 provider 切成 anthropic、不改 baseURL → 请求打到 `https://api.deepseek.com/v1/v1/messages`，报 404，且报错信息难定位 | daemon 侧按 provider 决定默认 baseURL；或在 provider 与 baseURL 明显不匹配时给出显式 UI 告警 |
+| P1-4 ✅ | `spawnExternal` 用 `cmd.split(/\s+/)` 拆命令，且 `String.replace` 不带 `g` 只替换首次（`daemonManager.ts:386-394`） | `dsh.daemon.command` 里带引号的路径/参数必坏；含多个 `{token}` 占位只替换一个 | 改用 `shell-quote`/`string-argv` 解析，或要求配置为数组；`replaceAll` |
+| P1-5 ✅ | `recycleStaleDaemon` 直接 `process.kill(pid)`（`daemonManager.ts:451-478`），pid 来源是可被任意本地进程写入的 `.dsh/daemon.json` | pid 复用 + 文件被篡改 → 可能误杀无关进程 | kill 前校验目标进程命令行含本 daemon 脚本路径（POSIX 读 `/proc/<pid>/cmdline`，Windows 用 CIM/WMI 查 CommandLine） |
+| P1-6 ✅ | daemon 的 HTTP 端点无鉴权，任意 GET 都返回 200 + banner（`server.ts:114-117`） | 可被本机任意进程用于端口探测确认 | 非升级请求直接 426/404；或校验 token |
+| P1-7 ✅ | 过期挂起项只标记 `expired = true` 保留在 Map 中（`sessionManager.ts:237-246`），依赖 `end()` 才清理 | 长 idle 会话中过期项累积（轻微泄漏） | 过期后延迟 60s 清理（既保留 `respond` 返回 `-32010` 的语义，也回收内存） |
+| P1-8 ✅ | `stepCounter` 是模块级全局（`agent.ts:53`、`realAgent.ts:51`） | `PROTOCOL.md:135` 定义 `step` 为"会话内单调递增"，实际是全局递增；多会话并发时 UI 迹线的步骤号跳跃、不连续 | 计数器挂到 `Session` |
+| P1-9 ✅ | `docs` 类漂移：`SECURITY.md:7-8` 写支持 `0.3.x/0.2.x`，而 `package.json:5` 是 `0.4.0`；`CONTRIBUTING.md:28` 硬编码"244 用例" | 文档与代码不一致，削弱可信度；用例数会持续漂移 | 版本从 `shared/version.ts` 注入文档；用例数改为脚本生成或直接删除数字 |
 | P1-10 | `tsconfig.json:17` 只 include `src/**/*.ts`、`shared/**/*.ts`；`allowJs` 未开 | `media/webview.js`(1155 行)、`src/webview/*.js`、`scripts/*.js`、`esbuild.js` **全部在类型检查之外**，且仓库无 ESLint/vitest 配置文件 | 单独加 `tsconfig.web.json`（`allowJs + checkJs`）覆盖前端与脚本；引入 ESLint + Prettier 并接入 CI |
-| P1-11 | ~~CI 硬化缺口（`.github/workflows/ci.yml`）：action 仅用 tag 未 pin SHA（L13/15/27）；无 `permissions:`；无 `concurrency`；无 `timeout-minutes`；无 lint 步骤；integration 每次重下 stable VSCode 无缓存（L78）；OSV 无 SARIF 上报~~ | 原判风险：供应链风险 + 卡死可跑满 6h + 反馈慢。**【2026-10-11 追记：已实现，口径见本节末尾「CI 硬化追记」。唯一没做的是 lint 步骤 —— 仓库至今没有 linter（属 P1-10），不该在这一批里顺手引入** | 已实施：pin SHA、顶层最小权限 + job 级提权、`concurrency`（仅 PR 取消在跑）、逐 job `timeout-minutes`、缓存 `.vscode-test`、OSV 改官方可复用工作流（含 SARIF 上报），并新增工作流守卫把它们锁住 |
-| P1-12 | ~~Webview 巨石单文件 + 无类型（`media/webview.js` 1155 行承载事件分发/审批/补丁/历史/设置）~~ | 原判风险：修改成本高、回归风险大。**【2026-10-11 追记：已拆分，口径见本节末尾「Webview 拆分追记」。注意拆出模块**并不**顺带解决"无类型"——`tsconfig.json` 仍只 include `src/**/*.ts`，这些 `.js` 模块依旧在 `tsc` 之外（属 P1-10）】** | 已实施：拆为 `panelCore`（共享壳）+ `statusBar` / `messages` / `cards` / `history` / `composer` / `events` 六个特性模块 + 薄入口；可变状态集中到一个 `state` 对象（闭包里的 `let` 无法跨模块共享） |
-| P1-13 | `handleEvent` 无 try/catch（`media/webview.js:1020-1026` 附近），默认分支静默吞未知事件 | 单条事件抛错即静默丢失，协议漂移被掩盖成"UI 没反应" | 包 try/catch + 上报到扩展 logger；未知事件在 debug 级别打点 |
-| P1-14 | `resetTurn()` 不重置 `answerEl/answerBody/answerBatcher`（`media/webview.js:414-421`），而 `clearMessages()` 才做（L816-844） | **窗口期**：若上一轮既没收到 `message.done` 也没收到 `session.ended`（daemon 流式中崩溃、事件丢失），下一轮 `ensureAnswer()` early-return（L270），新回答续写进旧气泡 | `resetTurn()` 首行调用 `finishAssistant()`（幂等），或在 `user.message` 分支统一走 `finishAssistant()` |
-| P1-15 | `.dsh` 各子目录创建权限不统一：`trajectory` 0700（`trajectoryStore.ts:76`）、`logs` 0700（`logFile.ts:52`）、`trust.json` 直接写（`trust.ts:109-117`）、`history.json` 0700（`history.json` 写入路径 `sessionHistory.ts:44`） | `.dsh` 目录本身可能以默认 umask 创建，权限语义不一致 | 统一 `ensureDshDir()` 以 0700 创建 `.dsh` 及各子目录 |
-| P1-16 | `getWorkspaceRoot()` 只取 `workspaceFolders[0]`（`daemonManager.ts:480-486`） | 多根工作区语义模糊，`.dsh/` 落在第一个文件夹 | 显式声明"仅支持单根"，或按文件夹起独立 daemon 与独立端口文件 |
+| P1-11 ✅ | ~~CI 硬化缺口（`.github/workflows/ci.yml`）：action 仅用 tag 未 pin SHA（L13/15/27）；无 `permissions:`；无 `concurrency`；无 `timeout-minutes`；无 lint 步骤；integration 每次重下 stable VSCode 无缓存（L78）；OSV 无 SARIF 上报~~ | 原判风险：供应链风险 + 卡死可跑满 6h + 反馈慢。**【2026-10-11 追记：已实现，口径见本节末尾「CI 硬化追记」。唯一没做的是 lint 步骤 —— 仓库至今没有 linter（属 P1-10），不该在这一批里顺手引入** | 已实施：pin SHA、顶层最小权限 + job 级提权、`concurrency`（仅 PR 取消在跑）、逐 job `timeout-minutes`、缓存 `.vscode-test`、OSV 改官方可复用工作流（含 SARIF 上报），并新增工作流守卫把它们锁住 |
+| P1-12 ✅ | ~~Webview 巨石单文件 + 无类型（`media/webview.js` 1155 行承载事件分发/审批/补丁/历史/设置）~~ | 原判风险：修改成本高、回归风险大。**【2026-10-11 追记：已拆分，口径见本节末尾「Webview 拆分追记」。注意拆出模块**并不**顺带解决"无类型"——`tsconfig.json` 仍只 include `src/**/*.ts`，这些 `.js` 模块依旧在 `tsc` 之外（属 P1-10）】** | 已实施：拆为 `panelCore`（共享壳）+ `statusBar` / `messages` / `cards` / `history` / `composer` / `events` 六个特性模块 + 薄入口；可变状态集中到一个 `state` 对象（闭包里的 `let` 无法跨模块共享） |
+| P1-13 ✅ | `handleEvent` 无 try/catch（`media/webview.js:1020-1026` 附近），默认分支静默吞未知事件 | 单条事件抛错即静默丢失，协议漂移被掩盖成"UI 没反应" | 包 try/catch + 上报到扩展 logger；未知事件在 debug 级别打点 |
+| P1-14 ✅ | `resetTurn()` 不重置 `answerEl/answerBody/answerBatcher`（`media/webview.js:414-421`），而 `clearMessages()` 才做（L816-844） | **窗口期**：若上一轮既没收到 `message.done` 也没收到 `session.ended`（daemon 流式中崩溃、事件丢失），下一轮 `ensureAnswer()` early-return（L270），新回答续写进旧气泡 | `resetTurn()` 首行调用 `finishAssistant()`（幂等），或在 `user.message` 分支统一走 `finishAssistant()` |
+| P1-15 ✅ | `.dsh` 各子目录创建权限不统一：`trajectory` 0700（`trajectoryStore.ts:76`）、`logs` 0700（`logFile.ts:52`）、`trust.json` 直接写（`trust.ts:109-117`）、`history.json` 0700（`history.json` 写入路径 `sessionHistory.ts:44`） | `.dsh` 目录本身可能以默认 umask 创建，权限语义不一致 | 统一 `ensureDshDir()` 以 0700 创建 `.dsh` 及各子目录 |
+| P1-16 ✅ | `getWorkspaceRoot()` 只取 `workspaceFolders[0]`（`daemonManager.ts:480-486`） | 多根工作区语义模糊，`.dsh/` 落在第一个文件夹 | 显式声明"仅支持单根"，或按文件夹起独立 daemon 与独立端口文件 |
 | P1-17 | 单测覆盖空白：原判 7 个文件（`server.ts`、`daemonManager.ts`、`wsClient.ts`、`diffProvider.ts`、`contextCapture.ts`、`extension.ts`、`logger.ts`）均无单测。**【2026-10-12 追记：其中 `server.ts` 与 `daemonManager.ts` 现已有单测（`server.test.ts` 覆盖连接级隔离与 `resolveAgentDecision`、`daemonManager.test.ts` 覆盖信任/无工作区门禁与命令行解析），**实际仍无单测的是 `wsClient.ts`、`diffProvider.ts`、`contextCapture.ts`、`extension.ts`、`logger.ts` 五个**】** | **`server.ts` 是安全边界（握手/Origin/能力分级/错误码映射）却只靠 smoke 间接覆盖**，是最危险的空白。**【2026-10-12 追记：`server.ts` 的**安全边界部分**已抽为纯函数并单测（`serverGuards.ts`，见本节末尾「daemon 安全边界与可观测性追记」）；本行**未整行关闭**，剩下的五个文件仍无单测】** | 抽出纯函数（`verifyHandshake` 判定、能力收敛、路径护栏、挂起项错误码映射）并补单测 **【已做】**；`wsClient` 可用本地 `ws` server 做真实连接测试 |
 | P1-18 | `agent.test.ts` 依赖真实 `sleep`（`agent.ts:87` 等），13 个用例耗时 **14.3s**，占全套 27.6s 的一半 | 测试套慢 → 反馈慢 | 注入可控时钟/假定时器（vitest `vi.useFakeTimers`），把 `sleep` 变为可注入依赖 |
+
+### P1 状态追记（2026-11-01 逐条核实）
+
+这一节修的是一个长期误导：**P1 里多数条目早已实现，但表格从未回写状态** ——
+照着这张表排期，会把已完成的活重做一遍。以下结论以当前 `main` 的代码为准，每条都给可复验位置。
+
+| 编号 | 状态 | 证据（文件 / 行为 / 测试） |
+| --- | --- | --- |
+| P1-1 | ✅ 已实现 | `src/daemon/sessionManager.ts#prune`：TTL + `maxIdle` 双线回收，**只淘汰 `idle`**（`running` / `pending_*` 有在途调用或待决策，删掉即丢用户操作）；挂在 `create()` 里，不需要额外定时器 |
+| P1-2 | ✅ 已实现（最小可用版，**仍同步**） | `src/daemon/tools.ts#walkFiles` 带时间/条目/深度预算（`DEFAULT_WALK_LIMITS`），`state.visited` 按 realpath 去重 → symlink 环不会无限递归。异步遍历未做，故事件循环仍有单次阻塞上界 |
+| P1-3 | ✅ 已实现 | `src/daemon/model.ts#resolveProviderBaseURL` 是唯一裁决点；判据是"等不等于出厂缺省值"而非域名匹配（否则会误伤 `https://api.deepseek.com/anthropic` 这类兼容入口）；`model.test.ts` 覆盖 |
+| P1-4 | ✅ 已实现 | `src/daemonManager.ts` 三个占位符全用 `replaceAll`，替换值走函数形式（字符串替换值会把 `$&`/`$1` 当模式解释），路径经 `quote()` 包裹 |
+| P1-5 | ✅ 已实现 | `src/daemonManager.ts#readProcessCommandLine` + `isDshDaemonCommandLine`：kill 前必须命令行命中本扩展的 daemon 脚本，pid 被复用/篡改时不误杀 |
+| P1-6 | ✅ 已实现 | `src/daemon/server.ts`：非升级请求返回 **404**，刻意不用 426 —— 426 会带 `Upgrade: websocket`，等于仍然确认"这是 WS 端点" |
+| P1-7 | ✅ 已实现（最小修法） | `sessionManager.ts#registerPending` 登记新条目时 `sweepExpiredPending` 清掉已 `expired` 项；到点未响应的条目**保留一小会儿**，以便 `respond` 仍能回 `expired` 而不是 `not_found`；刻意不加第二个 setTimeout（悬着的定时器会拖住 vitest 退出），内存上界由 P1-1 兜底 |
+| P1-8 | ✅ 已实现 | `Session.nextStep()`，`server.ts` 注入 `ctx.nextStep`；模块级计数器只做裸 context 的兜底；`sessionManager.test.ts` 断言会话内单调 |
+| P1-9 | ✅ 已实现（文档一致性达标；**版本号仍手写维护**，未做「从 shared/version.ts 注入文档」那半） | `SECURITY.md` 版本矩阵已到 `0.8.x`；`CONTRIBUTING.md` 不再写用例数；`README.md` / 本报告 / `project-summary` 的硬编码用例数已清。**保留的评估日数字一律标注"只在当日成立"** —— 用例数已漂移过五次（615/636/746/752/759），写死只会再错一次 |
+| P1-11 | ✅ 已实现 | 见 §4「CI 硬化追记」。唯一没做的是 lint 步骤，属 P1-10 |
+| P1-12 | ✅ 已实现 | 见 §4「Webview 拆分追记」。拆分**不**解决"无类型"，仍属 P1-10 |
+| P1-13 | ✅ 已实现 | `src/webview/events.js`：`event` 分支 try/catch，未知协议事件走 `reportDiag('debug', ...)` 而非静默吞掉 |
+| P1-14 | ✅ 已实现 | `src/webview/messages.js#resetTurn` 首行调 `finishAssistant()`（幂等）。异常路径（上一轮既无 `message.done` 也无 `session.ended`）不再把新回答续写进旧气泡 |
+| P1-15 | ✅ 已实现 | `shared/dshDir.ts`：`.dsh` 及各子目录统一 `mkdirSync(..., { mode: 0o700 })`，生成的 `.gitignore` 文件 `0o600`；轨迹目录 0700 / 文件 0600 |
+| P1-16 | ✅ 已实现 | `src/workspaceRoot.ts#resolveWorkspaceRoot` 是唯一入口，显式声明单根语义并返回 `folderCount`；`daemonManager.ts` 在多根时 `logger.info` 说明实际作用的是第一个文件夹 |
+
+**仍未实现 —— 本表唯一可信的待办**：
+
+- **P1-10**：仓库至今没有 `tsconfig.web.json`（`allowJs` + `checkJs`），也没有 ESLint / Prettier 配置。`media/webview.js`、`src/webview/*.js`、`scripts/*.js`、`esbuild.js` 全在类型检查之外。
+- **P1-17**：`wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger` 五个文件仍无单测。
+- **P1-18**：`agent.test.ts` 仍依赖真实 `sleep`，未改 `vi.useFakeTimers`。
 
 ### P2 —— 体验 / 打磨 / 战略
 
@@ -452,7 +483,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | 项目 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型检查 | `npm run typecheck` | 通过，零错误 |
-| 单元测试 | `npm test` | 18 文件 / **244 用例** 全部通过，27.57s（评估日快照；当前为 39 文件 / 759 用例 —— 以 `npm test` 的输出为准，本表的数字只在评估日成立） |
+| 单元测试 | `npm test` | 18 文件 / **244 用例** 全部通过，27.57s（**评估日快照，只在当日成立**。用例数已多次漂移 615→636→746→752→759→787，故**当前数字一律以 `npm test` 的输出为准**，此处不再追写） |
 | 最慢用例组 | `src/daemon/agent.test.ts` | 13 用例 / **14.3s**（依赖真实 sleep） |
 | 运行时 | node v22.22.2 / npm 10.9.7 | `engines.vscode ^1.85.0`，CI 用 node 20，CONTRIBUTING 写 >=18 —— 本地 22 未测 |
 | 构建产物 | `out/extension.js`、`out/daemon/index.js` | 均已存在且新鲜 |
@@ -462,7 +493,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 
 ## 8. 结语
 
-这个项目的**架构品味明显高于它的产品完成度**。它把"Agent 与编辑器解耦"、"改动必须人审"、"上下文自动捕获"这三件正确的事做成了骨架，并且安全与工程纪律（canonical 护栏、默认拒绝、SecretStorage、buildId 防陈旧，评估当日 244 个用例、现已增至 317）都达到了可交付水平。
+这个项目的**架构品味明显高于它的产品完成度**。它把"Agent 与编辑器解耦"、"改动必须人审"、"上下文自动捕获"这三件正确的事做成了骨架，并且安全与工程纪律（canonical 护栏、默认拒绝、SecretStorage、buildId 防陈旧，评估当日 244 个用例、此后持续增长且不再写死数字）都达到了可交付水平。
 
 真正的短板不在代码质量，而在两处：**一是"真实 Agent 内核"仍缺席，用户拿到的实际是模拟 Agent；二是有几条会把用户的代码改坏的正确性通路（脏文档、无乐观锁）没被堵住。**
 
