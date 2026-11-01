@@ -1720,3 +1720,133 @@ describe('realAgent：写入类连续失败收敛（批次 11-2）', () => {
     expect(c2.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
   });
 });
+
+describe('realAgent：宿主侧硬约束（扇出 / 累计花费 / 413 降级）', () => {
+  it('单轮工具调用超上限：只执行前 N 个，其余逐条补「未执行」（不破坏调用/响应配对）', async () => {
+    const ctx = makeCtx();
+    const seen: ChatMessage[][] = [];
+    let round = 0;
+    const model: ChatModel = {
+      chat: async (messages) => {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        round++;
+        if (round === 1) {
+          // 一轮里发起 3 个调用，上限设 2
+          return {
+            reasoning: '',
+            content: '',
+            toolCalls: [
+              { tool: 'read_file', input: { path: file }, id: 'c1' },
+              { tool: 'read_file', input: { path: file }, id: 'c2' },
+              { tool: 'read_file', input: { path: file }, id: 'c3' },
+            ],
+          };
+        }
+        seen.push(messages.map((m) => ({ ...m })));
+        return { reasoning: '', content: '完成' };
+      },
+    };
+
+    await runRealAgent(ctx, baseParams, { model, maxToolCallsPerRound: 2 });
+
+    // 真正执行的只有前 2 个（tool.executed 事件面可数）
+    expect(ctx.events.filter((e) => e.method === EVENTS.ToolExecuted)).toHaveLength(2);
+    // 但下一轮请求里 3 条 tool 响应都在：少一条，原生 function calling 会整轮判非法（400）
+    const toolMsgs = seen[0].filter((m) => m.role === 'tool');
+    expect(toolMsgs).toHaveLength(3);
+    expect(contentToText(toolMsgs[0].content)).not.toContain('未执行');
+    expect(contentToText(toolMsgs[2].content)).toContain('未执行');
+    expect(
+      ctx.events.some((e) => e.method === EVENTS.Trajectory && String(e.params.detail).includes('超过上限 2'))
+    ).toBe(true);
+  });
+
+  it('累计 token 达上限：不再发起工具轮，只补一次收束（用户仍拿到解释）', async () => {
+    const ctx = makeCtx();
+    let toolRounds = 0;
+    let finalAnswers = 0;
+    const model: ChatModel = {
+      chat: async (messages, opts) => {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        if (opts?.tools) {
+          toolRounds++;
+          return { reasoning: '', content: '', toolCalls: [{ tool: 'read_file', input: { path: file }, id: 'c1' }] };
+        }
+        finalAnswers++;
+        return { reasoning: '', content: '基于已读内容作答' };
+      },
+    };
+
+    // 预算设 1：一轮请求不可能只花 1 token，于是第二轮开头必然判定超支
+    await runRealAgent(ctx, baseParams, { model, maxSessionTokens: 1 });
+
+    expect(toolRounds).toBe(1); // 只发出一次带工具的请求，第二轮被闸门拦下
+    expect(finalAnswers).toBe(1); // 收束仍发生：预算到顶也要给用户一段解释
+    expect(
+      ctx.events.some((e) => e.method === EVENTS.MessageDelta && String(e.params.delta).includes('已达上限'))
+    ).toBe(true);
+    expect(
+      ctx.events.some(
+        (e) => e.method === EVENTS.Trajectory && String(e.params.detail).includes('累计 token 预算已达上限')
+      )
+    ).toBe(true);
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
+  });
+
+  it('413 降级：预算砍半后重试成功，并留下降级轨迹', async () => {
+    const ctx = makeCtx();
+    const huge = path.join(root, 'huge.txt');
+    fs.writeFileSync(huge, 'y'.repeat(60000), 'utf8');
+
+    let n = 0;
+    const model: ChatModel = {
+      chat: async (messages) => {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        n++;
+        if (n === 1) {
+          return { reasoning: '', content: '', toolCalls: [{ tool: 'read_file', input: { path: huge }, id: 'c1' }] };
+        }
+        if (n === 2) {
+          // 上游判定请求体过大：错误上带状态码，模型层据此判定 4xx 不自动重试
+          const err = new Error('HTTP 413：请求体过大，请减少上下文或附件后重试');
+          (err as Error & { httpStatus?: number }).httpStatus = 413;
+          throw err;
+        }
+        return { reasoning: '', content: '降级后作答' };
+      },
+    };
+
+    // 6 万字符 ≈ 1.5 万 token：30000 的预算下原请求不会被裁（否则测不到 413），
+    // 砍半成 15000 后才会真的裁掉那一轮大 tool 结果。
+    await runRealAgent(ctx, baseParams, { model, maxContextTokens: 30000 });
+
+    expect(n).toBe(3); // 原请求 + 被 413 拒绝 + 降级重试
+    expect(
+      ctx.events.some(
+        (e) => e.method === EVENTS.Trajectory && String(e.params.detail).includes('请求体过大（HTTP 413）')
+      )
+    ).toBe(true);
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
+  });
+
+  it('413 且已推送过增量：不重试（否则正文会在气泡里重复一遍）', async () => {
+    const ctx = makeCtx();
+    let n = 0;
+    const model: ChatModel = {
+      chat: async (messages, opts) => {
+        if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+        n++;
+        // 先推一段正文再抛 413：重发会把「先写了一半」再推一遍
+        opts?.onChunk?.({ type: 'content', text: '先写了一半' });
+        const err = new Error('HTTP 413：请求体过大');
+        (err as Error & { httpStatus?: number }).httpStatus = 413;
+        throw err;
+      },
+    };
+
+    await runRealAgent(ctx, baseParams, { model });
+
+    expect(n).toBe(1); // 没有第二次请求
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'error')).toBe(true);
+  });
+});

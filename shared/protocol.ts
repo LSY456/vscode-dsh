@@ -120,6 +120,32 @@ export const DEFAULT_MAX_CONTEXT_TOKENS = 48 * 1024;
 export const DEFAULT_MAX_WRITE_FAILURES = 3;
 
 /**
+ * 单轮工具调用的**执行上限**（宿主侧硬约束）。
+ *
+ * 扇出完全由模型决定：一轮里塞 30 个 `read_file`，宿主就会串行执行 30 次、回灌 30 条结果，
+ * 一次把上下文预算吃到只剩 system + user —— 那一刻模型丢失全部调研成果、回答质量崩塌，
+ * 而文件本身没被改坏，事后极难归因。
+ *
+ * 超出的调用**不执行，但要逐条补一条"未执行"的 tool 结果**：原生 function calling 要求
+ * 每个 tool_call 都有对应响应，少一条整轮请求会被上游判为非法。
+ *
+ * 取 8 与 `DEFAULT_MAX_TOOL_ROUNDS` 同量级：一轮的正常调用数是 1–3 个，8 已留足余量。
+ */
+export const DEFAULT_MAX_TOOL_CALLS_PER_ROUND = 8;
+
+/**
+ * 整场会话的**累计 token 预算**（含每轮重复发送的历史）。
+ *
+ * 与 `DEFAULT_MAX_CONTEXT_TOKENS` 是两个不同的闸门：那个管"单次请求多大"，这个管"整场花多少"。
+ * 只有前者时，8 轮 × 每轮接近 48K 的最坏情况约 400K 输入，**中间没有任何停止条件**。
+ *
+ * 512K 的推导：最坏上下文 8 轮 × 48K ≈ 384K，再为计划阶段与收束留一档余量；
+ * 正常会话（3–5 轮、每轮 10–20K）通常不到 100K，远不会触发。
+ * 用量是**本地估算**（`estimated: true`），只用于止损，不是账单。
+ */
+export const DEFAULT_MAX_SESSION_TOKENS = 512 * 1024;
+
+/**
  * 采样温度缺省值。取自 daemon 模型层原先的硬编码值（0.2）——
  * 这是"把既有行为暴露成可配项"，**不是**调整缺省行为的地方。
  */
@@ -159,6 +185,16 @@ export interface ModelConfig {
    * 缺省 `DEFAULT_MAX_WRITE_FAILURES`；只数 `write_file` / `apply_patch` 的系统侧失败。
    */
   maxWriteFailures?: number;
+  /**
+   * 单轮工具调用执行上限（宿主侧硬约束）。缺省 `DEFAULT_MAX_TOOL_CALLS_PER_ROUND`。
+   * 超出部分不执行，但会逐条补一条"未执行"的工具结果以保持调用/响应配对。
+   */
+  maxToolCallsPerRound?: number;
+  /**
+   * 整场会话的累计 token 预算，`<= 0` = 关闭该闸门。缺省 `DEFAULT_MAX_SESSION_TOKENS`。
+   * 达上限后不再发起工具轮请求，只补一次收束回答（不带工具），让用户拿到一段解释。
+   */
+  maxSessionTokens?: number;
   /**
    * 上下文 token 预算：发送前按此估算并裁剪历史（超预算时整轮丢弃最旧的工具轮）。
    * 缺省 `DEFAULT_MAX_CONTEXT_TOKENS`。

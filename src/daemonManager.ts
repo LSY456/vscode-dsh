@@ -18,6 +18,8 @@ import * as vscode from 'vscode';
 import { isStaleDaemon, readBuildId } from '../shared/buildId';
 import {
   DEFAULT_MAX_CONTEXT_TOKENS,
+  DEFAULT_MAX_SESSION_TOKENS,
+  DEFAULT_MAX_TOOL_CALLS_PER_ROUND,
   DEFAULT_MAX_TOOL_ROUNDS,
   DEFAULT_MAX_WRITE_FAILURES,
   ERROR_CODES,
@@ -357,6 +359,10 @@ export class DaemonManager {
           // 批次 11-2：写入类连续失败阈值。**不进面板** —— 沿用批次 10 撤下「上下文预算 /
           // 输出上限」两个数字项的同一理由：用户不知道这个数该填多少。只在原生设置里可配。
           maxWriteFailures: cfg.get<number>('agent.maxWriteFailures', DEFAULT_MAX_WRITE_FAILURES),
+          // 宿主侧硬约束（本批次）：单轮工具调用上限 / 整场累计 token 预算。
+          // 同样**不进面板** —— 理由同上一条，用户不知道这两个数该填多少。
+          maxToolCallsPerRound: cfg.get<number>('agent.maxToolCallsPerRound', DEFAULT_MAX_TOOL_CALLS_PER_ROUND),
+          maxSessionTokens: cfg.get<number>('agent.maxSessionTokens', DEFAULT_MAX_SESSION_TOKENS),
         },
         capabilities: {
           allowedTools: cfg.get<string[]>('capabilities.allowedTools', []),

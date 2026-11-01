@@ -8,6 +8,8 @@
 import {
   Attachment,
   DEFAULT_MAX_CONTEXT_TOKENS,
+  DEFAULT_MAX_SESSION_TOKENS,
+  DEFAULT_MAX_TOOL_CALLS_PER_ROUND,
   DEFAULT_MAX_TOOL_ROUNDS,
   DEFAULT_MAX_WRITE_FAILURES,
   DEFAULT_PLAN_MAX_ROUNDS,
@@ -22,7 +24,7 @@ import {
 import { sanitizeImageAttachments } from '../../shared/imageAttachment';
 import * as path from 'path';
 import { AgentCapabilities, AgentContext } from './agent';
-import { ChatContentPart, ChatMessage, ChatModel, contentToText, StreamChunk, ToolDefinition } from './model';
+import { ChatCompletionResult, ChatContentPart, ChatMessage, ChatModel, contentToText, StreamChunk, ToolDefinition } from './model';
 import { TrajectoryMeta } from '../../shared/protocol';
 import { createToolCallFenceFilter, parseToolCalls, ToolCall, ToolCallFenceFilter } from './toolcall';
 import {
@@ -67,6 +69,16 @@ export interface RealAgentConfig {
    * 只数 `write_file` / `apply_patch` 的系统侧失败，见 `isCountableWriteFailure`。
    */
   maxWriteFailures?: number;
+  /**
+   * 单轮工具调用的执行上限（宿主侧硬约束）。undefined = 用协议缺省。
+   * 超出的调用不执行，但仍会逐条补一条"未执行"的工具结果，保持调用/响应配对。
+   */
+  maxToolCallsPerRound?: number;
+  /**
+   * 整场会话的累计 token 预算。undefined = 用协议缺省；`<= 0` = 关闭该闸门。
+   * 达上限后不再发起工具轮请求，只补一次收束回答。
+   */
+  maxSessionTokens?: number;
   /** 工具读取单文件上限（字节） */
   maxReadBytes?: number;
   /** 上下文 token 预算（发送前裁剪历史，防止超出模型上下文窗口） */
@@ -247,6 +259,15 @@ export async function runRealAgent(
     });
 
   /**
+   * 本场会话**累计**消耗的估算 token（含每轮重复发送的历史）。
+   *
+   * 单次请求预算（`maxContextTokens`）只管"这一包多大"，决定不了"一场花多少"：
+   * 每轮都要把历史重发一遍，8 轮就可能累计到几倍于单次预算的量。这里只做累加，
+   * 闸门判定放在主循环每轮开头（见 `haltedByTokenBudget`）。
+   */
+  let sessionTokens = 0;
+
+  /**
    * P2-8：把一轮模型调用的 token 用量记入轨迹，供"单会话成本"聚合。
    *
    * 用量是**本地估算**（`estimateTokens` 的宽字符启发式）：网关并未声明 usage，
@@ -260,7 +281,10 @@ export async function runRealAgent(
   ): void => {
     const prompt = estimateMessageTokens(sent);
     const completion = estimateTokens(out.content ?? '') + estimateTokens(out.reasoning ?? '');
-    trajectory('system', `model 调用（约 ${prompt + completion} token）`, {
+    // 累加放在这里而不是调用点：三个调用点（主循环 / 计划阶段 / 收束）共用一条口径，
+    // 少算任何一处都会让累计闸门比实际更松。
+    sessionTokens += prompt + completion;
+    trajectory('system', `model 调用（约 ${prompt + completion} token，累计约 ${sessionTokens}）`, {
       tokens: { prompt, completion, total: prompt + completion, estimated: true },
     });
   };
@@ -297,6 +321,17 @@ export async function runRealAgent(
   // 批次 11-2：写入类工具连续失败阈值。钳到 >=1 —— 配成 0 或负数等于"第一次失败前就停"，
   // 那不是用户想要的语义（想要"一次都不许失败"应该配 1）。
   const maxWriteFailures = Math.max(1, config.maxWriteFailures ?? DEFAULT_MAX_WRITE_FAILURES);
+  /**
+   * 单轮工具调用的执行上限（宿主侧硬约束）。钳到 >= 1：配成 0 等于"一个工具都不许用"，
+   * 那是误配而不是意图 —— 想要"只用一轮"应该调 `maxToolRounds`。
+   */
+  const maxToolCallsPerRound = Math.max(1, config.maxToolCallsPerRound ?? DEFAULT_MAX_TOOL_CALLS_PER_ROUND);
+  /**
+   * 整场会话的累计 token 预算。`<= 0` 是**显式的关闭意图**，转成"永不触发的上限"而不是
+   * 在主循环里再加一个开关分支 —— 少一个条件就少一处写反的机会。
+   */
+  const configuredSessionTokens = config.maxSessionTokens ?? DEFAULT_MAX_SESSION_TOKENS;
+  const maxSessionTokens = configuredSessionTokens > 0 ? configuredSessionTokens : Number.POSITIVE_INFINITY;
 
   /**
    * 展示层围栏过滤器（见下方 streamChunk 的说明）。
@@ -307,6 +342,15 @@ export async function runRealAgent(
   let fenceFilter: ToolCallFenceFilter | null = null;
 
   /**
+   * 本次模型请求是否已经向面板推送过增量（每次发请求前清零）。
+   *
+   * 只为一件事服务：被上游以 413 拒绝时能不能降级重发。**已经推出去的正文收不回来** ——
+   * 重发会让同一段内容在气泡里出现两遍，用户看到的是"回答重复了"而不是"重试了"，
+   * 比直接报错更难排查。所以有增量就一律不重发。
+   */
+  let pushedSinceRequest = false;
+
+  /**
    * 每个增量到达时的统一投影（推理 / 正文分流）。
    * 收束请求复用同一条通路，保证流式渲染与结束时的定妆完全一致。
    *
@@ -315,6 +359,7 @@ export async function runRealAgent(
    * 过滤器只吞「确实解析成工具调用」的块（见 toolcall.ts），代码块与普通 JSON 不受影响。
    */
   const streamChunk = (c: StreamChunk) => {
+    pushedSinceRequest = true;
     if (ctx.isCanceled() || abort.signal.aborted) {
       abort.abort();
       return;
@@ -346,9 +391,14 @@ export async function runRealAgent(
     '直接给出最终结论（中文、简洁，含关键判断与依据）。若信息仍不足以回答，请明确说明还缺什么、' +
     '下一步该看哪里；不要输出任何工具调用格式。';
 
-  /** 收束请求本身失败 / 仍没有正文时的兜底告知——绝不静默收场。 */
-  const exhaustedNotice = () =>
-    `\n\n> ⚠️ 工具调用已达上限（${maxRounds} 轮），未能生成完整结论。` +
+  /**
+   * 收束请求本身失败 / 仍没有正文时的兜底告知——绝不静默收场。
+   *
+   * `why` 由调用方给：停下来的原因不止"轮次用尽"一种（累计 token 超预算也算），
+   * 写死"工具调用已达上限"会在预算停机时给出错误归因。
+   */
+  const exhaustedNotice = (why: string) =>
+    `\n\n> ⚠️ ${why}，未能生成完整结论。` +
     '上方「过程」里保留了已完成的步骤；你可以直接再发一条消息让我继续，' +
     '或把问题收窄一些（例如指定具体文件）以便更快作答。\n\n';
 
@@ -365,6 +415,85 @@ export async function runRealAgent(
     '> 你可以确认文件路径与原文后再发一条消息，或在设置里调整 `dsh.agent.maxWriteFailures`。\n\n';
 
   /**
+   * 累计 token 预算达上限时的收尾文案。
+   *
+   * 与写入失败文案同一条纪律：说清"哪条闸门、什么数值、接下来还能做什么"，不猜原因、
+   * 不假装完成。数字必须带"约" —— 用量是本地估算，写成精确值会被当成账单。
+   */
+  const tokenBudgetNotice = () =>
+    `\n\n> ⚠️ 本场会话累计约 ${sessionTokens} token，已达上限（${configuredSessionTokens}）。\n` +
+    '> 接下来不再调用工具，只基于已有信息给出结论。\n' +
+    '> 需要继续深入可以新开一场对话，或在设置里调整 `dsh.agent.maxSessionTokens`。\n\n';
+
+  /**
+   * 本场会话的**可变**上下文预算，初值取自配置。
+   *
+   * 被上游以 413 拒绝时会砍半并**沿用**到后续轮次：若只降一次、下一轮又涨回原值，
+   * 每轮都要先撞一次 413 再降级，白白多花两次往返；而 413 说明"这个体积上游确实收不下"，
+   * 既然降了，就不该再涨回去。
+   */
+  let contextBudget = maxContextTokens;
+
+  /**
+   * 发一次模型请求：发送前裁剪上下文；被上游判定「请求体过大」时把预算减半再试。
+   *
+   * 抽出来的直接原因是**收束那一路原先根本不裁剪** —— 历史一旦超预算，收束请求必然被 413
+   * 拒掉，用户拿到的就是"会话结束了，但没有任何结论"。统一之后三个调用点（主循环 / 计划阶段 /
+   * 收束）走同一条通路，413 降级也自动对三处生效。
+   *
+   * 不在内部 try/catch 里收尾：失败之后怎么办由调用方按自己的语义决定（主循环报错并结束会话、
+   * 收束返回 false 让外层报 error）。在这里吞掉只会丢掉"是哪个阶段失败的"这一上下文。
+   */
+  async function sendModelRequest(stage: string, tools?: ToolDefinition[]): Promise<ChatCompletionResult> {
+    // 最多降级两次（预算 → 1/2 → 1/4）。再往下裁就只剩 system + user，降级已无意义。
+    for (let attempt = 0; ; attempt++) {
+      pushedSinceRequest = false;
+
+      const trimmed = applyTokenBudget(messages, contextBudget);
+      if (trimmed.length < messages.length) {
+        trajectory(
+          'system',
+          `上下文裁剪${stage}：${messages.length} → ${trimmed.length} 条消息（预算 ${contextBudget} token）`
+        );
+        // 就地收缩：丢弃已裁剪掉的最旧轮次，避免完整历史（含大 tool 输出）随轮次累积占用内存
+        messages.length = 0;
+        messages.push(...trimmed);
+      }
+
+      try {
+        return await config.model.chat(messages, {
+          signal: abort.signal,
+          idleTimeoutMs: config.idleTimeoutMs,
+          temperature: config.temperature,
+          maxTokens: config.maxTokens,
+          tools,
+          onChunk: streamChunk,
+        });
+      } catch (err) {
+        const status = (err as { httpStatus?: number } | null)?.httpStatus;
+        // 只有"请求体过大"才降级。其余失败（429 / 5xx / 网络）的重试策略属于模型层
+        // 的 withRetry，在这里重试会与它叠成两层退避。
+        if (status !== 413) throw err;
+        // 已经推送过增量：重发会把同一段正文在气泡里再推一遍，宁可报错也不重发
+        if (pushedSinceRequest) throw err;
+        if (attempt >= 2) throw err;
+
+        const nextBudget = Math.floor(contextBudget / 2);
+        if (nextBudget < MIN_CONTEXT_TOKENS) throw err;
+        // 先试算：砍半后若一条都裁不掉（剩下的全是 pinned，或结构不满足裁剪前提），
+        // 再发一次只会拿到同一个 413 —— 直接抛原错，不空转。
+        const wouldBe = estimateMessageTokens(applyTokenBudget(messages, nextBudget));
+        if (wouldBe >= estimateMessageTokens(messages)) throw err;
+
+        contextBudget = nextBudget;
+        // 重试等同一次全新请求：过滤器里的半截缓冲不能带进下一份响应，否则围栏会被拆成两段
+        if (fenceFilter) fenceFilter = createToolCallFenceFilter();
+        trajectory('system', `上游判定请求体过大（HTTP 413），上下文预算降为 ${contextBudget} token 后重试`);
+      }
+    }
+  }
+
+  /**
    * 收束回答：轮次用尽后追加一条"不要再调工具"的指令，并且**不提供工具定义**，
    * 让模型用已收集的信息给出最终结论。
    *
@@ -373,26 +502,28 @@ export async function runRealAgent(
    * 开场白，然后会话"自动中断"、什么结论都没有——这正是「agent 并没有返回任何信息、
    * 也不明确执行到哪一步」的根因。
    */
-  const requestFinalAnswer = async (): Promise<boolean> => {
+  const requestFinalAnswer = async (
+    // 文案沿用既有的「工具调用已达上限」：它同时用于面板上的兜底告知，
+    // 改动会让用户看到一句与历史会话不同、也与既有测试不符的话。
+    stopReason = `工具调用已达上限（${maxRounds} 轮）`
+  ): Promise<boolean> => {
     // 收束请求刻意不提供工具：此时正文里若出现 fenced 块，它是**内容**（用户可能就是在问
     // 工具调用格式），而不是一次调用 —— 所以这里必须关掉过滤器。
     fenceFilter = null;
-    trajectory('system', `工具轮次已达上限（${maxRounds} 轮），转为收束回答（不再提供工具）`);
-    messages.push({ role: 'user', content: FINAL_ANSWER_INSTRUCTION });
+    trajectory('system', `${stopReason}，转为收束回答（不再提供工具）`);
+    // `pinned`：这条指令是本次请求的**唯一意图**。收束请求现在也会走裁剪，
+    // 一旦它被当成"最旧的可裁单元"丢掉，模型就不知道自己该收尾了 —— 那不叫省 token，叫跑偏。
+    messages.push({ role: 'user', content: FINAL_ANSWER_INSTRUCTION, pinned: true });
     try {
-      const result = await config.model.chat(messages, {
-        signal: abort.signal,
-        idleTimeoutMs: config.idleTimeoutMs,
-        temperature: config.temperature,
-        maxTokens: config.maxTokens,
-        // 刻意不传 tools：模型无法再发起工具调用，只能作答。
-        onChunk: streamChunk,
-      });
+      // 走过与主循环同一条发送通路：收束**同样要裁剪**。此前这一步直接调 model.chat，
+      // 历史一旦超预算就必被 413 拒掉 —— 于是"收束"本身成了会话里最脆的一次请求。
+      // 刻意不传 tools：模型无法再发起工具调用，只能作答。
+      const result = await sendModelRequest('（收束）');
       recordModelUsage(messages, result); // P2-8：收束请求同样计入成本
       if (ctx.isCanceled() || abort.signal.aborted) return true; // 取消由调用方另行判定
       ctx.notify(EVENTS.MessageDone, { sessionId: ctx.sessionId });
       if (!(result.content ?? '').trim()) {
-        ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: exhaustedNotice() });
+        ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: exhaustedNotice(stopReason) });
       }
       return true;
     } catch (err) {
@@ -403,7 +534,7 @@ export async function runRealAgent(
         code: ERROR_CODES.InternalError,
         message: `收束回答失败：${msg}`,
       });
-      ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: exhaustedNotice() });
+      ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: exhaustedNotice(stopReason) });
       // 返回 false 让调用方以 reason=error 收尾：已经报了 error，却宣称"已完成"是自相矛盾的，
       // 而"会话为什么结束"正是用户最需要看懂的信息。
       return false;
@@ -439,24 +570,9 @@ export async function runRealAgent(
         let nativeToolCalls: ToolCall[] | undefined;
         let failed: Error | null = null;
         try {
-          const trimmed = applyTokenBudget(messages, maxContextTokens);
-          if (trimmed.length < messages.length) {
-            // 与主循环同一条迹线纪律：裁掉了什么要留痕（计划阶段原本缺这一条，批次 11-1 补上）
-            trajectory(
-              'system',
-              `上下文裁剪（计划阶段）：${messages.length} → ${trimmed.length} 条消息（预算 ${maxContextTokens} token）`
-            );
-            messages.length = 0;
-            messages.push(...trimmed);
-          }
-          const result = await config.model.chat(messages, {
-            signal: abort.signal,
-            idleTimeoutMs: config.idleTimeoutMs,
-            temperature: config.temperature,
-            maxTokens: config.maxTokens,
-            tools: READONLY_TOOL_DEFINITIONS,
-            onChunk: streamChunk,
-          });
+          // 与主循环同一条发送通路（裁剪 + 413 降级 + 轨迹），这里只多一个"阶段"标签：
+          // 计划阶段的裁剪此前是独立的一份实现，两处一旦分叉就会出现"主循环降级了、计划阶段没有"。
+          const result = await sendModelRequest('（计划阶段）', READONLY_TOOL_DEFINITIONS);
           content = result.content;
           nativeToolCalls = result.toolCalls;
           recordModelUsage(messages, result); // P2-8：计划阶段调研的 token 也计入
@@ -615,8 +731,25 @@ export async function runRealAgent(
   /** 是否因写入类连续失败而停机。停机路径要**跳过** requestFinalAnswer（详见下方 break 处）。 */
   let haltedByWriteFailures = false;
 
+  /**
+   * 是否因累计 token 超预算而停机。
+   *
+   * 与 `haltedByWriteFailures` 的处理**刻意不同**：写入连续失败说明"每一次尝试都在撞同一堵墙"，
+   * 再问一次没有意义；而预算到顶只是"没额度继续调研"，手上的信息通常够给一段结论，
+   * 所以这条路径仍然走一次收束请求，让用户拿到解释而不是空白。
+   */
+  let haltedByTokenBudget = false;
+
   for (let round = 0; round < maxRounds; round++) {
     if (ctx.isCanceled()) break;
+
+    // 累计 token 闸门（宿主侧硬约束）：整场已超预算就不再发起工具轮请求。
+    // 判定放在每轮**开头**而不是记完账立刻停 —— 这样已经发出的那次请求一定被完整收下，
+    // 不会出现"模型正答到一半被计费逻辑掐断"。
+    if (sessionTokens >= maxSessionTokens) {
+      haltedByTokenBudget = true;
+      break;
+    }
 
     let reasoning = '';
     let content = '';
@@ -627,21 +760,7 @@ export async function runRealAgent(
     fenceFilter = createToolCallFenceFilter();
 
     try {
-      const trimmed = applyTokenBudget(messages, maxContextTokens);
-      if (trimmed.length < messages.length) {
-        trajectory('system', `上下文裁剪：${messages.length} → ${trimmed.length} 条消息（预算 ${maxContextTokens} token）`);
-        // 就地收缩：丢弃已裁剪掉的最旧轮次，避免完整历史（含大 tool 输出）随轮次累积占用内存
-        messages.length = 0;
-        messages.push(...trimmed);
-      }
-      const result = await config.model.chat(messages, {
-        signal: abort.signal,
-        idleTimeoutMs: config.idleTimeoutMs,
-        temperature: config.temperature,
-        maxTokens: config.maxTokens,
-        tools: TOOL_DEFINITIONS,
-        onChunk: streamChunk,
-      });
+      const result = await sendModelRequest('', TOOL_DEFINITIONS);
       reasoning = result.reasoning;
       content = result.content;
       nativeToolCalls = result.toolCalls;
@@ -686,7 +805,12 @@ export async function runRealAgent(
     }
 
     messages.push({ role: 'assistant', content, toolCalls: nativeToolCalls });
-    for (const call of calls) {
+
+    // 扇出封顶（宿主侧硬约束）：一轮里有几个调用由模型自己决定，宿主必须自己设上限。
+    // 不加这一层时，模型一轮塞几十个 read_file，宿主就串行执行几十次、回灌几十条结果，
+    // 一次把上下文预算吃到只剩 system + user —— 那一轮它丢掉了全部调研成果。
+    const executedCalls = calls.slice(0, maxToolCallsPerRound);
+    for (const call of executedCalls) {
       if (ctx.isCanceled()) break;
       const outcome = await dispatchTool(ctx, call, caps, config, trajectory);
       messages.push({ role: 'tool', content: `tool=${call.tool}\n${outcome.text}`, toolCallId: call.id });
@@ -695,6 +819,26 @@ export async function runRealAgent(
       // `isCountableWriteFailure` 的三道过滤。
       if (WRITE_TOOLS.has(call.tool) && outcome.ok) writeFailureStreak = 0;
       else if (isCountableWriteFailure(call.tool, outcome)) writeFailureStreak++;
+    }
+
+    // 被截掉的调用**仍然要逐条补一条"未执行"的 tool 结果**：原生 function calling 要求每个
+    // tool_call 都有对应响应，缺一条整轮请求会被上游判为非法（400），那比少执行几个工具更糟。
+    // 取消时不补：这一轮的 messages 不会再被发出，补了只是噪声。
+    const skippedCount = calls.length - executedCalls.length;
+    if (skippedCount > 0 && !ctx.isCanceled()) {
+      for (const call of calls.slice(executedCalls.length)) {
+        messages.push({
+          role: 'tool',
+          content:
+            `tool=${call.tool}\n未执行：单轮工具调用数（${calls.length}）超过上限（${maxToolCallsPerRound}），` +
+            '本轮只执行了前若干个。若仍需要这项信息，请下一轮重新发起，并优先挑最关键的几项。',
+          toolCallId: call.id,
+        });
+      }
+      trajectory(
+        'system',
+        `单轮工具调用数 ${calls.length} 超过上限 ${maxToolCallsPerRound}，仅执行前 ${maxToolCallsPerRound} 个`
+      );
     }
     // 达阈值即停：跳出轮次循环，并且**不走** requestFinalAnswer ——
     // 那一步同样要发一次模型请求，而这里的语义就是"不再问了"。
@@ -730,7 +874,19 @@ export async function runRealAgent(
     return;
   }
 
-  const finalAnswerOk = concludedByModel ? true : await requestFinalAnswer();
+  let finalAnswerOk: boolean;
+  if (concludedByModel) {
+    finalAnswerOk = true;
+  } else if (haltedByTokenBudget) {
+    // 预算到顶也要给人一句话：先播报"为什么停"，再走一次不带工具的收束请求。
+    // 收束本身只多花一次请求，却是"会话结束时用户能得到解释"的唯一保证。
+    ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: tokenBudgetNotice() });
+    finalAnswerOk = await requestFinalAnswer(
+      `累计 token 预算已达上限（约 ${sessionTokens} / ${maxSessionTokens}）`
+    );
+  } else {
+    finalAnswerOk = await requestFinalAnswer();
+  }
 
   unsubscribeCancel?.();
   if (ctx.isCanceled() || abort.signal.aborted) {
@@ -1230,6 +1386,14 @@ export async function generateTitle(model: ChatModel, prompt: string): Promise<s
 
 // 上下文预算的缺省值收在 `shared/protocol.ts`（扩展与 daemon 共用）——
 // 这里原先还留着一份本地 48K 拷贝，数值虽相同，却是"第二份真相"，一并删掉。
+
+/**
+ * 上下文预算的**下限**，与 `dsh.agent.maxContextTokens` 配置项的最小值保持一致。
+ *
+ * 413 降级时预算会被反复砍半，砍到这个值就不再往下：再低就只剩 system + user，
+ * 已经不具备回答问题的信息量 —— 那样的"降级"等于清空上下文重问一遍。
+ */
+const MIN_CONTEXT_TOKENS = 4000;
 
 /** 宽字符（CJK 汉字、平/片假名、注音符号、CJK 标点与全角）范围，约 1 token/字。 */
 const CJK_RE = /[\u3040-\u30ff\u3100-\u312f\u31a0-\u31bf\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff00-\uffef]/g;

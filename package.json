@@ -348,6 +348,19 @@
           "maximum": 20,
           "description": "写入类工具连续失败多少次就停止尝试：只统计「写入文件 / 修改文件」的系统侧失败（路径越界、原文未匹配、文件被改动、读写错误）。一次写入成功即清零。命令执行的失败与你的拒绝都不计入 —— 命令非零退出是正常信息（如 grep 无匹配），计入会让正常提问被误判为故障。"
         },
+        "dsh.agent.maxToolCallsPerRound": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "单轮最多执行多少个工具调用。模型在一轮里要几十个工具时会一次吃掉整个上下文预算，导致它丢失已读到的内容。超出的调用不执行，但会告诉模型「这一批没执行」，让它下一轮重新挑重点。"
+        },
+        "dsh.agent.maxSessionTokens": {
+          "type": "number",
+          "default": 524288,
+          "minimum": 0,
+          "description": "一场会话累计最多消耗多少 token（约数，含每轮重复发送的历史）。达到上限后不再调用工具，只让模型基于已有信息给出结论。设 0 表示不限制。注意这是本地估算，用来止损，不是账单。"
+        },
         "dsh.context.gitStatus": {
           "type": "boolean",
           "default": true,

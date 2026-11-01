@@ -125,6 +125,10 @@ export interface RuntimeConfig {
   maxContextTokens?: number;
   /** 写入类工具的连续失败阈值（批次 11-2）；undefined = 用协议缺省 `DEFAULT_MAX_WRITE_FAILURES` */
   maxWriteFailures?: number;
+  /** 单轮工具调用执行上限；undefined = 用协议缺省 `DEFAULT_MAX_TOOL_CALLS_PER_ROUND` */
+  maxToolCallsPerRound?: number;
+  /** 整场会话累计 token 预算；undefined = 用协议缺省；`<= 0` = 关闭该闸门 */
+  maxSessionTokens?: number;
   /** 采样温度（0–2）；undefined = 用模型层缺省（0.2），即不改动既有行为 */
   temperature?: number;
   /** 单次输出上限（max_tokens）；undefined / <= 0 = 不发送该字段，由服务端决定 */
@@ -372,6 +376,17 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           if (p.model?.maxWriteFailures !== undefined && Number.isFinite(p.model.maxWriteFailures)) {
             rt.maxWriteFailures = Math.min(20, Math.max(1, Math.floor(p.model.maxWriteFailures)));
           }
+          // 单轮工具调用上限：同样在 daemon 侧再钳一次（协议对任意客户端开放）。
+          // 下限 1：配成 0 等于"一个工具都不许用"，那是误配而不是意图。
+          if (p.model?.maxToolCallsPerRound !== undefined && Number.isFinite(p.model.maxToolCallsPerRound)) {
+            rt.maxToolCallsPerRound = Math.min(50, Math.max(1, Math.floor(p.model.maxToolCallsPerRound)));
+          }
+          // 累计 token 预算：`<= 0` 是**显式的关闭意图**，必须原样保留，不能被钳成最小值 ——
+          // 否则用户关不掉这道闸门，只能被迫接受一个自己没选的数。
+          if (p.model?.maxSessionTokens !== undefined && Number.isFinite(p.model.maxSessionTokens)) {
+            const wanted = Math.floor(p.model.maxSessionTokens);
+            rt.maxSessionTokens = wanted <= 0 ? 0 : Math.min(50_000_000, wanted);
+          }
           // 采样参数（批次 2）：undefined 一律视为"用户没配" —— 温度继续走模型层缺省 0.2，
           // 上限继续不发送；只有显式配置才改变请求体。
           if (p.model?.temperature !== undefined) rt.temperature = p.model.temperature;
@@ -516,6 +531,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               maxToolRounds: conn.runtime.maxToolRounds,
               maxContextTokens: conn.runtime.maxContextTokens,
               maxWriteFailures: conn.runtime.maxWriteFailures,
+              maxToolCallsPerRound: conn.runtime.maxToolCallsPerRound,
+              maxSessionTokens: conn.runtime.maxSessionTokens,
               temperature: conn.runtime.temperature,
               maxTokens: conn.runtime.maxTokens,
             };
