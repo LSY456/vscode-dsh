@@ -207,7 +207,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | P1-15 ✅ | `.dsh` 各子目录创建权限不统一：`trajectory` 0700（`trajectoryStore.ts:76`）、`logs` 0700（`logFile.ts:52`）、`trust.json` 直接写（`trust.ts:109-117`）、`history.json` 0700（`history.json` 写入路径 `sessionHistory.ts:44`） | `.dsh` 目录本身可能以默认 umask 创建，权限语义不一致 | 统一 `ensureDshDir()` 以 0700 创建 `.dsh` 及各子目录 |
 | P1-16 ✅ | `getWorkspaceRoot()` 只取 `workspaceFolders[0]`（`daemonManager.ts:480-486`） | 多根工作区语义模糊，`.dsh/` 落在第一个文件夹 | 显式声明"仅支持单根"，或按文件夹起独立 daemon 与独立端口文件 |
 | P1-17 | 单测覆盖空白：原判 7 个文件（`server.ts`、`daemonManager.ts`、`wsClient.ts`、`diffProvider.ts`、`contextCapture.ts`、`extension.ts`、`logger.ts`）均无单测。**【2026-10-12 追记：其中 `server.ts` 与 `daemonManager.ts` 现已有单测（`server.test.ts` 覆盖连接级隔离与 `resolveAgentDecision`、`daemonManager.test.ts` 覆盖信任/无工作区门禁与命令行解析），**实际仍无单测的是 `wsClient.ts`、`diffProvider.ts`、`contextCapture.ts`、`extension.ts`、`logger.ts` 五个**】** | **`server.ts` 是安全边界（握手/Origin/能力分级/错误码映射）却只靠 smoke 间接覆盖**，是最危险的空白。**【2026-10-12 追记：`server.ts` 的**安全边界部分**已抽为纯函数并单测（`serverGuards.ts`，见本节末尾「daemon 安全边界与可观测性追记」）；本行**未整行关闭**，剩下的五个文件仍无单测】** | 抽出纯函数（`verifyHandshake` 判定、能力收敛、路径护栏、挂起项错误码映射）并补单测 **【已做】**；`wsClient` 可用本地 `ws` server 做真实连接测试 |
-| P1-18 | `agent.test.ts` 依赖真实 `sleep`（`agent.ts:87` 等），13 个用例耗时 **14.3s**，占全套 27.6s 的一半 | 测试套慢 → 反馈慢 | 注入可控时钟/假定时器（vitest `vi.useFakeTimers`），把 `sleep` 变为可注入依赖 |
+| P1-18 ✅ | `agent.test.ts` 依赖真实 `sleep`（`agent.ts:87` 等），13 个用例耗时 **14.3s**，占全套 27.6s 的一半。**【2026-11-02 已完成：模拟 Agent 的停顿改为注入式 `FakeAgentTiming`（缺省 60/120/200/120 不变），测试传 0；`waitEvent` 的 10ms 轮询改 `setImmediate`。改造前实测 17 用例 **21.11s**，改造后 **0.20s**（新增 1 例后 18 用例）。没走 `vi.useFakeTimers`：真实异步流 + 假定时器容易互等卡死，且 `sleep(0)` 若仍排定时器，Windows 上每次至少等一个 ~15ms 粒度周期，几十次就够撞到 `waitEvent` 的 3s 超时（PR #49 的 windows 偶发红即此）】** | 测试套慢 → 反馈慢；慢 runner 上还会偶发超时 | 注入可控时钟/假定时器（vitest `vi.useFakeTimers`），把 `sleep` 变为可注入依赖 **【已做：改为注入停顿时长，非假定时器】** |
 
 ### P1 状态追记（2026-11-01 逐条核实）
 
@@ -236,7 +236,8 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 
 - **P1-10**：仓库至今没有 `tsconfig.web.json`（`allowJs` + `checkJs`），也没有 ESLint / Prettier 配置。`media/webview.js`、`src/webview/*.js`、`scripts/*.js`、`esbuild.js` 全在类型检查之外。
 - **P1-17**：`wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger` 五个文件仍无单测。
-- **P1-18**：`agent.test.ts` 仍依赖真实 `sleep`，未改 `vi.useFakeTimers`。
+
+（P1-18 已于 2026-11-02 完成，见上表追记。）
 
 ### P2 —— 体验 / 打磨 / 战略
 

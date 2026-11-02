@@ -106,7 +106,13 @@ export function makePatchEnv(ctx: AgentContext): PatchApplyEnv {
   };
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/**
+ * 停顿等待。`ms <= 0` 时不再排定时器而是直接返回已完成的 Promise ——
+ * 定时器最小粒度在 Windows 上约 15ms，测试传 0 时若仍走 setTimeout，
+ * 几十次累积下来会把用例推到 `waitEvent` 的 3s 超时线上（P1-18 的偶发红即由此而来）。
+ */
+const sleep = (ms: number) =>
+  ms > 0 ? new Promise<void>((r) => setTimeout(r, ms)) : Promise.resolve();
 
 let stepCounter = 0;
 
@@ -129,7 +135,33 @@ function trajectory(
   });
 }
 
-export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams): Promise<void> {
+/**
+ * 模拟 Agent 各阶段的停顿（毫秒）。
+ *
+ * 缺省值保留"流式输出"的真实节奏，演示与冒烟测试才看得出过程；
+ * 单元测试一律传 0（`slow` 除外 —— 取消用例必须真的在输出中途触发，
+ * 否则 30 段输出会在同一轮微任务里跑完，取消点根本抓不到）。
+ * 不把停顿做成配置项：它只影响演示观感，不是用户可调的行为。
+ */
+export interface FakeAgentTiming {
+  /** 推理流每段之间 */
+  reasoning: number;
+  /** 模拟 read_file 的耗时 */
+  read: number;
+  /** 模拟 bash_execute 的耗时 */
+  bash: number;
+  /** slow 循环每段之间 */
+  slow: number;
+}
+
+const DEFAULT_TIMING: FakeAgentTiming = { reasoning: 60, read: 120, bash: 200, slow: 120 };
+
+export async function runFakeAgent(
+  ctx: AgentContext,
+  params: SessionSendParams,
+  timing: Partial<FakeAgentTiming> = {}
+): Promise<void> {
+  const delay: FakeAgentTiming = { ...DEFAULT_TIMING, ...timing };
   const { prompt, attachments = [] } = params;
   const truncated = (s: string, n = 120) => (s.length > n ? s.slice(0, n) + '…' : s);
 
@@ -147,7 +179,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     if (ctx.isCanceled()) break;
     ctx.notify(EVENTS.ReasoningDelta, { sessionId: ctx.sessionId, delta: ch });
     trajectory(ctx, 'reasoning', ch.trim());
-    await sleep(60);
+    await sleep(delay.reasoning);
   }
 
   // ---- 2. P2-7 计划模式：先出计划、等用户批准（拒绝则本次不改任何东西）
@@ -192,7 +224,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     const target = file.path ?? file.uri ?? 'unknown';
     ctx.notify(EVENTS.ToolStarted, { sessionId: ctx.sessionId, tool: 'read_file', input: { path: target } });
     trajectory(ctx, 'tool', `read_file ${JSON.stringify({ path: target })}`, { tool: 'read_file' });
-    await sleep(120);
+    await sleep(delay.read);
     let content = file.content ?? '';
     if ((content === '' || file.contentOmitted) && file.path) {
       content = (await ctx.readFile(file.path)) ?? '(无法读取：路径越界或文件不存在)';
@@ -202,9 +234,9 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
       tool: 'read_file',
       ok: true,
       output: content.split('\n').slice(0, 12).join('\n') || '(空文件)',
-      durationMs: 120,
+      durationMs: delay.read,
     });
-    trajectory(ctx, 'tool', 'read_file 完成', { tool: 'read_file', ok: true, durationMs: 120 });
+    trajectory(ctx, 'tool', 'read_file 完成', { tool: 'read_file', ok: true, durationMs: delay.read });
   }
 
   // ---- 4. 文件修改（触发补丁审批，目标路径须在工作区内，canonical 校验防符号链接逃逸）
@@ -334,22 +366,22 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
       trajectory(ctx, 'approval', `approval.respond ${approved ? 'approved' : 'rejected'}`, {
         tool: 'bash_execute',
         ok: approved,
-        durationMs: 200,
+        durationMs: delay.bash,
         errorKind: approved ? undefined : 'approval-denied',
       });
 
-      await sleep(200);
+      await sleep(delay.bash);
       ctx.notify(EVENTS.ToolExecuted, {
         sessionId: ctx.sessionId,
         tool: 'bash_execute',
         ok: approved,
         output: approved ? 'mock: 已清理 build/ 并完成构建（演示输出）' : '已取消：用户拒绝了该命令。',
-        durationMs: 200,
+        durationMs: delay.bash,
       });
       trajectory(ctx, 'tool', 'bash_execute 完成', {
         tool: 'bash_execute',
         ok: approved,
-        durationMs: 200,
+        durationMs: delay.bash,
         errorKind: approved ? undefined : 'approval-denied',
       });
     }
@@ -360,7 +392,7 @@ export async function runFakeAgent(ctx: AgentContext, params: SessionSendParams)
     for (let i = 0; i < 30; i++) {
       if (ctx.isCanceled()) break;
       ctx.notify(EVENTS.MessageDelta, { sessionId: ctx.sessionId, delta: '.' });
-      await sleep(120);
+      await sleep(delay.slow);
     }
   }
 
