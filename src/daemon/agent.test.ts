@@ -2,11 +2,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { EVENTS, ERROR_CODES } from '../../shared/protocol';
-import { AgentContext, runFakeAgent } from './agent';
+import { EVENTS, ERROR_CODES, SessionSendParams } from '../../shared/protocol';
+import { AgentContext, FakeAgentTiming, runFakeAgent } from './agent';
 import { isPathInside } from './paths';
 import { SessionSnapshotStore } from './sessionSnapshot';
-import { sleep } from './test-utils';
 
 let tmpDir: string;
 let sampleFile: string;
@@ -55,12 +54,29 @@ function makeCtx(overrides?: Partial<AgentContext>): MockCtx {
   return ctx;
 }
 
+/**
+ * P1-18：测试一律零延时。
+ *
+ * 模拟 Agent 缺省按演示节奏停顿（推理流每段 60ms 等），17 个用例光等待就 21 秒；
+ * 而 Windows 定时器粒度约 15ms，慢 runner 上这段等待还会把 `waitEvent` 推过 3s 超时
+ * （CI 已偶发红过一次）。这里只留 `slow` 的 20ms —— 取消用例必须让输出真的分多轮，
+ * 否则 30 段会在同一轮微任务里跑完，取消点根本抓不到；20ms × 30 段留了 600ms 的取消窗口。
+ */
+const FAST_TIMING: FakeAgentTiming = { reasoning: 0, read: 0, bash: 0, slow: 20 };
+
+const runFast = (ctx: MockCtx, params: SessionSendParams): Promise<void> =>
+  runFakeAgent(ctx, params, FAST_TIMING);
+
+/**
+ * 等到指定事件出现。轮询用 `setImmediate` 而不是 `sleep(10)`：
+ * 定时器每次至少等一个粒度周期，事件早已到达却还要空转一轮，慢机器上会累积成超时。
+ */
 const waitEvent = async (ctx: MockCtx, method: string, timeoutMs = 3000) => {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const found = ctx.events.find((e) => e.method === method);
     if (found) return found;
-    await sleep(10);
+    await new Promise((resolve) => setImmediate(resolve));
   }
   throw new Error('等待事件超时: ' + method);
 };
@@ -68,10 +84,12 @@ const waitEvent = async (ctx: MockCtx, method: string, timeoutMs = 3000) => {
 describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
   it('工作区内修改 -> pending -> 接受 -> 应用并写盘', async () => {
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请修改文件内容，把 TODO 替换为 DONE（write edit）',
-      attachments: [{ kind: 'file', path: sampleFile, name: 'sample.txt', content: fs.readFileSync(sampleFile, 'utf8') }],
+      attachments: [
+        { kind: 'file', path: sampleFile, name: 'sample.txt', content: fs.readFileSync(sampleFile, 'utf8') },
+      ],
     });
 
     await waitEvent(ctx, EVENTS.FilePatchPending);
@@ -94,7 +112,7 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
   it('工作区外路径 -> 拒绝：Error 事件且不发起补丁', async () => {
     const outside = path.join(tmpDir, '..', 'outside.txt');
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: `请修改 ${outside}（write edit）`,
     });
@@ -107,7 +125,7 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
 
   it('真实用户场景：只给文件名（请修改 test.txt）-> 解析到工作区内新建', async () => {
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请修改 test.txt，把 TODO 替换为 DONE',
     });
@@ -128,7 +146,7 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
 
   it('相对路径含目录（components/App.tsx）-> 解析到工作区内', async () => {
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请修改 components/App.tsx，把 TODO 替换为 DONE',
     });
@@ -144,7 +162,7 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
 
   it('无路径可解析时兜底到工作区内 output.txt（而不是进程启动目录）', async () => {
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请修改文件内容，把 TODO 替换为 DONE',
     });
@@ -164,10 +182,12 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
     fs.writeFileSync(ownFile, 'TODO: original\n', 'utf8');
     const edited = '用户编辑后的最终内容（部分采纳）\n';
     const ctx = makeCtx({ getPatchContent: () => edited });
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请修改文件内容，把 TODO 替换为 DONE（write edit）',
-      attachments: [{ kind: 'file', path: ownFile, name: 'edited-apply.txt', content: fs.readFileSync(ownFile, 'utf8') }],
+      attachments: [
+        { kind: 'file', path: ownFile, name: 'edited-apply.txt', content: fs.readFileSync(ownFile, 'utf8') },
+      ],
     });
 
     await waitEvent(ctx, EVENTS.FilePatchPending);
@@ -184,7 +204,7 @@ describe('Agent：文件修改（补丁流程 + 路径护栏）', () => {
 describe('Agent：高危工具审批与能力禁用', () => {
   it('bash 且允许 -> approval.request -> 批准 -> tool.executed ok', async () => {
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
+    const run = runFast(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
     await waitEvent(ctx, EVENTS.ApprovalRequest);
     expect(ctx.waiters).toHaveLength(1);
     expect(ctx.waiters[0].kind).toBe('approval');
@@ -200,7 +220,7 @@ describe('Agent：高危工具审批与能力禁用', () => {
 
   it('bash 被 allowedTools 禁用（白名单不含）-> 不发起审批，tool.executed ok:false', async () => {
     const ctx = makeCtx({ capabilities: { allowedTools: ['read_file'] } });
-    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
+    const run = runFast(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
     await run;
     expect(ctx.events.some((e) => e.method === EVENTS.ApprovalRequest)).toBe(false);
     const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'bash_execute')!;
@@ -210,7 +230,7 @@ describe('Agent：高危工具审批与能力禁用', () => {
 
   it('allowedTools 为空/缺省 = 全部允许', async () => {
     const ctx = makeCtx({ capabilities: { allowedTools: [] } });
-    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
+    const run = runFast(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
     await waitEvent(ctx, EVENTS.ApprovalRequest);
     ctx.waiters[0].resolve(false);
     await run;
@@ -221,7 +241,7 @@ describe('Agent：高危工具审批与能力禁用', () => {
 
   it('B1 信任记忆：命中白名单的 bash 免审批直接执行（不发起 approval.request）', async () => {
     const ctx = makeCtx({ isTrusted: (cmd) => cmd === 'rm -rf build/ && npm run build' });
-    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: 'bash 执行构建（bash）' });
+    const run = runFast(ctx, { sessionId: 's1', prompt: 'bash 执行构建（bash）' });
     await run;
     // 核心断言：免审批（零 approval.request、零挂起），且 tool.executed 标记 trusted
     expect(ctx.events.some((e) => e.method === EVENTS.ApprovalRequest)).toBe(false);
@@ -236,7 +256,7 @@ describe('Agent：高危工具审批与能力禁用', () => {
       isTrusted: () => true, // 即便命中信任，仍须尊重工具白名单
       capabilities: { allowedTools: ['read_file'] },
     });
-    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
+    const run = runFast(ctx, { sessionId: 's1', prompt: '危险操作：bash rm -rf（danger）' });
     await run;
     expect(ctx.events.some((e) => e.method === EVENTS.ApprovalRequest)).toBe(false);
     const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'bash_execute')!;
@@ -249,7 +269,7 @@ describe('Agent：高危工具审批与能力禁用', () => {
 describe('Agent：取消与按需读取', () => {
   it('slow 流程中取消 -> session.ended(canceled)', async () => {
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, { sessionId: 's1', prompt: 'slow 输出测试（slow）' });
+    const run = runFast(ctx, { sessionId: 's1', prompt: 'slow 输出测试（slow）' });
     await waitEvent(ctx, EVENTS.MessageDelta, 5000); // slow 循环的首个点
     (ctx as unknown as { setCanceled: () => void }).setCanceled();
     await run;
@@ -259,7 +279,7 @@ describe('Agent：取消与按需读取', () => {
 
   it('contentOmitted 附件 -> 经 readFile 按需读取', async () => {
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请查看文件内容（read）',
       attachments: [{ kind: 'file', path: sampleFile, name: 'sample.txt', contentOmitted: true }],
@@ -268,6 +288,29 @@ describe('Agent：取消与按需读取', () => {
     const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
     expect(tool.params.ok).toBe(true);
     expect(tool.params.output).toContain('line1');
+  });
+
+  /**
+   * P1-18 的护栏：注入的停顿必须真的被用上。
+   *
+   * 只把测试改快是不够的 —— 如果 `timing` 参数读进来了却漏替换某一处（或日后又被改回
+   * 写死的 120），用例照样全绿，慢只会慢慢回来。这里用一个非零值钉住"事件里的耗时
+   * 来自注入参数"这条链路；真实的等待时间不参与断言，避免在慢机器上变成随机红。
+   */
+  it('注入的停顿时长会体现在事件里（不是写死的 120/200）', async () => {
+    const ctx = makeCtx();
+    const run = runFakeAgent(
+      ctx,
+      {
+        sessionId: 's1',
+        prompt: '请查看文件内容（read）',
+        attachments: [{ kind: 'file', path: sampleFile, name: 'sample.txt', contentOmitted: true }],
+      },
+      { reasoning: 0, read: 7, bash: 0, slow: 0 }
+    );
+    await run;
+    const tool = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'read_file')!;
+    expect(tool.params.durationMs).toBe(7);
   });
 });
 
@@ -289,7 +332,7 @@ describe('Agent × P2-6：改动之后能回滚', () => {
       log: () => {},
     });
     const ctx = makeCtx({ recordSnapshot: (p, c) => store.record('s1', p, c) });
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请修改文件，把 TODO 替换为 DONE（write edit）',
       attachments: [
@@ -323,7 +366,7 @@ describe('Agent × P2-6：改动之后能回滚', () => {
       sessionId: 's2',
       recordSnapshot: (p, c) => store.record('s2', p, c),
     });
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's2',
       prompt: '请修改文件，把 TODO 替换为 DONE（write edit）',
       attachments: [{ kind: 'file', path: target, name: 'rejected.txt', content: fs.readFileSync(target, 'utf8') }],
@@ -349,7 +392,7 @@ describe('参考 Agent：Plan 模式（P2-7）', () => {
   it('批准计划后才继续；拒绝则本次不碰任何文件', async () => {
     const target = mkPlanFile('plan-reject.txt');
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请修改文件（write edit）',
       attachments: [{ kind: 'file', path: target, name: 'plan-reject.txt', content: fs.readFileSync(target, 'utf8') }],
@@ -372,7 +415,7 @@ describe('参考 Agent：Plan 模式（P2-7）', () => {
   it('批准后照常走补丁流程（计划不是终点，只是闸门）', async () => {
     const target = mkPlanFile('plan-approve.txt');
     const ctx = makeCtx();
-    const run = runFakeAgent(ctx, {
+    const run = runFast(ctx, {
       sessionId: 's1',
       prompt: '请修改文件（write edit）',
       attachments: [{ kind: 'file', path: target, name: 'plan-approve.txt', content: fs.readFileSync(target, 'utf8') }],
