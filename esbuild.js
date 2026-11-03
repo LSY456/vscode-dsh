@@ -20,6 +20,9 @@ const watch = process.argv.includes('--watch');
 // 状态行上（「已连接 daemon v0.3.0」），差了 5 个小版本却没人发现。手写值必然腐坏，故删掉手写路径。
 const pkgVersion = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8')).version;
 
+// 标注成 BuildOptions 是为了让 platform / target 保持字面量类型 —— 不标的话它们被推断成
+// 普通 string，展开进 esbuild.context() 时就不满足 BuildOptions 的联合类型要求。
+/** @type {import('esbuild').BuildOptions} */
 const common = {
   bundle: true,
   sourcemap: true,
@@ -68,6 +71,8 @@ async function main() {
   // 集成测试（@vscode/test-electron）：独立编译到 out/test/integration/*.js，
   // 由 Extension Development Host 加载；mocha 运行时 require（external），vscode/ws 亦然。
   const testDir = path.join(__dirname, 'src', 'test', 'integration');
+  // 显式标注：`{}` 的空对象字面量会被推断成 `{}` 类型，装不下后面按文件名填进去的键值。
+  /** @type {Record<string, string>} */
   const testEntries = {};
   if (fs.existsSync(testDir)) {
     for (const f of fs.readdirSync(testDir)) {

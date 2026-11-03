@@ -43,6 +43,11 @@ export function escapeHtml(s) {
 
 // 代码块渲染器（marked v12+ 对象签名：{ text, lang }）。
 const renderer = {
+  /**
+   * lang 必须标成可选：marked 的 Code 里它就是可选的，写成必填会让整个 renderer
+   * 不满足 RendererObject 的签名（无语言的代码块走的就是 lang 为空的路径）。
+   * @param {{ text: string, lang?: string }} token
+   */
   code({ text, lang }) {
     const langClean = String(lang || '').split(/\s+/)[0];
     const known = !!langClean && hljs.getLanguage(langClean) != null;

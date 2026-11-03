@@ -110,7 +110,9 @@ export function createComposer(ctx) {
       return `最多只能附加 ${MAX_IMAGES_PER_MESSAGE} 张图片`;
     }
     const mimeType = String(file.type || '').toLowerCase();
-    if (!IMAGE_MIME_TYPES.includes(mimeType)) {
+    // IMAGE_MIME_TYPES 是字面量元组，它的 includes 只接受那四个字面量；而这里的值来自运行时
+    // 的 File.type，是普通 string。按 readonly string[] 的视角判断才符合实际用法。
+    if (!/** @type {readonly string[]} */ (IMAGE_MIME_TYPES).includes(mimeType)) {
       return `不支持的图片格式：${file.name || mimeType || '未知'}（仅支持 ${IMAGE_MIME_TYPES.join(' / ')}）`;
     }
     if (file.size > MAX_SOURCE_IMAGE_BYTES) {
