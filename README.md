@@ -198,6 +198,8 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 vscode-dsh/
 ├── package.json            # 扩展清单（命令/配置/激活事件）
 ├── esbuild.js              # 构建：extension + daemon + media
+├── tsconfig.json           # 类型检查：src/**/*.ts + shared/**/*.ts
+├── tsconfig.web.json       # 类型检查：webview 与 scripts 的纯 JS（只查不产出）
 ├── shared/protocol.ts      # ★ 协议契约（两端共享，真实 daemon 必须兼容）
 ├── shared/version.ts       # 单一版本来源（扩展宿主与 daemon 共用）
 ├── src/
@@ -235,7 +237,7 @@ vscode-dsh/
 │   ├── smokeReal.js        # 真实 endpoint 连通冒烟（可选，需 apiKey，不参与 CI）
 │   └── runIntegrationTests.js  # @vscode/test-electron 集成测试入口
 ├── *.test.ts               # vitest 单元测试（协议/路径/状态机/Agent/模型/工具/轨迹）
-├── .github/workflows/ci.yml # CI：typecheck/build/unit/smoke/协议第二实现 + VSIX 构件
+├── .github/workflows/ci.yml # CI：typecheck（含 webview 侧）/build/unit/smoke/协议第二实现 + VSIX 构件
 ├── PROTOCOL.md             # 协议规范
 ├── CHANGELOG.md            # 变更日志
 ├── CONTRIBUTING.md         # 贡献指南

@@ -107,6 +107,11 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      # webview 与构建脚本（media/webview.js、src/webview/*.js、scripts/*.js、esbuild.js）
+      # 长期不在 tsc 视野里，改错属性名不会有任何提示。这一步把它们纳入类型门禁（P1-10）。
+      - name: Type check（webview / scripts）
+        run: npm run typecheck:web
+
       - name: Build
         run: npm run build
 

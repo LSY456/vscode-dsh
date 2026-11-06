@@ -308,7 +308,11 @@ export function describeHttpError(status: number, rawBody: string): Error {
   const tail = [hint, detail ? `上游返回：${detail}` : ''].filter(Boolean).join('；');
   const err = new Error(tail ? `HTTP ${status}：${tail}` : `HTTP ${status}`);
   // 带上状态码，供重试策略判定（429/5xx 可重试，其余 4xx 不可）——从错误文案里正则抠状态码太脆。
-  (err as Error & { httpStatus?: number }).httpStatus = status;
+  //
+  // 这里用 Object.assign 而不是「类型断言后再赋值」：断言只存在于源码，产物里会退化成
+  // `err.httpStatus = status`，对纯 JS 的类型检查来说就是给 Error 加了一个不存在的属性
+  // （P1-10 的 checkJs 会直接在 out/daemon/model.js 上报错）。Object.assign 两种视角都成立。
+  Object.assign(err, { httpStatus: status });
   return err;
 }
 

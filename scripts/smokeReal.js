@@ -19,8 +19,13 @@
  *   - DSH_ANTHROPIC_API_KEY / DSH_ANTHROPIC_BASE_URL / DSH_ANTHROPIC_MODEL
  * 缺 key 的路直接跳过；全部缺 key 时提示后退出 0（诚实跳过，不视为失败）。
  */
-const { createModel } = require('../out/daemon/model.js');
-const { parseToolCalls } = require('../out/daemon/toolcall.js');
+// 这两个是构建产物，而 CI 的顺序是「先 typecheck 后 build」—— 检查那一刻 out/ 还不存在，
+// 写成字符串字面量会报 TS2307。改用 path.join 拼路径：tsc 对 require(变量) 不做静态解析，
+// 运行时行为完全不变（先 npm run build 仍是本脚本的前置条件，见上文运行说明）。
+const path = require('path');
+const OUT_DAEMON = path.join(__dirname, '..', 'out', 'daemon');
+const { createModel } = require(path.join(OUT_DAEMON, 'model.js'));
+const { parseToolCalls } = require(path.join(OUT_DAEMON, 'toolcall.js'));
 
 const PROMPT = '请只回复两个字：在呀';
 

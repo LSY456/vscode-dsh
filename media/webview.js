@@ -220,8 +220,11 @@ import { createEvents } from '../src/webview/events.js';
   // 逐项 addEventListener 会在重建后全部失效（点上去毫无反应）。
   if (suggestEl) {
     suggestEl.addEventListener('click', (e) => {
-      const node = e.target;
-      const item = node && typeof node.closest === 'function' ? node.closest('.suggest-item') : null;
+      // e.target 的静态类型是 EventTarget，closest 只有 Element 才有。
+      // 能被点到的目标一定是元素，这里收窄一次即可，不必把整个回调放宽成 any。
+      const node = /** @type {HTMLElement | null} */ (e.target);
+      // closest 在 Element 上声明，返回的也是 Element；后面要读 dataset，收窄到 HTMLElement
+      const item = node ? /** @type {HTMLElement | null} */ (node.closest('.suggest-item')) : null;
       if (!item) return;
       inputEl.value = item.dataset.prompt || '';
       api.autosizeInput();

@@ -173,7 +173,9 @@ function makeRpc(ws) {
       if (!p) return;
       pending.delete(msg.id);
       if (msg.error) {
-        const err = new Error(msg.error.message + ' (code ' + msg.error.code + ')');
+        const base = new Error(msg.error.message + ' (code ' + msg.error.code + ')');
+        // 与 smoke.js 同款：Error 没有 code 字段，挂上去后标注类型，避免被当成非法属性赋值
+        const err = /** @type {Error & { code?: number | string }} */ (base);
         err.code = msg.error.code;
         p.reject(err);
       } else {

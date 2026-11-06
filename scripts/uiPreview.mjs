@@ -58,9 +58,18 @@ async function renderScenario(script) {
   // 漏一个的后果不是报错，而是某个功能在预览里静默失效。
   globalThis.FileReader = window.FileReader;
   const posted = [];
+  // 真实的 acquireVsCodeApi 有 postMessage / getState / setState 三个方法。
+  // 预览只需要捕获 postMessage，但另外两个也得给上：少了它们类型对不上，
+  // 而且将来哪个模块真去读 state 时，预览里会静默拿到 undefined 而不是当场报错。
   globalThis.acquireVsCodeApi = () => ({
     postMessage(msg) {
       posted.push(msg);
+    },
+    getState() {
+      return undefined;
+    },
+    setState(state) {
+      void state;
     },
   });
 
@@ -349,7 +358,9 @@ const decidedDom = await renderScenario(({ emit, emitRaw }) => {
   // 待办条一次只投影一个挂起项，所以按当前显示的按钮逐个点
   const doc = globalThis.document;
   const click = (label) => {
-    const b = [...doc.querySelectorAll('#pending-actions button')].find((n) => n.textContent === label);
+    // querySelectorAll 只推断到 Element，click 是 HTMLButtonElement 上的方法，先收窄
+    const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (doc.querySelectorAll('#pending-actions button'));
+    const b = [...buttons].find((n) => n.textContent === label);
     if (!b) throw new Error('[uiPreview] 待办条上没有按钮：' + label);
     b.click();
   };
@@ -482,7 +493,9 @@ const planDom = await renderScenario(({ emit, emitRaw }) => {
 
   const doc = globalThis.document;
   const clickBar = (label) => {
-    const b = [...doc.querySelectorAll('#pending-actions button')].find((n) => n.textContent === label);
+    // querySelectorAll 只推断到 Element，click 是 HTMLButtonElement 上的方法，先收窄
+    const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (doc.querySelectorAll('#pending-actions button'));
+    const b = [...buttons].find((n) => n.textContent === label);
     if (!b) throw new Error('[uiPreview] 待办条上没有按钮：' + label);
     b.click();
   };
@@ -547,7 +560,9 @@ const imageDom = await renderScenario(async ({ emit, emitRaw, posted }) => {
 
   // 粘贴：剪贴板里的截图在 jsdom 里只能靠一个带 clipboardData 的 paste 事件来模拟
   const paste = (name) => {
-    const ev = new win.Event('paste');
+    // clipboardData 不在 Event 的类型定义里（它是 ClipboardEvent 的），而 jsdom 允许这样挂，
+    // 所以断言一次带字段的交叉类型，而不是把整个事件变量放宽成 any。
+    const ev = /** @type {Event & { clipboardData?: unknown }} */ (new win.Event('paste'));
     ev.clipboardData = { files: [makeFile(name)], items: [] };
     doc.getElementById('input').dispatchEvent(ev);
   };
@@ -564,7 +579,8 @@ const imageDom = await renderScenario(async ({ emit, emitRaw, posted }) => {
   paste('报错截图.png');
   await waitThumbs(1, '第一张图进入暂存区');
 
-  doc.getElementById('input').value = '这个报错怎么修？';
+  // getElementById 返回 HTMLElement | null，输入框是 textarea，赋值前收窄一次
+  /** @type {HTMLTextAreaElement} */ (doc.getElementById('input')).value = '这个报错怎么修？';
   doc.getElementById('btn-send').click();
 
   // 扩展确认收到后回显（图片 chip 只带 imageId，不带 base64）

@@ -21,7 +21,7 @@ npm run watch        # 增量构建（扩展宿主 + daemon + webview）
 ## 质量门禁（提交 / PR 前必须通过）
 
 ```bash
-npm run check        # typecheck + build + 单元测试 + 端到端冒烟
+npm run check        # typecheck（含 webview/scripts）+ build + 单元测试 + 端到端冒烟
 npm run package      # VSIX 打包验证（产物见 dist/）
 ```
 
