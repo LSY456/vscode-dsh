@@ -24,6 +24,7 @@ export function createHistory(ctx) {
     inpMaxRounds,
     inpTemperature,
     trustListEl,
+    memoryListEl,
   } = dom;
 
   // -------------------------------------------------------------------------
@@ -85,6 +86,7 @@ export function createHistory(ctx) {
     btnSettingsRestart.disabled = false;
     vscode.postMessage({ kind: 'settings.get' });
     vscode.postMessage({ kind: 'trust.list' }); // B1：同步加载信任规则
+    vscode.postMessage({ kind: 'memory.list' }); // 长期记忆：同步加载条目
   }
 
   function closeSheets() {
@@ -184,6 +186,38 @@ export function createHistory(ctx) {
     }
   }
 
+  // ---- 长期记忆：设置面板中的条目管理（逐条删除，全部清空由入口按钮负责）
+  /**
+   * 渲染记忆列表。
+   *
+   * 每条都显示原文而不是摘要：记忆会长期影响回答，用户要能一眼看出"它到底记住了什么"，
+   * 摘要省下的几行恰恰是最容易出歧义的部分。
+   */
+  function renderMemory(entries) {
+    memoryListEl.textContent = '';
+    if (!Array.isArray(entries) || entries.length === 0) {
+      memoryListEl.appendChild(
+        el('div', 'muted trust-empty', '暂无长期记忆——对话里说「记住……」并确认后才会出现')
+      );
+      return;
+    }
+    for (const e of entries) {
+      const row = el('div', 'trust-row');
+      row.appendChild(el('span', 'memory-text', e.text || ''));
+      row.appendChild(el('span', 'muted trust-time', new Date(e.createdAt).toLocaleString()));
+      const btn = el('button', 'icon-btn', '删除');
+      btn.type = 'button';
+      btn.title = '从长期记忆中删除这一条';
+      btn.addEventListener('click', () => {
+        // 先乐观移除这一行：扩展随后回传权威列表（memory.loaded）覆盖整块
+        row.remove();
+        vscode.postMessage({ kind: 'memory.delete', memoryId: e.id });
+      });
+      row.appendChild(btn);
+      memoryListEl.appendChild(row);
+    }
+  }
+
   return {
     renderHistory,
     renderHistoryMessages,
@@ -192,5 +226,6 @@ export function createHistory(ctx) {
     applyModelOptions,
     fillSettings,
     renderTrust,
+    renderMemory,
   };
 }

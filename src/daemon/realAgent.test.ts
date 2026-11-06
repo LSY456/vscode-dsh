@@ -1850,3 +1850,154 @@ describe('realAgent：宿主侧硬约束（扇出 / 累计花费 / 413 降级）
     expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'error')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 长期记忆（跨会话偏好）
+// ---------------------------------------------------------------------------
+
+interface SeenCall {
+  system: string;
+  tools: string[];
+}
+
+/** 记录每次请求的 system 内容与工具名（FakeChatModel 的 responder 拿不到 opts）。 */
+function recordingModel(turns: FakeTurn[], seen: SeenCall[]): ChatModel {
+  const queue = [...turns];
+  return {
+    async chat(messages, opts) {
+      if (isTitleRequest(messages)) return { reasoning: '', content: '测试标题' };
+      seen.push({
+        system: contentToText(messages[0].content),
+        tools: ((opts && opts.tools) || []).map((t) => t.name),
+      });
+      const turn = queue.shift() ?? { content: '(无更多脚本回复)' };
+      const content = turn.toolcall ? formatToolCallContent(turn.toolcall) : (turn.content ?? '');
+      opts?.onChunk?.({ type: 'content', text: content });
+      return { reasoning: turn.reasoning ?? '', content, toolCalls: turn.toolCalls };
+    },
+  };
+}
+
+/** 等一个挂起项登记完成（事件先于 waitForUser 入队，直接读 waiters[0] 可能还是空的）。 */
+async function waitWaiter(ctx: MockCtx): Promise<void> {
+  const start = Date.now();
+  while (ctx.waiters.length === 0) {
+    if (Date.now() - start > 4000) throw new Error('等待挂起项超时');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+describe('realAgent：长期记忆', () => {
+  it('记忆段落拼在系统提示词尾部（messages[0] 是唯一永不被裁剪的位置）', async () => {
+    const ctx = makeCtx();
+    ctx.getMemorySection = () => '【长期记忆】（测试）\n- 本项目用 pnpm';
+    const seen: SeenCall[] = [];
+    await runRealAgent(ctx, baseParams, { model: recordingModel([{ content: '好的' }], seen) });
+
+    expect(seen[0].system).toContain('你是 dsh');
+    expect(seen[0].system).toContain('本项目用 pnpm');
+    expect(seen[0].system.indexOf('本项目用 pnpm')).toBeGreaterThan(seen[0].system.indexOf('你是 dsh'));
+  });
+
+  it('没有记忆层时一个字都不加（缺省行为不变）', async () => {
+    const ctx = makeCtx(); // 裸 context：不注入 getMemorySection
+    const seen: SeenCall[] = [];
+    await runRealAgent(ctx, baseParams, { model: recordingModel([{ content: '好的' }], seen) });
+
+    expect(seen[0].system).toContain('你是 dsh');
+    expect(seen[0].system).not.toContain('【长期记忆】');
+  });
+
+  it('有 saveMemory 才把 remember 放进工具清单：没落盘实现就不给模型这个能力', async () => {
+    const withMemory = makeCtx();
+    withMemory.saveMemory = () => ({ ok: true, message: 'ok' });
+    const seenA: SeenCall[] = [];
+    await runRealAgent(withMemory, baseParams, { model: recordingModel([{ content: '好' }], seenA) });
+    expect(seenA[0].tools).toContain('remember');
+
+    const without = makeCtx();
+    const seenB: SeenCall[] = [];
+    await runRealAgent(without, baseParams, { model: recordingModel([{ content: '好' }], seenB) });
+    expect(seenB[0].tools).not.toContain('remember');
+  });
+
+  it('批准后落盘一条，结果回灌给模型', async () => {
+    const ctx = makeCtx();
+    const saved: string[] = [];
+    ctx.saveMemory = (text) => {
+      saved.push(text);
+      return { ok: true, message: `已记入长期记忆：${text}` };
+    };
+    const seen: SeenCall[] = [];
+    const model = recordingModel(
+      [
+        { toolcall: { tool: 'remember', input: { text: '用 pnpm 而不是 npm' } } },
+        { content: '记住了' },
+      ],
+      seen
+    );
+
+    const task = runRealAgent(ctx, baseParams, { model });
+    const req = await waitEvent(ctx, EVENTS.ApprovalRequest);
+    expect(req.params.tool).toBe('remember');
+    expect(req.params.risk).toBe('low');
+    expect(req.params.trustKind).toBeUndefined(); // 记忆没有"同类不再问"的粒度
+    await waitWaiter(ctx);
+    ctx.waiters[0].resolve(true);
+    await task;
+
+    expect(saved).toEqual(['用 pnpm 而不是 npm']);
+    const te = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'remember');
+    expect(te?.params.ok).toBe(true);
+    expect(String(te?.params.output)).toContain('已记入长期记忆');
+    expect(ctx.events.some((e) => e.method === EVENTS.SessionEnded && e.params.reason === 'completed')).toBe(true);
+  });
+
+  it('用户拒绝则不写入，并明确告诉模型不要重复提', async () => {
+    const ctx = makeCtx();
+    const saved: string[] = [];
+    ctx.saveMemory = (text) => {
+      saved.push(text);
+      return { ok: true, message: 'ok' };
+    };
+    const model = recordingModel(
+      [
+        { toolcall: { tool: 'remember', input: { text: '这条不该被记住' } } },
+        { content: '好的' },
+      ],
+      []
+    );
+
+    const task = runRealAgent(ctx, baseParams, { model });
+    await waitEvent(ctx, EVENTS.ApprovalRequest);
+    await waitWaiter(ctx);
+    ctx.waiters[0].resolve(false);
+    await task;
+
+    expect(saved).toEqual([]);
+    const te = ctx.events.find((e) => e.method === EVENTS.ToolExecuted && e.params.tool === 'remember');
+    expect(te?.params.ok).toBe(false);
+    // 回灌给模型的文本要能劝住"再试一次"
+    expect(String(te?.params.output)).toContain('没有同意');
+  });
+
+  it('计划阶段既保留记忆，也不提供 remember（批准前不改动任何东西）', async () => {
+    const ctx = makeCtx();
+    ctx.getMemorySection = () => '【长期记忆】\n- 缩进用 2 空格';
+    ctx.saveMemory = () => ({ ok: true, message: 'ok' });
+    const seen: SeenCall[] = [];
+    const model = recordingModel([{ content: '## 计划\n1. 只读调研' }], seen);
+
+    const task = runRealAgent(ctx, { ...baseParams, planMode: true }, { model });
+    await waitEvent(ctx, EVENTS.PlanRequest);
+    await waitWaiter(ctx);
+    ctx.waiters[0].resolve(false);
+    await task;
+
+    expect(seen[0].tools).toContain('read_file');
+    expect(seen[0].tools).not.toContain('remember');
+    // 计划阶段会整体替换系统提示词 —— 记忆必须跟着走，否则"用户要求过什么"在调研期消失
+    expect(seen[0].system).toContain('缩进用 2 空格');
+    expect(seen[0].system).toContain(PLAN_MODE_MARKER);
+  });
+});

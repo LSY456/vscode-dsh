@@ -86,6 +86,21 @@ export interface AgentContext {
   recordSnapshot?(resolvedPath: string, originalContent: string | undefined, writtenContent?: string): void;
   /** 按需读取文件（须在工作区内），失败返回 undefined */
   readFile(target: string, maxBytes?: number): Promise<string | undefined>;
+  /**
+   * 长期记忆：本连接可见的记忆段落（拼进系统提示词）。空串 = 当前没有记忆。
+   *
+   * 走 Context 而不是 `RealAgentConfig`：记忆的存储与开关都在 server 侧（连接级），
+   * Agent 只负责"用"。未注入（测试里的裸 context / 旧 daemon）= 不提供记忆层，
+   * 此时 `remember` 工具连定义都不出现 —— 让模型看不见无法达成的能力。
+   */
+  getMemorySection?(): string;
+  /**
+   * 长期记忆：用户批准后落盘一条，返回值直接作为工具结果回灌给模型。
+   *
+   * 为什么让 server 返回文案而不是抛错：重复 / 超上限 / 已关闭都是**可预期**的结果，
+   * 模型需要看到具体原因才能换个说法或停下来，而不是收到一条异常。
+   */
+  saveMemory?(text: string): { ok: boolean; message: string };
 }
 
 /**

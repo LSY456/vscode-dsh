@@ -63,6 +63,7 @@ import { TrajectoryStore } from './trajectoryStore';
 import { VSD_DSH_VERSION } from '../../shared/version';
 import { readBuildId } from '../../shared/buildId';
 import { TrustStore } from './trust';
+import { MemoryStore } from './memoryStore';
 import { detectSandbox } from './sandbox';
 
 export interface DaemonServerOptions {
@@ -133,6 +134,23 @@ export interface RuntimeConfig {
   temperature?: number;
   /** 单次输出上限（max_tokens）；undefined / <= 0 = 不发送该字段，由服务端决定 */
   maxTokens?: number;
+  /**
+   * 长期记忆开关。`undefined` = 开启（见 `memoryEnabledIn`）。
+   *
+   * 默认开启的理由写在 `InitializeParams.memoryEnabled`：记忆为空时提示词一字不加，
+   * 唯一差别是工具清单里多一个 `remember`，而它每次都要用户点「记住」。
+   */
+  memoryEnabled?: boolean;
+}
+
+/**
+ * 本连接是否启用长期记忆。
+ *
+ * 单一判定点：`initialize` 的赋值、`getMemorySection`、`saveMemory` 三处若各写一遍
+ * `!== false`，改语义时必然漏一处 —— 那会变成"提示词里有记忆、但工具说已关闭"。
+ */
+export function memoryEnabledIn(rt: RuntimeConfig): boolean {
+  return rt.memoryEnabled !== false;
 }
 
 /**
@@ -193,6 +211,8 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
   const trajectoryStore = new TrajectoryStore(path.join(opts.workspaceRoot, '.dsh', 'trajectory'));
   // B1 信任记忆：免审批白名单，持久化于 <workspace>/.dsh/trust.json（0600，用户可审阅/删除）
   const trustStore = new TrustStore({ file: path.join(opts.workspaceRoot, '.dsh', 'trust.json') });
+  // 长期记忆：跨会话保留的用户偏好，持久化于 <workspace>/.dsh/memory.json（0600，原子写）
+  const memoryStore = new MemoryStore({ file: path.join(opts.workspaceRoot, '.dsh', 'memory.json') });
   // P2-6 会话级事务回滚：影子快照落在 <workspace>/.dsh/snapshots/<会话>/（0700 / 0600）
   const snapshots = new SessionSnapshotStore({
     root: path.join(opts.workspaceRoot, '.dsh', 'snapshots'),
@@ -391,6 +411,9 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
           // 上限继续不发送；只有显式配置才改变请求体。
           if (p.model?.temperature !== undefined) rt.temperature = p.model.temperature;
           if (p.model?.maxTokens !== undefined) rt.maxTokens = p.model.maxTokens;
+          // 长期记忆：只认**显式**声明。undefined 一律保持现状（缺省开启）——
+          // 把"客户端没提"当成"要关闭"会让记忆在旧客户端上静默失效。
+          if (p.memoryEnabled !== undefined) rt.memoryEnabled = !!p.memoryEnabled;
           const session = sessions.create();
           attach(conn, session);
           // 显式回报「为什么是 mock」，让前端能提示"演示模式"而不是静默降级
@@ -410,6 +433,7 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
               rollback: true,
               plan: true,
               image: true,
+              memory: true,
             },
             sessionId: session.id,
             agent: decision.mode,
@@ -496,6 +520,28 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
             // 而不是等下一个 onChunk 才察觉（模型静默时 onChunk 永不触发）。
             onCancel: (fn) => session.onCancel(fn),
             isTrusted: (command) => trustStore.matches(command),
+            // 长期记忆（跨会话偏好）：只有开启时才注入这两个口子。
+            //
+            // `realAgent` 是依据 `saveMemory` 是否存在来决定要不要把 `remember` 放进工具清单的，
+            // 所以"关掉记忆"必然同时收掉提示词段落与工具定义 —— 不会出现只关一半的中间态
+            // （那种状态下模型会看到记忆、却无法新增，用户完全无从理解）。
+            ...(memoryEnabledIn(conn.runtime)
+              ? {
+                  getMemorySection: () => memoryStore.section(),
+                  saveMemory: (text: string) => {
+                    const r = memoryStore.add(text);
+                    if (!r.ok) return { ok: false, message: r.message };
+                    // 落盘失败时条目只活在本会话 —— 必须说清"重启后不保留"，
+                    // 否则用户以为已经记住，下一场会话照旧被纠正一遍
+                    return r.persisted
+                      ? { ok: true, message: `已记入长期记忆：${r.entry.text}` }
+                      : {
+                          ok: true,
+                          message: `已在本会话生效，但写入 .dsh/memory.json 失败，重启后不会保留：${r.entry.text}`,
+                        };
+                  },
+                }
+              : {}),
             // P2-7：用户在批准计划时附带的补充意见（透传给执行阶段的指令）
             getPlanNote: () => session.getPlanNote(),
             getPatchContent: (patchId) => session.getPatchContent(patchId),
@@ -662,6 +708,29 @@ export async function startDaemonServer(opts: DaemonServerOptions): Promise<Daem
         case METHODS.TrustClear: {
           trustStore.clear();
           console.log('[trust] 信任规则已全部清空');
+          sendResult(conn.ws, req.id, { ok: true });
+          return;
+        }
+        case METHODS.MemoryList: {
+          sendResult(conn.ws, req.id, { entries: memoryStore.list() });
+          return;
+        }
+        case METHODS.MemoryDelete: {
+          const p = req.params as { id?: string };
+          const id = String(p?.id ?? '');
+          if (!id) {
+            sendError(conn.ws, req.id, ERROR_CODES.InvalidParams, 'memory.delete 需要 id');
+            return;
+          }
+          const deleted = memoryStore.remove(id);
+          // 只记 id、不记正文：记忆里常是项目内部约定，日志不必留档
+          if (deleted) console.log(`[memory] 已删除一条长期记忆（${id}）`);
+          sendResult(conn.ws, req.id, { ok: true, deleted });
+          return;
+        }
+        case METHODS.MemoryClear: {
+          memoryStore.clear();
+          console.log('[memory] 长期记忆已全部清空');
           sendResult(conn.ws, req.id, { ok: true });
           return;
         }

@@ -57,7 +57,17 @@ const REQUIRED = [
 ];
 
 const MAX_FILES = 45;
-const MAX_BYTES = 320 * 1024;
+/**
+ * 体积门槛。
+ *
+ * 2026-11-06 由 320 KB 提到 340 KB：长期记忆层（memoryStore + remember 工具 + 设置面板列表）
+ * 把包从 315.4 KB 撑到 323.3 KB（含同步更新的 README / PROTOCOL / CHANGELOG），直接撞线。这条守卫的职责是**发现意外膨胀**
+ * ——历史上真发生过 214 → 573 KB（sourcemap、本地工作记录、内部文档混进包），
+ * 而不是"给每个新功能设卡"：卡得太紧的结果是每次都被调高，反而没人再看它。
+ * 340 KB 留出约 4 个同规模功能的空间；若再次撞线，先确认是不是又混进了不该进包的东西，
+ * 再决定是收窄清单还是继续上调。
+ */
+const MAX_BYTES = 340 * 1024;
 
 /** 跑子进程并收集输出。刻意用异步 spawn：同步版在本机沙箱里一律 EBUSY。 */
 function run(args) {

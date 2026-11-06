@@ -237,6 +237,18 @@
             <button type="button" id="btn-trust-clear" class="btn danger">清空全部信任</button>
           </div>
         </div>
+
+        <div class="trust-section">
+          <div class="section-head">长期记忆 <em class="muted">（跨会话保留的偏好）</em></div>
+          <p class="muted trust-hint">
+            Agent 提出的「记住这条」需要你确认后才写入；之后每场会话开始时都会带上这些内容。
+            存于工作区 <code>.dsh/memory.json</code>（权限 0600，可手动审阅删除）。
+          </p>
+          <div id="memory-list" class="trust-list"></div>
+          <div class="trust-actions">
+            <button type="button" id="btn-memory-clear" class="btn danger">清空全部记忆</button>
+          </div>
+        </div>
       </div>
     </div>
   </nav>

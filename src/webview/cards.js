@@ -128,7 +128,9 @@ export function createCards(ctx) {
         entry.badge.textContent = '已过期';
       } else {
         entry.badge.className = 'badge ok';
-        entry.badge.textContent = outcome === 'trusted' ? '已接受并记住' : '已接受';
+        // 记忆的结论是「已记住」，不是「已接受」—— 后者在这个语境里等于没说清发生了什么
+        const isMemory = entry.data && entry.data.tool === 'remember';
+        entry.badge.textContent = isMemory ? '已记住' : outcome === 'trusted' ? '已接受并记住' : '已接受';
       }
     }
     // 结论已经落到标题行的徽标上，正文（命令 + 按钮）随之折叠
@@ -150,10 +152,17 @@ export function createCards(ctx) {
   }
 
   function addApprovalCard(p) {
-    const card = el('div', 'card approval risk-' + (p.risk || 'medium'));
+    /**
+     * 长期记忆的「记住这条」也走审批通道，但语义完全不同：它不执行任何东西，
+     * 只是把一句话写进 memory.json。沿用「⚠ 工具审批 + 风险等级 + 命令 JSON」
+     * 会让用户以为要批准一条命令，还会多出一个语义不通的「接受并记住」按钮
+     * （记住再记住？）。
+     */
+    const isMemory = p.tool === 'remember';
+    const card = el('div', 'card approval risk-' + (isMemory ? 'low' : p.risk || 'medium'));
     const title = el('div', 'card-title');
-    title.appendChild(el('b', '', '⚠ 工具审批'));
-    const badge = el('span', 'badge warn', p.risk || 'medium');
+    title.appendChild(el('b', '', isMemory ? '🧠 建议记住' : '⚠ 工具审批'));
+    const badge = el('span', isMemory ? 'badge' : 'badge warn', isMemory ? '偏好' : p.risk || 'medium');
     title.appendChild(badge);
     title.appendChild(el('code', 'card-sub', p.tool));
     card.appendChild(title);
@@ -161,18 +170,28 @@ export function createCards(ctx) {
     // 正文单独成块：折叠时整块隐藏，标题行（含结论徽标）保持可见
     const body = el('div', 'card-body');
     if (p.reason) body.appendChild(el('div', 'card-reason', p.reason));
-    body.appendChild(el('pre', 'code-block', JSON.stringify(p.input ?? {}, null, 2)));
+    // 记忆的正文就是那句话本身，不需要 JSON 包装（包装只会让用户多读一层引号与转义）
+    body.appendChild(
+      isMemory
+        ? el('pre', 'code-block', String((p.input && p.input.text) || ''))
+        : el('pre', 'code-block', JSON.stringify(p.input ?? {}, null, 2))
+    );
 
     const countdown = el('div', 'countdown', '');
     const actions = el('div', 'card-actions');
-    const btnReject = el('button', 'danger', '拒绝');
-    const btnAccept = el('button', 'ok-btn', '接受');
-    const btnTrust = el('button', 'ok-btn', trustButtonLabel(p.trustKind));
-    btnReject.type = btnAccept.type = btnTrust.type = 'button';
+    const btnReject = el('button', 'danger', isMemory ? '不记住' : '拒绝');
+    const btnAccept = el('button', 'ok-btn', isMemory ? '记住' : '接受');
+    // 记忆没有"同类不再问"的粒度：每条都要单独看过，所以没有第三个按钮
+    const btnTrust = isMemory ? null : el('button', 'ok-btn', trustButtonLabel(p.trustKind));
+    btnReject.type = btnAccept.type = 'button';
     btnReject.addEventListener('click', () => decideApproval(p.approvalId, false, false));
     btnAccept.addEventListener('click', () => decideApproval(p.approvalId, true, false));
-    btnTrust.addEventListener('click', () => decideApproval(p.approvalId, true, true));
-    actions.append(btnReject, btnAccept, btnTrust);
+    actions.append(btnReject, btnAccept);
+    if (btnTrust) {
+      btnTrust.type = 'button';
+      btnTrust.addEventListener('click', () => decideApproval(p.approvalId, true, true));
+      actions.append(btnTrust);
+    }
 
     if (p.expiresAt) body.appendChild(countdown);
     body.appendChild(actions);
@@ -186,7 +205,7 @@ export function createCards(ctx) {
       badge,
       countdown: p.expiresAt ? countdown : null,
       actions,
-      buttons: [btnReject, btnAccept, btnTrust],
+      buttons: btnTrust ? [btnReject, btnAccept, btnTrust] : [btnReject, btnAccept],
       collapse,
       decided: false,
     };
@@ -597,15 +616,25 @@ export function createCards(ctx) {
     } else if (openA.length) {
       const entry = openA[0];
       const d = entry.data;
-      pendingLabel.appendChild(el('b', '', '等待你批准工具：' + d.tool));
-      if (d.reason) pendingLabel.appendChild(el('small', '', d.reason));
+      const isMemory = d.tool === 'remember';
+      pendingLabel.appendChild(el('b', '', isMemory ? '等待你确认要记住的内容' : '等待你批准工具：' + d.tool));
+      // 待办条只放得下一行：记忆直接把那句话摊出来，用户不必展开卡片才知道要记什么
+      if (isMemory) pendingLabel.appendChild(el('small', '', String((d.input && d.input.text) || '')));
+      else if (d.reason) pendingLabel.appendChild(el('small', '', d.reason));
       if (more) pendingLabel.appendChild(el('small', '', more));
       const id = d.approvalId;
-      pendingActions.append(
-        mkButton('拒绝', 'danger', () => decideApproval(id, false, false)),
-        mkButton('接受', 'ok-btn', () => decideApproval(id, true, false)),
-        mkButton(trustButtonLabel(d.trustKind, true), 'ok-btn', () => decideApproval(id, true, true))
-      );
+      if (isMemory) {
+        pendingActions.append(
+          mkButton('不记住', 'danger', () => decideApproval(id, false, false)),
+          mkButton('记住', 'primary', () => decideApproval(id, true, false))
+        );
+      } else {
+        pendingActions.append(
+          mkButton('拒绝', 'danger', () => decideApproval(id, false, false)),
+          mkButton('接受', 'ok-btn', () => decideApproval(id, true, false)),
+          mkButton(trustButtonLabel(d.trustKind, true), 'ok-btn', () => decideApproval(id, true, true))
+        );
+      }
     } else {
       const entry = openP[0];
       const d = entry.data;

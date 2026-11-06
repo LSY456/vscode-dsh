@@ -136,6 +136,10 @@ interface FromWebview {
     | 'trust.list'
     | 'trust.clear'
     | 'trust.manage'
+    /** 长期记忆：列表 / 删除单条 / 清空。三者都回一条 memory.loaded 覆盖整块列表 */
+    | 'memory.list'
+    | 'memory.delete'
+    | 'memory.clear'
     | 'balance.refresh'
     /** 批次 11-3：会话结束提示里的「回滚本次改动」按钮 */
     | 'rollback.session'
@@ -161,6 +165,8 @@ interface FromWebview {
   planMode?: boolean;
   patchId?: string;
   sessionId?: string;
+  /** 长期记忆：要删除的条目 id（来自 memory.list 的返回） */
+  memoryId?: string;
   /** 设置面板提交项；apiKey 留空表示不修改 */
   settings?: {
     apiKey?: string;
@@ -946,6 +952,50 @@ export class WebviewPanelHost {
         // 受限模式横幅的「信任此工作区」：信任由 VS Code 判定，本扩展只是把入口递过去
         await openTrustManagement();
         return;
+      case 'memory.list':
+        await this.postMemoryList();
+        return;
+      case 'memory.delete':
+        // 删除是幂等的：id 不存在也返回成功（deleted=false），面板照常刷新列表。
+        // 用户连点两次时第二次本来就不该报错。
+        try {
+          await this.daemon.client.request(METHODS.MemoryDelete, { id: msg.memoryId ?? '' });
+        } catch (err) {
+          logger.warn(`[memory] 删除失败: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        await this.postMemoryList();
+        return;
+      case 'memory.clear':
+        try {
+          await this.daemon.client.request(METHODS.MemoryClear, {});
+          void vscode.window.showInformationMessage('已清空全部长期记忆');
+        } catch (err) {
+          logger.warn(`[memory] 清空失败: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        await this.postMemoryList();
+        return;
+    }
+  }
+
+  /**
+   * 取一次长期记忆并推给面板。
+   *
+   * 打开面板、删除一条、清空之后走的都是这同一条路径 —— 列表永远由 daemon 的权威数据重建，
+   * 不在前端做增量维护（增量维护一旦漏一处，用户看到的列表就和真正生效的记忆不一致）。
+   */
+  private async postMemoryList(): Promise<void> {
+    try {
+      const result = (await this.daemon.client.request(METHODS.MemoryList, {})) as { entries?: unknown[] };
+      this.post({ kind: 'event', method: 'memory.loaded', params: { entries: result?.entries ?? [] } });
+    } catch (err) {
+      // daemon 不可用（受限模式 / 未连接）时给空列表并附原因：面板照常显示「暂无」，
+      // 但排障时能从日志里看到是"取不到"而不是"真的没有"。
+      this.post({
+        kind: 'event',
+        method: 'memory.loaded',
+        params: { entries: [], error: err instanceof Error ? err.message : String(err) },
+      });
+      logger.warn(`[memory] 读取长期记忆失败: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
