@@ -114,8 +114,10 @@ export function createStatusBar(ctx) {
     state.currentAgent = agent || '';
     const isMock = agent === 'mock';
 
-    // mock 专属入口（关键字"咒语"演示）不混在真实模型的主路径里
-    for (const node of document.querySelectorAll('[data-demo-only]')) {
+    // mock 专属入口（关键字"咒语"演示）不混在真实模型的主路径里。
+    // querySelectorAll 的静态类型只到 Element，hidden 是 HTMLElement 上的属性，故收窄一次。
+    const demoNodes = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('[data-demo-only]'));
+    for (const node of demoNodes) {
       node.hidden = !isMock;
     }
 

@@ -186,7 +186,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 
 ### P1 —— 健壮性 / 可维护性
 
-> **状态（2026-11-06 追记）**：**P1 表已全部关闭**。编号带 **✅** 的条目均已在代码中实现，证据见本节末尾「P1 状态追记」与各行的追记；唯一未被本表覆盖的后续项是 **ESLint / Prettier**（属 P1-10 的另一半，会全仓重排，已另立项）。
+> **状态（2026-11-03 追记）**：编号带 **✅** 的条目已实现，证据见本节末尾「P1 状态追记」；不带标记的是仍待办，只剩 **P1-17** 一条。
 
 | 编号 | 现状（证据） | 影响 | 建议 |
 | --- | --- | --- | --- |
@@ -199,7 +199,7 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | P1-7 ✅ | 过期挂起项只标记 `expired = true` 保留在 Map 中（`sessionManager.ts:237-246`），依赖 `end()` 才清理 | 长 idle 会话中过期项累积（轻微泄漏） | 过期后延迟 60s 清理（既保留 `respond` 返回 `-32010` 的语义，也回收内存） |
 | P1-8 ✅ | `stepCounter` 是模块级全局（`agent.ts:53`、`realAgent.ts:51`） | `PROTOCOL.md:135` 定义 `step` 为"会话内单调递增"，实际是全局递增；多会话并发时 UI 迹线的步骤号跳跃、不连续 | 计数器挂到 `Session` |
 | P1-9 ✅ | `docs` 类漂移：`SECURITY.md:7-8` 写支持 `0.3.x/0.2.x`，而 `package.json:5` 是 `0.4.0`；`CONTRIBUTING.md:28` 硬编码"244 用例" | 文档与代码不一致，削弱可信度；用例数会持续漂移 | 版本从 `shared/version.ts` 注入文档；用例数改为脚本生成或直接删除数字 |
-| P1-10 ✅ | `tsconfig.json:17` 只 include `src/**/*.ts`、`shared/**/*.ts`；`allowJs` 未开。**【2026-11-03 已完成类型门禁那一半：新增 `tsconfig.web.json`（`allowJs + checkJs + noEmit`），覆盖 `media/webview.js`、`src/webview/**/*.js`、`scripts/**/*.{js,mjs}`、`esbuild.js`；实测修掉 28 处（DOM 引用改 `$('id', HTMLInputElement)`、`Error` 挂 `code`/`httpStatus` 用 JSDoc 交叉类型、marked renderer 的 `lang?: string`）；接入 `npm run check` 与 CI 独立一步；`.vscodeignore` 的 `tsconfig.json` 改 `tsconfig*.json` 避免新配置混进 VSIX（36 文件 / 315.4 KB 不变）。ESLint / Prettier 未做 —— 会全仓重排，另立项】** | `media/webview.js`(1155 行)、`src/webview/*.js`、`scripts/*.js`、`esbuild.js` **全部在类型检查之外**，且仓库无 ESLint/vitest 配置文件 | 单独加 `tsconfig.web.json`（`allowJs + checkJs`）覆盖前端与脚本 **【已做】**；引入 ESLint + Prettier 并接入 CI **【另立项】** |
+| P1-10 ✅ | ~~`tsconfig.json:17` 只 include `src/**/*.ts`、`shared/**/*.ts`；`allowJs` 未开~~ | 原判风险：`media/webview.js`(1155 行)、`src/webview/*.js`、`scripts/*.js`、`esbuild.js` **全部在类型检查之外**。**【2026-11-03 追记：类型门禁已实现，口径见本节末尾「P1-10 追记」。ESLint / Prettier **仍未引入** —— 本行只关闭了「类型」这一半，风格这一半另立项】** | 已实施：新增 `tsconfig.web.json`（`allowJs + checkJs`，`noEmit` 只查不产出）覆盖 front/scripts；`npm run typecheck:web` 已接入 `npm run check` 与 CI。启用时修掉 28 处类型问题。**未做**：ESLint + Prettier |
 | P1-11 ✅ | ~~CI 硬化缺口（`.github/workflows/ci.yml`）：action 仅用 tag 未 pin SHA（L13/15/27）；无 `permissions:`；无 `concurrency`；无 `timeout-minutes`；无 lint 步骤；integration 每次重下 stable VSCode 无缓存（L78）；OSV 无 SARIF 上报~~ | 原判风险：供应链风险 + 卡死可跑满 6h + 反馈慢。**【2026-10-11 追记：已实现，口径见本节末尾「CI 硬化追记」。唯一没做的是 lint 步骤 —— 仓库至今没有 linter（属 P1-10），不该在这一批里顺手引入** | 已实施：pin SHA、顶层最小权限 + job 级提权、`concurrency`（仅 PR 取消在跑）、逐 job `timeout-minutes`、缓存 `.vscode-test`、OSV 改官方可复用工作流（含 SARIF 上报），并新增工作流守卫把它们锁住 |
 | P1-12 ✅ | ~~Webview 巨石单文件 + 无类型（`media/webview.js` 1155 行承载事件分发/审批/补丁/历史/设置）~~ | 原判风险：修改成本高、回归风险大。**【2026-10-11 追记：已拆分，口径见本节末尾「Webview 拆分追记」。注意拆出模块**并不**顺带解决"无类型"——`tsconfig.json` 仍只 include `src/**/*.ts`，这些 `.js` 模块依旧在 `tsc` 之外（属 P1-10）】** | 已实施：拆为 `panelCore`（共享壳）+ `statusBar` / `messages` / `cards` / `history` / `composer` / `events` 六个特性模块 + 薄入口；可变状态集中到一个 `state` 对象（闭包里的 `let` 无法跨模块共享） |
 | P1-13 ✅ | `handleEvent` 无 try/catch（`media/webview.js:1020-1026` 附近），默认分支静默吞未知事件 | 单条事件抛错即静默丢失，协议漂移被掩盖成"UI 没反应" | 包 try/catch + 上报到扩展 logger；未知事件在 debug 级别打点 |
@@ -231,12 +231,13 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 | P1-14 | ✅ 已实现 | `src/webview/messages.js#resetTurn` 首行调 `finishAssistant()`（幂等）。异常路径（上一轮既无 `message.done` 也无 `session.ended`）不再把新回答续写进旧气泡 |
 | P1-15 | ✅ 已实现 | `shared/dshDir.ts`：`.dsh` 及各子目录统一 `mkdirSync(..., { mode: 0o700 })`，生成的 `.gitignore` 文件 `0o600`；轨迹目录 0700 / 文件 0600 |
 | P1-16 | ✅ 已实现 | `src/workspaceRoot.ts#resolveWorkspaceRoot` 是唯一入口，显式声明单根语义并返回 `folderCount`；`daemonManager.ts` 在多根时 `logger.info` 说明实际作用的是第一个文件夹 |
+| P1-10 | ✅ 已实现（**只做了类型门禁，ESLint / Prettier 未做**） | 新增 `tsconfig.web.json`：`allowJs + checkJs` + `noEmit`（只查不产出），`lib` 加 DOM，覆盖 `media/webview.js`、`src/webview/**/*.js`、`scripts/**/*.{js,mjs}`、`esbuild.js`；`allowImportingTsExtensions` 让 `import '../../shared/protocol.ts'` 这种带后缀的写法合法。测试文件**暂不纳入**：`panel.test.js` 里 81 处 `.value` / `.click` 需要成片断言，属 jsdom 与 DOM 类型的固有摩擦，不是代码缺陷。启用时修的 28 处分三类：① `$()` 取 DOM 引用没有具体元素类型 → 改成 `$('id', HTMLInputElement)` 显式带构造函数（dom 表是唯一入口，改动集中）；② `marked` 渲染器参数里 `lang` 在 `Code` 上可选 → JSDoc 标 `lang?: string`；③ 给 `Error` 挂 `code` / `httpStatus` 这类自有字段 → JSDoc 交叉类型，其中 `describeHttpError` 改为 `Object.assign`（断言不进产物，产物里的 `err.httpStatus = ` 会被 checkJs 判成非法属性）。**门禁有效性实测过**：故意把 `.value` 写成 `.valuee`，报 `Property 'valuee' does not exist on type 'HTMLInputElement'. Did you mean 'value'?`。另修一处打包清单缺口：`.vscodeignore` 原来写死 `tsconfig.json`，新配置会混进 VSIX，改为 `tsconfig*.json` 后包清单仍是 36 个文件 |
 
 **仍未实现 —— 本表唯一可信的待办**：
 
-**P1 表已清空（2026-11-06）**：P1-10（类型门禁那一半）、P1-17、P1-18 均已完成，见上表各行追记。剩下的只有一件**明确另立项**的事：
+- **P1-17**：`wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger` 五个文件仍无单测。
 
-- **ESLint / Prettier**（原属 P1-10 的后半）：会全仓重排、与现有文件的换行/引号风格大面积相撞，单独一批做，不夹在功能 PR 里。仓库至今无 linter 配置。
+（P1-10 已于 2026-11-03 完成类型门禁那一半，见上表追记与本节末尾「P1-10 追记」；ESLint / Prettier 另立项。P1-18 已于 2026-11-02 完成。）
 
 ### P2 —— 体验 / 打磨 / 战略
 
@@ -435,8 +436,8 @@ npm test           → 18 个测试文件 / 244 个用例 全部通过，耗时 
 
 1. **daemon 资源治理**：会话 TTL/LRU 回收（P1-1）、过期挂起项延迟清理（P1-7）、`step` 会话内计数（P1-8）。
 2. **配置与协议正确性**：provider/baseURL 联动（P1-3）、`spawnExternal` 参数解析（P1-4）、暴露 `maxToolRounds`/`maxContextTokens`（P2-2）。
-3. **类型与门禁**：新增 `tsconfig.web.json`（`allowJs+checkJs`）覆盖 webview/scripts；引入 ESLint + Prettier 并接入 CI（P1-10）。**【2026-11-03：`tsconfig.web.json` 已落地并接入 CI；ESLint/Prettier 另立项】**
-4. **补上安全边界的单测**（P1-17）：~~把 `server.ts` 的握手判定、能力收敛、错误码映射抽为纯函数并单测~~ **【2026-10-12 已实现（前半），口径见 §4「daemon 安全边界与可观测性追记」】**；`wsClient` / `diffProvider` / `contextCapture` / `extension` / `logger` 五个文件的单测 **【2026-11-06 已补齐 79 例，见 P1-17 行追记】**。
+3. **类型与门禁**：新增 `tsconfig.web.json`（`allowJs+checkJs`）覆盖 webview/scripts **【2026-11-03 已实现，见本节末尾「P1-10 追记」】**；引入 ESLint + Prettier 并接入 CI **【仍未做】**（P1-10）。
+4. **补上安全边界的单测**（P1-17）：~~把 `server.ts` 的握手判定、能力收敛、错误码映射抽为纯函数并单测~~ **【2026-10-12 已实现（前半），口径见 §4「daemon 安全边界与可观测性追记」】**；`wsClient` 用本地 ws server 做真实连接测试 **【仍未做】**。
 5. **测试提速**：`agent.test.ts` 改用假定时器，把全套从 ~28s 压到 <5s（P1-18）。
 6. **CI 硬化**：pin SHA、`permissions`、`concurrency`、`timeout-minutes`、缓存 `.vscode-test`、OSV SARIF（P1-11）。**【2026-10-11 已实现；顺带发现并修掉 `osv-scanner-action@v1` 这个已不存在的 ref，见 §4「CI 硬化追记」】**
 7. **Webview 重构**：拆分为 6 个 ESM 模块；`handleEvent` 加错误边界；`resetTurn` 修正（P1-12/13/14）。**【2026-10-11：拆分已实现，见 §4「Webview 拆分追记」；`handleEvent` 错误边界（P1-13）与 `resetTurn` 修正（P1-14）在更早批次已修，本次拆分确认二者分别落在 `events.js` / `messages.js` 且未丢失】**

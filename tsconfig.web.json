@@ -1,0 +1,44 @@
+{
+  // Webview 与构建脚本的类型门禁（P1-10）。
+  //
+  // 为什么要单独一份：仓库主体由 tsconfig.json 负责，但它只 include src/**/*.ts 与
+  // shared/**/*.ts。media/webview.js、src/webview/*.js、scripts/*.js、esbuild.js 这些
+  // .js 文件一直不在任何类型检查里 —— 改错一个属性名不会有任何提示，只能等界面出错。
+  //
+  // 这份配置只做检查、不产出：allowJs 让 tsc 读 .js，checkJs 让它真的报错，noEmit 保证
+  // 不改动任何产物（打包由 esbuild.js 负责）。
+  //
+  // strict 暂不打开：这批代码是纯 JS，先让它进检查圈、把真实错误修掉，再逐项收紧。
+  // 一次开 strict 会淹没在几百条隐式 any 里，反而看不见真问题。
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    // webview 侧有两个模块 import 的是 '../../shared/protocol.ts' 这类带 .ts 后缀的路径
+    // （esbuild 里这么写能明确指向源文件）。tsc 默认拒绝这种写法，开这个开关才能合法检查；
+    // 它要求不产出，与本配置的 noEmit 正好一致。
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "media/webview.js",
+    "src/webview/**/*.js",
+    "src/webview/**/*.d.ts",
+    "scripts/**/*.js",
+    "scripts/**/*.mjs",
+    "esbuild.js"
+  ],
+  // 测试文件暂不纳入：panel.test.js 里对 querySelector 结果取 .value / .click 需要成片的
+  // 类型断言（81 处），属 jsdom 与 DOM 类型的固有摩擦，不是代码缺陷。先让生产代码进门禁。
+  "exclude": ["node_modules", "out", "**/*.test.js"]
+}

@@ -23,7 +23,9 @@ node_modules/vite/**
 node_modules/@vitest/**
 esbuild.js
 vitest.config.ts
-tsconfig.json
+# 通配写法：以后再加 tsconfig.*.json（如 tsconfig.web.json）不会再漏进包里。
+# 曾因只写死 tsconfig.json，让新增的 tsconfig.web.json 混进清单（P1-10）。
+tsconfig*.json
 **/*.map
 .gitignore
 .editorconfig

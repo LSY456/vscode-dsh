@@ -7,6 +7,13 @@
 
 ### 新增
 
+- **webview 与构建脚本纳入类型检查（`npm run typecheck:web`）**：`tsconfig.json` 只覆盖
+  `src/**/*.ts` 与 `shared/**/*.ts`，而 `media/webview.js`、`src/webview/*.js`、`scripts/*.js`、
+  `esbuild.js` 这些纯 JS 一直不在任何检查里 —— 把 `fileInput.value` 写成 `.valuee` 不会有任何提示，
+  只能等界面失灵才发现。新增 `tsconfig.web.json`（`allowJs` + `checkJs`，只检查不产出），
+  CI 与 `npm run check` 都已接入。启用时修掉 28 处类型问题，主要是三类：取 DOM 引用时没有具体
+  元素类型（`.value` / `.files` 访问不到）、marked 渲染器的参数签名、以及给 `Error` 挂
+  `code` / `httpStatus` 这类自有字段。
 - **单轮工具调用上限（宿主侧硬约束）**：模型一轮里要几十个工具调用时，宿主此前照单全收 ——
   串行执行几十次、回灌几十条结果，一次就把上下文吃到只剩 system + user，那一轮它丢掉了
   全部调研成果。现在只执行前 `dsh.agent.maxToolCallsPerRound` 个（缺省 8），超出的**不执行**，

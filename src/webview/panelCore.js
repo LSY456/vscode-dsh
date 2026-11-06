@@ -14,7 +14,18 @@
  */
 /* global acquireVsCodeApi */
 
-const $ = (id) => document.getElementById(id);
+/**
+ * 取 DOM 引用。省略第二个参数时按 HTMLElement 处理 —— 够用于 textContent / hidden / classList；
+ * 要访问 .value、.files 这类**只有子类型才有**的属性，就必须传构造函数，
+ * 例如 $('file-input', HTMLInputElement)。这样类型检查能发现"取错了元素"，
+ * 而不是把每个引用都放宽成 any 换个清净。
+ *
+ * @template {HTMLElement} T
+ * @param {string} id 元素 id
+ * @param {new () => T} [type] 期望的元素类型
+ * @returns {T | null} 找不到时为 null（与 getElementById 一致，调用处本来就在判空）
+ */
+const $ = (id, type) => /** @type {any} */ (document.getElementById(id));
 
 export function createPanel() {
   const vscode = acquireVsCodeApi();
@@ -32,12 +43,15 @@ export function createPanel() {
     agentModeEl: $('agent-mode'),
     balanceEl: $('balance-chip'),
     metaBar: $('meta-bar'),
-    inputEl: $('input'),
+    // 输入框与文件选择：下面这些引用要访问 .value / .files / .disabled，
+    // 它们只在具体子类型上存在，所以显式带上构造函数；只用到 hidden / textContent 的
+    // 元素不传类型，保持 HTMLElement 即可。
+    inputEl: $('input', HTMLTextAreaElement),
     btnSend: $('btn-send'),
     btnCancel: $('btn-cancel'),
     composerBox: $('composer-box'),
     btnAttach: $('btn-attach'),
-    fileInput: $('file-input'),
+    fileInput: $('file-input', HTMLInputElement),
     btnNew: $('btn-new'),
     btnJump: $('btn-jump'),
     composerHint: $('composer-hint'),
@@ -51,17 +65,17 @@ export function createPanel() {
     btnSettings: $('btn-settings'),
     settingsPanel: $('settings-panel'),
     settingsForm: $('settings-form'),
-    inpApiKey: $('inp-apikey'),
-    inpModel: $('inp-model'),
+    inpApiKey: $('inp-apikey', HTMLInputElement),
+    inpModel: $('inp-model', HTMLInputElement),
     modelHintEl: $('model-catalog-hint'),
-    inpBaseURL: $('inp-baseurl'),
-    inpProvider: $('inp-provider'),
-    inpPreset: $('inp-preset'),
-    inpMaxRounds: $('inp-max-rounds'),
+    inpBaseURL: $('inp-baseurl', HTMLInputElement),
+    inpProvider: $('inp-provider', HTMLInputElement),
+    inpPreset: $('inp-preset', HTMLInputElement),
+    inpMaxRounds: $('inp-max-rounds', HTMLInputElement),
     // 上下文预算 / 输出上限已从设置面板撤下：它们是实现细节，用户没有判断依据
     // （实机测试反馈：不知道该填多少）。配置项本身保留，仍可在 VS Code 设置里改。
-    inpTemperature: $('inp-temperature'),
-    btnSettingsRestart: $('btn-settings-restart'),
+    inpTemperature: $('inp-temperature', HTMLInputElement),
+    btnSettingsRestart: $('btn-settings-restart', HTMLButtonElement),
     btnSettingsClose: $('btn-settings-close'),
     settingsMsg: $('settings-msg'),
     trustListEl: $('trust-list'),

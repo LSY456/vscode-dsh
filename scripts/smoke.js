@@ -95,7 +95,10 @@ function makeRpc(ws) {
       if (p) {
         pending.delete(msg.id);
         if (msg.error) {
-          const err = new Error(msg.error.message + ' (code ' + msg.error.code + ')');
+          const base = new Error(msg.error.message + ' (code ' + msg.error.code + ')');
+          // Error 本身没有 code 字段，这里挂上去是为了失败时能直接看出协议错误码；
+          // 断言一次类型，免得纯 JS 检查把它读成"给 Error 加了不存在的属性"。
+          const err = /** @type {Error & { code?: number | string }} */ (base);
           err.code = msg.error.code;
           p.reject(err);
         } else {
