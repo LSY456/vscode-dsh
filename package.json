@@ -361,6 +361,11 @@
           "minimum": 0,
           "description": "一场会话累计最多消耗多少 token（约数，含每轮重复发送的历史）。达到上限后不再调用工具，只让模型基于已有信息给出结论。设 0 表示不限制。注意这是本地估算，用来止损，不是账单。"
         },
+        "dsh.memory.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "长期记忆：让 Agent 记住你明确要求过的偏好（如「本项目用 pnpm」「不要用 tab 缩进」），之后每场会话都会带上。每条都由你点「记住」才写入，存于工作区 .dsh/memory.json，可在设置面板随时查看和删除。关掉后不再读取也不再新增。"
+        },
         "dsh.context.gitStatus": {
           "type": "boolean",
           "default": true,

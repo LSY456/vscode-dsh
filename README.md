@@ -43,6 +43,7 @@
 | 🖼️ **图片也能直接问** | 报错截图直接粘贴（Ctrl+V）/ 拖进输入框 / 点图片按钮选择，图片作为**独立内容块**发给模型（OpenAI 兼容 `image_url` / Anthropic `source.base64`），文本侧保留 `[图片 N]` 位置标记；限额在扩展与 daemon **各校验一次**，不合规**整条拒绝**而不是静默少发一张 |
 | 🛡️ **改动可控** | 高危工具调用必须过**审批卡**（Human-in-the-Loop）；文件修改必须先看**原生 Diff 并排视图**再决定落盘——把"AI 盲改"变成"AI 提议、人拍板" |
 | 📋 **计划模式** | 可以要求 Agent **先出方案再动手**：调研阶段只读、给出一份可审阅的计划（目标 / 步骤 / 涉及文件 / 风险），**批准后才进入执行**。想清楚再改，避免"边想边改"把仓库改花 |
+| 📌 **记得住你的偏好** | 你说过的长期约定（「本项目用 pnpm」「不要用 tab 缩进」）不必每场会话重复：Agent 可提出「记住这条」，**你点确认后**才写进工作区 `.dsh/memory.json`，之后每场会话自动带上。不做自动抽取，设置面板里逐条可见、可删、可一键清空 |
 | 🔒 **安全边界干净** | 工具在独立 daemon 进程执行，仅监听 127.0.0.1 随机端口，WS 握手必须带一次性 Bearer token、拒绝带浏览器 Origin 的连接 |
 | 🔌 **协议化可插拔** | 一份明确 JSON-RPC 契约（方法/事件见 [PROTOCOL.md](PROTOCOL.md)），前端可换（VSCode / JetBrains / CLI），后端可换（内置内核 / 第三方 daemon / 自研 Agent）——而且**有两个可运行的实现**（Node + [Python](examples/python-daemon/dsh_daemon.py)）来证明它，不是纸面承诺 |
 | 📜 **全程可追溯** | daemon 内部轨迹以 `trajectory.record` 事件流投影到 UI 的"执行迹线"面板，步骤级审计、回放与失败定位 |
@@ -184,6 +185,7 @@ npm run smoke:protocol      # 协议「第二实现」：用 Python 参考 daemo
 | `dsh.agent.maxWriteFailures` | `3` | 写入类工具**连续**失败几次就停止尝试（1–20）；只数 `write_file` / `apply_patch` 的系统侧失败，一次成功即清零 |
 | `dsh.agent.maxToolCallsPerRound` | `8` | 单轮最多执行几个工具调用（1–50）；超出的不执行，但会告诉模型「这一批没执行」，让它下一轮挑重点 |
 | `dsh.agent.maxSessionTokens` | `524288` | 一场会话累计消耗的 token 上限（0 = 不限制）；达到后不再调用工具，只让模型基于已有信息给结论。本地估算，用于止损，不是账单 |
+| `dsh.memory.enabled` | `true` | 长期记忆开关：关掉后不再读取已有记忆，也不再向模型提供 `remember` 工具（已存条目仍在 `.dsh/memory.json`，重开即恢复）。记忆为空时系统提示词一字不加 |
 | `dsh.context.gitStatus` | `true` | 附带 git status（失败静默跳过） |
 | `dsh.context.maxFileBytes` | `200000` | 附件内联内容阈值；超出改为 `contentOmitted` 按需 `file.read` |
 | `dsh.diff.autoOpen` | `true` | 补丁到达时自动打开 Diff 视图 |
@@ -224,6 +226,7 @@ vscode-dsh/
 │       ├── tools.ts        # 真实工具沙箱（只读搜索/写入 Diff 审查/bash 策略门控）
 │       ├── toolcall.ts     # 模型工具调用 fenced 块协议
 │       ├── trust.ts        # 信任记忆（免审批白名单，.dsh/trust.json）
+│       ├── memoryStore.ts  # 长期记忆（跨会话偏好，.dsh/memory.json；原子写 + 三处上限）
 │       ├── sandbox.ts      # 命令执行沙箱（bubblewrap 命名空间 / 应用层兜底，可插拔后端）
 │       ├── logFile.ts      # daemon 日志落盘（.dsh/logs/daemon.log，轮转 + 0600）
 │       └── trajectoryStore.ts # 轨迹持久化（.dsh/trajectory/*.jsonl）
@@ -259,8 +262,13 @@ vscode-dsh/
   而不是回落 `process.cwd()` —— 后者会让"工作区"变成扩展宿主的工作目录，端口文件、`.dsh/` 与路径护栏
   的根全跟着跑偏。工作区根由 `src/workspaceRoot.ts` 单点解析（多根只取第一个并在日志中说明）。
 - **`.dsh/` 自守（P0-3）**：首次创建 `.dsh/` 时自动写入 `.gitignore`（内容 `*`）—— 目录里是对话全文
-  （`history.json`）、工具输入输出（`trajectory/*.jsonl`）、日志与信任规则，不该出现在你的 `git status`
-  里，更不该被 `git add -A` 带进仓库。已存在的 `.gitignore` 不会被覆盖。
+  （`history.json`）、工具输入输出（`trajectory/*.jsonl`）、日志、信任规则与长期记忆，不该出现在你的
+  `git status` 里，更不该被 `git add -A` 带进仓库。已存在的 `.gitignore` 不会被覆盖。
+- **长期记忆写入必过审批**：`remember` 是**唯一**能改记忆的入口，且每次都要用户点「记住」——
+  daemon 不做自动抽取（自动写进去的偏好若错了，用户根本不知道它正在影响后续回答）。落盘
+  `.dsh/memory.json`（`0600`、临时文件 + rename 原子写）；内容压成**单行**再存，避免多行文本在
+  系统提示词里伪造出新的项目符号。条数（40）、单条长度（200 字）、进提示词的字符预算（2000）三处封顶，
+  超限**明确拒绝或明说还有多少条未展开**，不静默截断。
 - **端口**：daemon 仅监听 `127.0.0.1` 随机端口；端口经 stdout/端口文件上报，不暴露公网；
   对非 WebSocket 升级请求返回 **404 空响应**（不回 426，那等于告诉探测者"这里有个 WS 端点"）。
 - **回收陈旧 daemon 前核对进程身份**：pid 取自 `<workspace>/.dsh/daemon.json` —— 一个本机任意进程

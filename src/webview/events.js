@@ -151,6 +151,10 @@ export function createEvents(ctx) {
       case 'trust.loaded':
         api.renderTrust(params && params.rules);
         break;
+      case 'memory.loaded':
+        // 长期记忆（跨会话偏好）：设置面板里的列表，来自 daemon 的 memory.list
+        api.renderMemory(params && params.entries);
+        break;
       case 'daemon.restarted':
         dom.btnSettingsRestart.disabled = false;
         dom.settingsMsg.textContent = 'daemon 已重启。';

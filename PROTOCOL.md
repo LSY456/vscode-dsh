@@ -39,7 +39,7 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 
 | method | params | result |
 | --- | --- | --- |
-| `initialize` | `{ workspaceRoot, apiKey?, preset?, model?, capabilities?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities, sessionId?, agent, agentReason? }` |
+| `initialize` | `{ workspaceRoot, apiKey?, preset?, model?, capabilities?, memoryEnabled?, client: {name, version} }` | `{ daemonVersion, protocolVersion, capabilities, sessionId?, agent, agentReason? }` |
 | `session.create` | `{ id?, title? }` | `{ sessionId, title? }` |
 | `session.send` | `{ sessionId?, prompt, attachments?, planMode? }` | `{ sessionId, accepted }` |
 | `session.cancel` | `{ sessionId }` | `{ canceled }` |
@@ -50,6 +50,9 @@ VSCode 扩展与 dsh Agent Daemon 之间通过 **JSON-RPC 2.0 over WebSocket** �
 | `file.patch.respond` | `{ sessionId, patchId, accept, content?, applyInEditor? }` | `{ ok }` |
 | `file.read` | `{ path, maxBytes? }` | `{ content, truncated, size, dirty? }` |
 | `workspace.syncDirty` | `{ files: [{ path, content? }] }` | `{ ok, count }` |
+| `memory.list` | `{}` | `{ entries: [{ id, text, createdAt }] }` |
+| `memory.delete` | `{ id }` | `{ ok, deleted }`（`deleted:false` = 该 id 本来就不存在） |
+| `memory.clear` | `{}` | `{ ok }` |
 | `ping` | `{}` | `{ pong }` |
 | `shutdown` | `{}` | `{ bye }` |
 
@@ -111,6 +114,26 @@ daemon 是独立进程，看不到编辑器的内存文档，读取只能落磁�
   以 `reason: 'error'` 收尾。
 - 该能力经 `initialize` 返回的 `capabilities.plan` 声明（可选，老客户端忽略即可）。
 - 审批迹线以 `trajectory.record { kind: 'plan' }` 记录（`plan.request` 与 `plan.respond` 各一条）。
+
+### 长期记忆（`remember` 工具 + `memory.*`）
+
+跨会话保留用户明确要求记住的偏好（「本项目用 pnpm」）。它与会话历史的分工：**历史是事实（说过什么），
+记忆是结论（以后要怎么做）**。
+
+- 写入只有一条路：模型发起 `remember { text }` → daemon 发 `approval.request { tool: 'remember' }`
+  （`risk: 'low'`，**不带 `trustKind`**：记忆没有"同类不再问"的粒度，每条都要单独看过）→
+  用户 `approval.respond { approved: true }` → 落盘。**daemon 不做自动抽取。**
+- 计划阶段不提供 `remember`（`capabilities` 之外还受"批准前不改动任何东西"约束，写记忆也是改动）。
+- 上限三处：条目数 40、单条 200 字、进系统提示词的字符预算 2000。超限**显式拒绝或明说还有多少条
+  未展开**，不静默截断、不淘汰最旧一条。内容压成单行后存储（多行能在提示词里伪造出新的项目符号）。
+- 存储：`<workspace>/.dsh/memory.json`（`0600`，临时文件 + rename 原子写）。客户端**只经 `memory.*`
+  访问**，不要直读该文件 —— 形状校验与清洗都在 daemon 侧。
+- 落盘失败（目录不可写、磁盘满）**不等于写入失败**：条目已在本会话生效，`remember` 的工具结果会把
+  「写入 `.dsh/memory.json` 失败，重启后不会保留」原样回灌给模型。任何一环都不允许只说"已记住"。
+- 开关：`initialize.memoryEnabled`（缺省开）。关掉后 daemon 既不注入提示词段落，也不提供
+  `remember` 工具定义，`memory.*` 仍可用来查看/清理已有条目。
+- 该能力经 `initialize` 返回的 `capabilities.memory` 声明（可选，老客户端忽略即可）；
+  daemon 不声明时客户端应把 `memory.*` 的 `-32601 MethodNotFound` 当作"没有这个功能"，而非错误。
 
 ### `model`（真实模型接入）
 

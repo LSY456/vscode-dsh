@@ -55,6 +55,9 @@ export const METHODS = {
   WorkspaceSyncDirty: 'workspace.syncDirty',
   TrustList: 'trust.list',
   TrustClear: 'trust.clear',
+  MemoryList: 'memory.list',
+  MemoryDelete: 'memory.delete',
+  MemoryClear: 'memory.clear',
   TrajectoryList: 'trajectory.list',
   Ping: 'ping',
   Shutdown: 'shutdown',
@@ -240,6 +243,14 @@ export interface InitializeParams {
     name: string;
     version: string;
   };
+  /**
+   * 长期记忆开关。缺省（`undefined`）= **开启**。
+   *
+   * 为什么允许缺省开启：缺省行为不变 —— 记忆为空时系统提示词一个字都不加，
+   * 唯一的差别是工具清单里多一个 `remember` 定义，而它每次都要用户点「记住」才落盘。
+   * 反过来，默认关掉等于"这个功能永远没人用"，用户不会为了一件不知道存在的事去翻设置。
+   */
+  memoryEnabled?: boolean;
 }
 
 export interface InitializeResult {
@@ -268,6 +279,13 @@ export interface InitializeResult {
      * "发图给你收不收"，而不是去猜 `protocolVersion`（后者保持 1.0 不变，因为这些都是可选字段）。
      */
     image?: boolean;
+    /**
+     * 长期记忆（可选，向后兼容）：支持 `remember` 工具与 `memory.*` 方法。
+     *
+     * 与 `image` 同理，这个位是留给第三方客户端的：它们与 daemon 版本各自演进，
+     * 需要明确的"给你一条偏好你能不能存下来"，而不是去猜 `protocolVersion`。
+     */
+    memory?: boolean;
   };
   /** daemon 为本次连接分配/复用的默认会话 id */
   sessionId?: string;
@@ -567,6 +585,66 @@ export interface TrustRuleData {
 
 export interface TrustListResult {
   rules: TrustRuleData[];
+}
+
+// ---------------------------------------------------------------------------
+// 长期记忆（跨会话保留的用户偏好）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一条长期记忆。
+ *
+ * 与「会话历史」是两件事：历史是**事实记录**（说过什么），记忆是**结论**（以后要怎么做）。
+ * 历史可以很长、可以回放；记忆必须短、必须逐条可读可删 —— 它每轮都随系统提示词重发。
+ */
+export interface MemoryEntryData {
+  id: string;
+  /** 单行短句（已清洗：压掉换行与连续空白、截到 `MAX_MEMORY_TEXT`） */
+  text: string;
+  createdAt: number;
+}
+
+/**
+ * 记忆条数上限。
+ *
+ * 40 条不是实测值，是按「一个项目的编码约定有多少条」取的量级：命名/缩进/包管理器/
+ * 框架偏好/禁用的命令……正常项目十几条就饱和。超上限时**拒绝写入并说明**，
+ * 不淘汰最旧的一条 —— 静默删掉用户要求记住的东西是不可接受的。
+ */
+export const MAX_MEMORY_ENTRIES = 40;
+
+/** 单条记忆的字符上限。超过就截断（这是唯一一处截断：半句话仍能读懂，不写空反而更糟）。 */
+export const MAX_MEMORY_TEXT = 200;
+
+/**
+ * 整段记忆进系统提示词的字符预算。
+ *
+ * 系统提示词是每轮重发的固定成本，而记忆是其中唯一会长期增长的部分。2000 字符约 1000–1500
+ * token（中文按 1 token/字估），相对 48K 的上下文预算仍是可控的固定开销。
+ * 超预算时只展开**最新**的若干条，并在末尾明说还有多少条未展开。
+ */
+export const MEMORY_PROMPT_MAX_CHARS = 2000;
+
+/**
+ * 长期记忆的缺省开关（开）。
+ *
+ * 与 `DEFAULT_MAX_TOOL_ROUNDS` 同一套做法：缺省值放在协议里由两侧共用，
+ * `package.json` 的配置项缺省与它保持一致。
+ */
+export const DEFAULT_MEMORY_ENABLED = true;
+
+export interface MemoryListResult {
+  entries: MemoryEntryData[];
+}
+
+export interface MemoryDeleteParams {
+  id: string;
+}
+
+export interface MemoryDeleteResult {
+  ok: boolean;
+  /** false = 该 id 本来就不存在（区分"删掉了"与"早就没了"） */
+  deleted: boolean;
 }
 
 // ---------------------------------------------------------------------------

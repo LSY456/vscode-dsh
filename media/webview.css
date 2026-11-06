@@ -1327,6 +1327,17 @@ button.icon-btn.has-badge {
   flex: 0 0 auto;
   font-size: var(--dsh-fs-xs);
 }
+/*
+ * 长期记忆条目：与信任规则共用 .trust-row 的行布局，但正文是**散文**而不是命令 ——
+ * 等宽字体 + 单行省略会让「不要用 tab 缩进」看起来像一条命令，也读不全。
+ */
+.memory-text {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--dsh-fs-md);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 .trust-empty {
   font-size: var(--dsh-fs-md);
   padding: 6px 0;

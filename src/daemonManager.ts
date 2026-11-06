@@ -22,6 +22,7 @@ import {
   DEFAULT_MAX_TOOL_CALLS_PER_ROUND,
   DEFAULT_MAX_TOOL_ROUNDS,
   DEFAULT_MAX_WRITE_FAILURES,
+  DEFAULT_MEMORY_ENABLED,
   ERROR_CODES,
   InitializeResult,
   METHODS,
@@ -374,6 +375,9 @@ export class DaemonManager {
           name: 'vscode-dsh',
           version: VSD_DSH_VERSION,
         },
+        // 长期记忆开关（跨会话的用户偏好）。与其它 Agent 预算项不同，这个**进面板**：
+        // 用户需要知道"它会不会记住我说过的话"，也需要在不想要时一键关掉。
+        memoryEnabled: cfg.get<boolean>('memory.enabled', DEFAULT_MEMORY_ENABLED),
       });
 
       // 会话续跑（P1.2）：同一 daemon 进程内断线重连，恢复会话状态与未消费事件

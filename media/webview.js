@@ -67,6 +67,7 @@ import { createEvents } from '../src/webview/events.js';
     inpTemperature,
     settingsMsg,
     btnTrustClear,
+    btnMemoryClear,
     btnPlanMode,
     suggestEl,
   } = dom;
@@ -188,6 +189,10 @@ import { createEvents } from '../src/webview/events.js';
   btnTrustClear.addEventListener('click', () => {
     vscode.postMessage({ kind: 'trust.clear' });
     api.renderTrust([]); // 乐观清空；扩展回传 trust.loaded 再同步
+  });
+  btnMemoryClear.addEventListener('click', () => {
+    vscode.postMessage({ kind: 'memory.clear' });
+    api.renderMemory([]); // 同样乐观清空，扩展回传 memory.loaded 再同步
   });
 
   inputEl.addEventListener('input', api.autosizeInput);

@@ -1820,3 +1820,87 @@ describe('结构化轨迹（P2-8）', () => {
     expect(line.querySelector('.traj-detail').textContent).toContain('策略拒绝');
   });
 });
+
+// ---------------------------------------------------------------------------
+// 长期记忆：审批卡与设置面板列表
+// ---------------------------------------------------------------------------
+
+describe('长期记忆', () => {
+  const css = readFileSync(path.join(repoRoot, 'media', 'webview.css'), 'utf8');
+  const memoryApproval = (id) => ({
+    approvalId: id,
+    tool: 'remember',
+    input: { text: '本项目禁用 npm，一律用 pnpm' },
+    risk: 'low',
+    reason: '模型希望把这条内容记入长期记忆',
+  });
+
+  it('审批卡换成「建议记住」形态，且没有「记住同类」按钮', () => {
+    emitRaw({ kind: 'session.reset', sessionId: 'sess_memory', reason: 'new' });
+    emitEvent('approval.request', memoryApproval('ap_memory'));
+
+    const card = [...document.querySelectorAll('.card.approval')].at(-1);
+    expect(card.querySelector('.card-title').textContent).toContain('建议记住');
+    // 沿用「⚠ 工具审批」会让用户以为要批准一条命令
+    expect(card.textContent).not.toContain('工具审批');
+    // 正文就是那句话本身，不套 JSON
+    expect(card.querySelector('.code-block').textContent).toBe('本项目禁用 npm，一律用 pnpm');
+    const labels = [...card.querySelectorAll('.card-actions button')].map((b) => b.textContent);
+    expect(labels).toEqual(['不记住', '记住']);
+  });
+
+  it('待办条把要记的内容摊出来，按钮是「不记住 / 记住」', () => {
+    // 与卡片同一时刻生成（addApprovalCard 末尾调 updatePendingBar）
+    expect(document.getElementById('pending-bar').hidden).toBe(false);
+    expect(document.getElementById('pending-label').textContent).toContain('本项目禁用 npm');
+    expect(pendingButton('不记住')).toBeTruthy();
+    expect(pendingButton('记住')).toBeTruthy();
+    // 记忆没有"同类不再问"的粒度：条上不该出现带 trust 的第三个按钮
+    expect(pendingButton('记住同类')).toBeUndefined();
+  });
+
+  it('点「记住」回传 approval.respond 且不带 trust，徽标写「已记住」', () => {
+    pendingButton('记住').click();
+    const msg = lastMessageOfKind('approval.respond');
+    expect(msg.approvalId).toBe('ap_memory');
+    expect(msg.approved).toBe(true);
+    expect(msg.trust).toBeUndefined();
+
+    const badge = [...document.querySelectorAll('.card.approval .badge')].at(-1);
+    expect(badge.textContent).toBe('已记住');
+  });
+
+  it('打开设置面板时向扩展请求长期记忆', () => {
+    // 先确保面板是关的：按钮是切换语义，开着再点会关掉
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.getElementById('btn-settings').click();
+    expect(posted.some((m) => m.kind === 'memory.list')).toBe(true);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  });
+
+  it('设置面板逐条渲染，删除按钮回传 memory.delete', () => {
+    emitEvent('memory.loaded', {
+      entries: [
+        { id: 'mem_1', text: '缩进用 2 空格', createdAt: 1700000000000 },
+        { id: 'mem_2', text: '提交走新分支', createdAt: 1700000001000 },
+      ],
+    });
+    const rows = document.querySelectorAll('#memory-list .trust-row');
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain('缩进用 2 空格');
+    rows[0].querySelector('button').click();
+    expect(lastMessageOfKind('memory.delete').memoryId).toBe('mem_1');
+  });
+
+  it('空列表给出可理解的空态', () => {
+    emitEvent('memory.loaded', { entries: [] });
+    expect(document.getElementById('memory-list').textContent).toContain('暂无长期记忆');
+  });
+
+  it('DOM ↔ CSS 契约：记忆正文是可任意断行的散文，不是等宽单行', () => {
+    // 用 .trust-pattern 的样式渲染记忆，会让「不要用 tab 缩进」看起来像一条命令、
+    // 且长句被省略号截断 —— 恰恰是最容易出歧义的部分看不见。
+    expect(css).toMatch(/\.memory-text[ \t]*\{[^}]*min-width:[ \t]*0/);
+    expect(css).toMatch(/\.memory-text[ \t]*\{[^}]*overflow-wrap:[ \t]*anywhere/);
+  });
+});

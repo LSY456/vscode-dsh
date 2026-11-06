@@ -80,6 +80,8 @@ export function createPanel() {
     settingsMsg: $('settings-msg'),
     trustListEl: $('trust-list'),
     btnTrustClear: $('btn-trust-clear'),
+    memoryListEl: $('memory-list'),
+    btnMemoryClear: $('btn-memory-clear'),
     pendingBar: $('pending-bar'),
     pendingLabel: $('pending-label'),
     pendingActions: $('pending-actions'),

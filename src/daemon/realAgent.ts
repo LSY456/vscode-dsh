@@ -231,6 +231,33 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
 ];
 
+/**
+ * 长期记忆工具。**故意不放进 `TOOL_DEFINITIONS`**：
+ * 那个数组同时是「全部工具」与「计划模式的只读子集」的来源，把 `remember` 塞进去会让它
+ * 自动出现在计划阶段的工具清单里 —— 而计划模式的承诺是"批准前不改动任何东西"，
+ * 写 `.dsh/memory.json` 也是改动。
+ *
+ * 只在这个连接确实提供记忆层时才拼进工具清单（见 runRealAgent）。
+ */
+const REMEMBER_TOOL: ToolDefinition = {
+  name: 'remember',
+  description:
+    '把一条**跨会话仍然成立**的用户偏好或项目约定记入长期记忆（写入 .dsh/memory.json，需用户确认）。' +
+    '只在用户明确要求记住、或明确表达了一条长期约束时调用；一次只记一条，用一句话写清结论。' +
+    '临时任务细节、当前文件的实现细节、能从代码里直接读到的内容都不要记 —— 记忆每轮都会重发，' +
+    '多记一条就是给之后每一场会话增加固定开销。',
+  parameters: {
+    type: 'object',
+    properties: {
+      text: {
+        type: 'string',
+        description: '一句话说明要记住什么（如「本项目禁用 npm，一律用 pnpm」；不要换行，不超过 200 字）',
+      },
+    },
+    required: ['text'],
+  },
+};
+
 /** 只读工具的定义子集（计划模式的 tools 参数）。见 `planMode.ts` 的 `READONLY_TOOL_NAMES`。 */
 const READONLY_TOOL_DEFINITIONS: ToolDefinition[] = TOOL_DEFINITIONS.filter((t) =>
   READONLY_TOOL_NAMES.includes(t.name)
@@ -324,7 +351,33 @@ export async function runRealAgent(
   ctx.notify(EVENTS.SessionStarted, { sessionId: ctx.sessionId, title });
   trajectory('system', `session 开始（real agent）：${prompt.slice(0, 80)}`);
 
-  const messages: ChatMessage[] = buildMessages(prompt, safeAttachments);
+  /**
+   * 长期记忆段落（没有记忆 / 功能关闭时为空串）。
+   *
+   * 拼在**系统提示词尾部**而不是作为一条独立消息：`messages[0]` 是唯一永不被裁剪的位置
+   * （见 `dropOldestUnits`，它从索引 2 开始丢），而记忆恰恰必须在每一轮都在场；
+   * 另插一条 system 消息还会打破 Anthropic 侧的 `[2]=assistant` 结构守卫。
+   */
+  const memorySection = ctx.getMemorySection?.() ?? '';
+  const baseSystem = memorySection ? `${SYSTEM_PROMPT}\n\n${memorySection}` : SYSTEM_PROMPT;
+
+  const messages: ChatMessage[] = buildMessages(prompt, safeAttachments, baseSystem);
+
+  /**
+   * 本场会话的工具清单。
+   *
+   * `remember` 只在确实提供记忆层时才出现：没有落盘实现却给出工具定义，
+   * 模型会反复尝试一件做不到的事，用户看到的是"它老想记点什么，但什么也没发生"。
+   */
+  const toolDefinitions = typeof ctx.saveMemory === 'function'
+    ? [...TOOL_DEFINITIONS, REMEMBER_TOOL]
+    : TOOL_DEFINITIONS;
+
+  if (memorySection) {
+    // 记忆会静默影响每一句回答，迹线是唯一能事后回答"它当时为什么这么写"的地方
+    const count = memorySection.split('\n').filter((line) => line.startsWith('- ')).length;
+    trajectory('system', `长期记忆：已注入 ${count} 条（见系统提示词末尾）`);
+  }
   const maxContextTokens = config.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS;
   // 批次 11-2：写入类工具连续失败阈值。钳到 >=1 —— 配成 0 或负数等于"第一次失败前就停"，
   // 那不是用户想要的语义（想要"一次都不许失败"应该配 1）。
@@ -564,7 +617,9 @@ export async function runRealAgent(
    */
   async function runPlanPhase(): Promise<PlanPhaseOutcome> {
     const originalSystem = messages[0];
-    messages[0] = { role: 'system', content: `${SYSTEM_PROMPT}\n\n${PLAN_SYSTEM_APPENDIX}` };
+    // 用 baseSystem 而不是 SYSTEM_PROMPT：否则长期记忆会在计划阶段整段消失 ——
+    // 而"用户要求过什么"恰恰是调研阶段最该遵守的东西。
+    messages[0] = { role: 'system', content: `${baseSystem}\n\n${PLAN_SYSTEM_APPENDIX}` };
     let plan = '';
     let failure: PlanPhaseOutcome | null = null;
     try {
@@ -768,7 +823,7 @@ export async function runRealAgent(
     fenceFilter = createToolCallFenceFilter();
 
     try {
-      const result = await sendModelRequest('', TOOL_DEFINITIONS);
+      const result = await sendModelRequest('', toolDefinitions);
       reasoning = result.reasoning;
       content = result.content;
       nativeToolCalls = result.toolCalls;
@@ -1161,6 +1216,75 @@ async function dispatchTool(
     }
   }
 
+  // ---- 长期记忆：remember（写入前必须由用户确认）
+  //
+  // 为什么不自动落盘：记忆会长期影响之后每一场会话，而模型判断"什么值得记"经常是错的
+  // （把一次性的任务要求当成长期约定）。让用户点头的成本只有一次点击，收益是
+  // "记忆里没有一条是我不认识的东西"。
+  if (tool === 'remember') {
+    if (!toolAllowed(caps, 'remember')) {
+      trajectory('tool', 'remember 被禁用', { tool, ok: false, durationMs: 0, errorKind: 'tool-disabled' });
+      return { text: disabledTool(ctx, sessionId, caps, 'remember'), ok: false, errorKind: 'tool-disabled' };
+    }
+    if (!ctx.saveMemory) {
+      // 工具清单里本来就不会出现它（见 toolDefinitions），这里是协议直连伪造调用的兜底
+      return { text: '当前会话不提供长期记忆，未写入。', ok: false, errorKind: 'tool-disabled' };
+    }
+    const text = String(input.text ?? '');
+    ctx.notify(EVENTS.ToolStarted, { sessionId, tool, input });
+    trajectory('tool', `remember ${JSON.stringify({ text })}`, { tool });
+
+    const memoryApprovalId = `approval_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const memoryApproval: EventApprovalRequest = {
+      sessionId,
+      approvalId: memoryApprovalId,
+      tool: 'remember',
+      input: { text },
+      risk: 'low',
+      reason: '模型希望把这条内容记入长期记忆：确认后它会写进 .dsh/memory.json，之后每场会话开始都带上。',
+      // 刻意不给 trustKind：记忆没有"同类不再问"的粒度，每一条都必须单独看过
+    };
+    ctx.notify(EVENTS.ApprovalRequest, memoryApproval);
+    trajectory('approval', 'approval.request remember', { tool });
+
+    const memoryApproved = await ctx.waitForUser('approval', memoryApproval);
+    trajectory('approval', `approval.respond ${memoryApproved ? 'approved' : 'rejected'}`, {
+      tool,
+      ok: memoryApproved,
+      durationMs: Date.now() - start,
+      errorKind: memoryApproved ? undefined : 'approval-denied',
+    });
+    if (!memoryApproved) {
+      const rejected = '用户没有同意记住这条内容，未写入。';
+      ctx.notify(EVENTS.ToolExecuted, {
+        sessionId,
+        tool,
+        ok: false,
+        output: rejected,
+        durationMs: Date.now() - start,
+      });
+      return { text: rejected + '不要把同一条内容再提一次。', ok: false, errorKind: 'approval-denied' };
+    }
+
+    const saved = ctx.saveMemory(text);
+    ctx.notify(EVENTS.ToolExecuted, {
+      sessionId,
+      tool,
+      ok: saved.ok,
+      output: saved.message,
+      durationMs: Date.now() - start,
+    });
+    trajectory('tool', `remember ${saved.ok ? '已写入' : '未写入'}：${saved.message}`, {
+      tool,
+      ok: saved.ok,
+      durationMs: Date.now() - start,
+      errorKind: saved.ok ? undefined : 'write-failed',
+    });
+    // remember 不在 WRITE_TOOLS 里：它不参与「写入类连续失败」计数，
+    // 重复 / 满了都不是"环境坏了"，停机没有意义。
+    return { text: saved.message, ok: saved.ok, errorKind: saved.ok ? undefined : 'write-failed' };
+  }
+
   // ---- 高危命令：bash_execute（审批 + 策略门控）
   if (tool === 'bash_execute' || tool === 'bash' || tool === 'run_command') {
     if (!toolAllowed(caps, 'bash_execute')) {
@@ -1309,7 +1433,18 @@ function disabledTool(ctx: AgentContext, sessionId: string, caps: AgentCapabilit
 // 消息构建
 // ---------------------------------------------------------------------------
 
-function buildMessages(prompt: string, attachments: SessionSendParams['attachments']): ChatMessage[] {
+/**
+ * 组装首轮消息。
+ *
+ * `system` 由调用方给（缺省仍是 `SYSTEM_PROMPT`）：长期记忆要拼在它尾部，
+ * 而这里若继续硬写常量，记忆就只能靠"每个调用点各自记住"，迟早漏一处
+ * （计划阶段曾经就是这样把提示词整段换掉，连记忆一起换没了）。
+ */
+function buildMessages(
+  prompt: string,
+  attachments: SessionSendParams['attachments'],
+  system: string = SYSTEM_PROMPT
+): ChatMessage[] {
   const parts: string[] = [`用户请求：\n${prompt}`];
   const images: ChatContentPart[] = [];
   for (const a of attachments ?? []) {
@@ -1345,7 +1480,7 @@ function buildMessages(prompt: string, attachments: SessionSendParams['attachmen
   }
   const text = parts.join('\n');
   return [
-    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'system', content: system },
     {
       role: 'user',
       // 没有图片时**保持纯字符串**：改造前后请求体逐字节一致（"加一个能力"不该

@@ -214,6 +214,40 @@ async function main() {
     '带浏览器 Origin 应被拒绝'
   );
 
+  // ---- 2.5 长期记忆的协议面（列表 / 删除 / 清空 + 能力位）
+  //
+  // 只验协议接线：写入路径必须经模型提议 + 用户审批，而冒烟用的是关键字假模型，
+  // 它不会发起 remember —— 那条链路由 realAgent 的单测覆盖。这里保证的是
+  // "扩展能读到列表、能删掉一条、能清空"，且删不存在的 id 不会被当成失败。
+  console.log('[smoke] 长期记忆 RPC…');
+  const connMemory = await openSession(port, {
+    workspaceRoot: tmpDir,
+    client: { name: 'smoke', version: '0.0.0' },
+  });
+  assert(connMemory.init.capabilities.memory === true, '能力声明包含 memory');
+  const emptyMemories = await connMemory.rpc.request('memory.list', {});
+  assert(
+    Array.isArray(emptyMemories.entries) && emptyMemories.entries.length === 0,
+    'memory.list 初始为空'
+  );
+  // 幂等：删一个不存在的 id 返回成功但 deleted=false（与"真的删掉了"区分开）
+  const delMissing = await connMemory.rpc.request('memory.delete', { id: 'mem_not_exist' });
+  assert(
+    delMissing.ok === true && delMissing.deleted === false,
+    'memory.delete 对不存在的 id 返回 deleted=false'
+  );
+  // 缺 id 属于参数错误，不能当成"删了个空"放过去
+  let badDeleteCode = 0;
+  try {
+    await connMemory.rpc.request('memory.delete', {});
+  } catch (e) {
+    badDeleteCode = e.code;
+  }
+  assert(badDeleteCode === -32602, 'memory.delete 缺 id 返回 InvalidParams(-32602)', badDeleteCode);
+  const clearedMemories = await connMemory.rpc.request('memory.clear', {});
+  assert(clearedMemories.ok === true, 'memory.clear 返回 ok');
+  connMemory.ws.close();
+
   // ---- 3. 能力分级：仅允许 read_file（bash_execute 被禁用）
   console.log('[smoke] 能力分级…');
   const connDisabled = await openSession(port, {

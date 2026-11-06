@@ -57,6 +57,13 @@ async function renderScenario(script) {
   // 预览把 webview.js 装进 Node 的全局域运行，所以这些"浏览器给的"名字要一个个搬过来 ——
   // 漏一个的后果不是报错，而是某个功能在预览里静默失效。
   globalThis.FileReader = window.FileReader;
+  // DOM 构造函数也要搬：panelCore 的 $() 用 `$('id', HTMLTextAreaElement)` 这种写法取元素，
+  // 构造函数是浏览器给的全域名，漏一个就是 `HTMLTextAreaElement is not defined` 直接崩在
+  // 第一个场景（P1-10 引入该写法后，预览脚本曾因此整份跑不起来）。
+  globalThis.HTMLElement = window.HTMLElement;
+  globalThis.HTMLInputElement = window.HTMLInputElement;
+  globalThis.HTMLTextAreaElement = window.HTMLTextAreaElement;
+  globalThis.HTMLButtonElement = window.HTMLButtonElement;
   const posted = [];
   // 真实的 acquireVsCodeApi 有 postMessage / getState / setState 三个方法。
   // 预览只需要捕获 postMessage，但另外两个也得给上：少了它们类型对不上，
@@ -609,6 +616,108 @@ const imageDom = await renderScenario(async ({ emit, emitRaw, posted }) => {
   await waitThumbs(1, '第二张图进入暂存区');
 });
 
+// ---- 场景十：长期记忆 —— 「建议记住」审批卡（浅色主题）----
+// 记忆也走审批通道，但语义与命令审批完全不同：正文就是那句话本身（不套 JSON），
+// 按钮只有「不记住 / 记住」—— 记忆没有"同类不再问"的粒度，所以没有第三个按钮。
+// 上面一条已点过「记住」→ 折叠成「已记住」；下面一条保持挂起，展示完整卡片与倒计时。
+const memoryDom = await renderScenario(({ emit, emitRaw }) => {
+  emitRaw({
+    kind: 'init',
+    state: {
+      sessionId: 'sess_preview_memory',
+      connected: true,
+      agent: 'real',
+      model: 'deepseek-flash',
+      history: [],
+    },
+  });
+  emitRaw({ kind: 'session.reset', sessionId: 'sess_preview_memory', reason: 'new' });
+  emit('session.started', { sessionId: 'sess_preview_memory', title: '统一这个仓库的格式化口径' });
+  emit('user.message', { text: '这个仓库一律用 pnpm，别用 npm；缩进 2 空格，不要 tab。' });
+  emit('message.delta', {
+    delta: '好，这两条我记下来。之后写命令一律用 pnpm，缩进也用 2 空格。',
+  });
+  emit('message.done', {});
+
+  emit('approval.request', {
+    approvalId: 'ap_mem_saved',
+    tool: 'remember',
+    // 刻意不给 trustKind：记忆的"记住"永远是一次性的，给了反而会渲染出第三个按钮
+    risk: 'low',
+    input: { text: '本项目用 pnpm，禁用 npm' },
+    expiresAt: Date.now() + EXPIRES,
+  });
+  emit('approval.request', {
+    approvalId: 'ap_mem_pending',
+    tool: 'remember',
+    risk: 'low',
+    input: { text: '缩进用 2 空格，不要 tab' },
+    expiresAt: Date.now() + EXPIRES,
+  });
+
+  // 待办条一次只投影一个挂起项：点掉第一条（折叠成「已记住」），第二条留在挂起态
+  const doc = globalThis.document;
+  const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (
+    doc.querySelectorAll('#pending-actions button')
+  );
+  const btn = [...buttons].find((n) => n.textContent === '记住');
+  if (!btn) throw new Error('[uiPreview] 待办条上没有「记住」按钮');
+  btn.click();
+});
+
+// ---- 场景十一：设置面板里的长期记忆列表（浅色主题）----
+// 列表由 memory.loaded 渲染（真实路径：打开设置面板 → 扩展回传 memory.list 结果）。
+// 空态另有一句专门文案，这里展示有内容的样子 —— 逐条删除与一键清空都在这一块。
+const memoryListDom = await renderScenario(({ emitRaw }) => {
+  emitRaw({
+    kind: 'init',
+    state: {
+      sessionId: 'sess_preview_memory_list',
+      connected: true,
+      agent: 'real',
+      model: 'deepseek-flash',
+      history: [],
+    },
+  });
+  globalThis.document.getElementById('btn-settings').click();
+  emitRaw({
+    kind: 'event',
+    method: 'settings.loaded',
+    params: {
+      config: {
+        baseURL: 'https://api.deepseek.com/v1',
+        model: 'deepseek-flash',
+        preset: 'default',
+        provider: 'auto',
+        maxToolRounds: 8,
+        maxContextTokens: 49152,
+        temperature: null,
+        maxTokens: null,
+      },
+      hasApiKey: true,
+      models: [{ id: 'deepseek-flash', label: 'deepseek-flash（快速 · 1M）', source: 'live' }],
+      modelsHint: '已从 api.deepseek.com 在线更新模型列表（1 个可选）',
+    },
+  });
+  const day = 24 * 60 * 60 * 1000;
+  emitRaw({
+    kind: 'event',
+    method: 'memory.loaded',
+    params: {
+      entries: [
+        { id: 'mem_1', text: '本项目用 pnpm，禁用 npm', createdAt: Date.now() - 3 * day },
+        { id: 'mem_2', text: '缩进用 2 空格，不要 tab', createdAt: Date.now() - day },
+        // 最长的一条：用来目视窄侧栏里长偏好会不会把删除按钮挤出右边界
+        {
+          id: 'mem_3',
+          text: '提交信息用中文，正文要写清"为什么"，不要只复述改了哪几行',
+          createdAt: Date.now(),
+        },
+      ],
+    },
+  });
+});
+
 // ---- 组装预览页 ----
 const esc = (s) => s.replace(/<\/(script)/gi, '<\\/$1');
 
@@ -682,6 +791,14 @@ const preview = `<!DOCTYPE html>
       <figcaption>⑨ 侧边栏 340px · 图片附件：气泡缩略图 + 待发送暂存区（浅色主题）</figcaption>
       <div class="frame narrow"><iframe id="f-narrow-image"></iframe></div>
     </figure>
+    <figure>
+      <figcaption>⑩ 侧边栏 340px · 长期记忆：待确认的「建议记住」+ 已记住（浅色主题）</figcaption>
+      <div class="frame narrow"><iframe id="f-narrow-memory"></iframe></div>
+    </figure>
+    <figure>
+      <figcaption>⑪ 侧边栏 340px · 设置面板：长期记忆列表（逐条删除 / 一键清空）（浅色主题）</figcaption>
+      <div class="frame narrow"><iframe id="f-narrow-memory-list"></iframe></div>
+    </figure>
   </div>
 
 <script type="text/plain" id="panel-css">${esc(PANEL_CSS)}</script>
@@ -695,6 +812,8 @@ const preview = `<!DOCTYPE html>
 <script type="text/plain" id="dom-settings">${esc(settingsDom)}</script>
 <script type="text/plain" id="dom-plan">${esc(planDom)}</script>
 <script type="text/plain" id="dom-image">${esc(imageDom)}</script>
+<script type="text/plain" id="dom-memory">${esc(memoryDom)}</script>
+<script type="text/plain" id="dom-memory-list">${esc(memoryListDom)}</script>
 <script>
   const txt = (id) => document.getElementById(id).textContent;
   const panelCss = txt('panel-css');
@@ -710,6 +829,8 @@ const preview = `<!DOCTYPE html>
   const settings = txt('dom-settings');
   const plan = txt('dom-plan');
   const image = txt('dom-image');
+  const memory = txt('dom-memory');
+  const memoryList = txt('dom-memory-list');
   document.getElementById('f-narrow-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-wide-light').srcdoc = build(conv, 'theme-light');
   document.getElementById('f-narrow-dark').srcdoc = build(empty, 'theme-dark');
@@ -719,6 +840,8 @@ const preview = `<!DOCTYPE html>
   document.getElementById('f-narrow-settings').srcdoc = build(settings, 'theme-light');
   document.getElementById('f-narrow-plan').srcdoc = build(plan, 'theme-light');
   document.getElementById('f-narrow-image').srcdoc = build(image, 'theme-light');
+  document.getElementById('f-narrow-memory').srcdoc = build(memory, 'theme-light');
+  document.getElementById('f-narrow-memory-list').srcdoc = build(memoryList, 'theme-light');
 </script>
 </body>
 </html>
