@@ -89,6 +89,7 @@
 | | `src/daemon/paths.ts` | canonical 路径护栏（realpath + ADS/NUL 拒绝） |
 | | `src/daemon/sandbox.ts` | bwrap / ProcessSandbox 可插拔后端 |
 | | `src/daemon/trust.ts` | 免审批白名单（脱敏 + 高危程序仅 exact） |
+| | `src/daemon/memoryStore.ts` | 长期记忆（跨会话偏好；`remember` 唯一写入通路 + 原子写 + 三处上限） |
 | | `src/daemon/trajectoryStore.ts` | JSONL 轨迹（脱敏 + 缓冲 + 轮转） |
 | | `src/daemon/logFile.ts` | stdout/stderr tee 落盘 |
 | UI | `media/webview.js` (1155 行) | 事件渲染、审批卡、补丁卡、迹线、待办条 |
