@@ -3,7 +3,7 @@
 本项目版本变化遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.9.0] - 2026-11-07
 
 ### 新增
 
@@ -52,9 +52,6 @@
 - **打包体积门槛 320 KB → 340 KB**：长期记忆层把 VSIX 从 315.4 KB 撑到 323.5 KB，直接撞线。
   这条守卫的职责是发现**意外膨胀**（历史上真发生过 214 → 573 KB：sourcemap、本地工作记录、
   内部文档一起混进包），不是给每个新功能设卡 —— 卡得太紧只会被反复调高，反而没人再看它。
-
-### 变更
-
 - **补齐扩展侧最后 5 个无单测模块（P1-17 收口，+79 例）**：`logger` / `contextCapture` /
   `diffProvider` / `wsClient` / `extension` 共 1020 行此前全无单测，全套 792 → **871 例**。
   只加了测试，**没有改任何产品代码**。挑着钉的是"出错时表现为卡住或不吭声"的那几处：
